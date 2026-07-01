@@ -2,13 +2,21 @@ import Link from "next/link";
 
 export default function NavBar() {
   return (
-    <nav className="flex items-center gap-6 border-b border-slate-800 bg-slate-900 px-6 py-4 text-slate-100">
-      <span className="font-semibold tracking-tight text-white">🔒 PrivateCall</span>
-      <div className="flex gap-4 text-sm">
-        <Link href="/" className="text-slate-300 transition hover:text-white">
+    <nav className="flex items-center justify-between gap-4 border-b-4 border-slate-900 bg-violet-500 px-6 py-4">
+      <Link href="/" className="text-lg font-extrabold tracking-tight text-white">
+        🤫 Cone of Silence
+      </Link>
+      <div className="flex gap-2 text-sm font-bold">
+        <Link
+          href="/"
+          className="rounded-full border-2 border-slate-900 bg-white px-3 py-1 text-slate-900 shadow-[2px_2px_0_0_#0f172a] transition hover:-translate-y-0.5"
+        >
           Lobby
         </Link>
-        <Link href="/brainstorm" className="text-slate-300 transition hover:text-white">
+        <Link
+          href="/brainstorm"
+          className="rounded-full border-2 border-slate-900 bg-teal-300 px-3 py-1 text-slate-900 shadow-[2px_2px_0_0_#0f172a] transition hover:-translate-y-0.5"
+        >
           Brainstorm
         </Link>
       </div>

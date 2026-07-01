@@ -26,9 +26,11 @@ export default function BrainstormPage() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-white">Final project brainstorm</h1>
-        <p className="mt-1 text-slate-400">
-          Everything I want in the encrypted video app. Click an idea for details.
+        <h1 className="text-3xl font-extrabold text-slate-900">
+          💡 Final project brainstorm
+        </h1>
+        <p className="mt-2 text-slate-600">
+          Everything I want in the Cone of Silence app. Click an idea for details.
         </p>
       </header>
 
@@ -38,10 +40,10 @@ export default function BrainstormPage() {
             key={f.value}
             type="button"
             onClick={() => setFilter(f.value)}
-            className={`rounded-full px-3 py-1 text-sm font-semibold transition ${
+            className={`rounded-full border-2 border-slate-900 px-4 py-1.5 text-sm font-bold shadow-[2px_2px_0_0_#0f172a] transition hover:-translate-y-0.5 ${
               filter === f.value
-                ? "bg-emerald-500 text-slate-950"
-                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                ? "bg-violet-500 text-white"
+                : "bg-white text-slate-900"
             }`}
           >
             {f.label}

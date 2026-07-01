@@ -10,18 +10,18 @@ interface IdeaCardProps {
 
 export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
   return (
-    <li className="rounded-lg border border-slate-800 bg-slate-900">
+    <li className="overflow-hidden rounded-2xl border-4 border-slate-900 bg-white shadow-[4px_4px_0_0_#0f172a]">
       <button
         type="button"
         onClick={() => onSelect(idea.id)}
-        className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left"
+        className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-amber-50"
       >
-        <span className="font-medium text-white">{idea.title}</span>
+        <span className="font-extrabold text-slate-900">{idea.title}</span>
         <span
-          className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
+          className={`shrink-0 rounded-full border-2 border-slate-900 px-2 py-0.5 text-xs font-bold ${
             idea.priority === "must-have"
-              ? "bg-emerald-500/20 text-emerald-300"
-              : "bg-amber-500/20 text-amber-300"
+              ? "bg-teal-300 text-slate-900"
+              : "bg-orange-300 text-slate-900"
           }`}
         >
           {idea.priority === "must-have" ? "Must-have" : "Stretch"}
@@ -29,7 +29,7 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
       </button>
 
       {expanded && (
-        <p className="border-t border-slate-800 px-4 py-3 text-sm text-slate-300">
+        <p className="border-t-4 border-slate-900 bg-violet-50 px-4 py-3 text-sm font-medium text-slate-700">
           {idea.notes}
         </p>
       )}

@@ -11,8 +11,10 @@ export default function LobbyPage() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-white">Start a private call</h1>
-        <p className="mt-1 text-slate-400">
+        <h1 className="text-3xl font-extrabold text-slate-900">
+          🤫 Duck into the Cone of Silence
+        </h1>
+        <p className="mt-2 text-slate-600">
           Nothing is stored. No history, no room list — just you and whoever you invite.
         </p>
       </header>

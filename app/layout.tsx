@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PrivateCall — Final Project Preview",
+  title: "Cone of Silence — Final Project Preview",
   description: "A two-page preview of my encrypted video-calling final project.",
 };
 
@@ -28,7 +28,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col bg-slate-950 text-slate-100">
+      <body className="flex min-h-full flex-col bg-amber-50 text-slate-900">
         <NavBar />
         <main className="mx-auto w-full max-w-3xl px-6 py-10">{children}</main>
       </body>
