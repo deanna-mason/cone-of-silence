@@ -1,36 +1,63 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🕵️ Cone of Silence
 
-## Getting Started
+A two-page Next.js app styled like a 1960s spy title sequence. It previews my
+final-project idea — a private, end-to-end encrypted video-calling app — through a
+mock **Lobby** and a **Mission Dossier** that lays out the features I want to build.
 
-First, run the development server:
+**Live site:** https://cone-of-silence.vercel.app/
+**Repository:** https://github.com/deanna-mason/cone-of-silence
+
+Built for Assignment 1 to demonstrate components, props, state, list rendering,
+conditional rendering, file-based routing, and deployment.
+
+## Pages
+
+- **`/` — Lobby:** a mock pre-call screen with a room-code field, a "Signal
+  Scrambler" encryption toggle (show/hide explainer), and an "Initiate Contact"
+  button that routes to the dossier.
+- **`/brainstorm` — Mission Dossier:** the real feature plan as a redacted case
+  file. Filter by All / Priority / Optional and tap any file to "declassify" its
+  notes.
+
+## Requirements demonstrated
+
+| Requirement | Where |
+| --- | --- |
+| ≥ 3 components | `NavBar`, `RoomControls`, `EncryptionToggle`, `IdeaCard` |
+| `useState` | Lobby (`roomCode`, `encryptionOn`), Dossier (`expandedId`, `filter`) |
+| Passing props | every child component |
+| Event-handler prop | `onToggle`, `onRoomCodeChange`, `onSelect` |
+| List rendering with `.map()` + `key` | dossier ideas + filter tabs |
+| Conditional rendering from state | encryption panel, declassified notes, filters |
+| ≥ 2 pages via file-based routing | `/` and `/brainstorm` |
+| `next/link` navigation | `NavBar` + "Initiate Contact" button |
+
+## Tech stack
+
+- [Next.js](https://nextjs.org) (App Router) + TypeScript
+- [Tailwind CSS](https://tailwindcss.com)
+- Fonts: Bebas Neue, Special Elite, Spectral (via `next/font`)
+- Deployed on [Vercel](https://vercel.com) — every push to `main` auto-redeploys
+
+## Run locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+app/
+  layout.tsx          # shared shell + NavBar + fonts
+  page.tsx            # "/"           Lobby
+  brainstorm/page.tsx # "/brainstorm" Mission Dossier
+  globals.css         # theme, film grain, stamps, animations
+components/
+  NavBar.tsx  RoomControls.tsx  EncryptionToggle.tsx  IdeaCard.tsx
+lib/
+  data.ts             # typed brainstorm data
+```
