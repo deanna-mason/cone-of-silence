@@ -7,30 +7,37 @@ interface EncryptionToggleProps {
 
 export default function EncryptionToggle({ enabled, onToggle }: EncryptionToggleProps) {
   return (
-    <div className="rounded-2xl border-4 border-slate-900 bg-white p-5 shadow-[6px_6px_0_0_#0f172a]">
+    <section className="hairline border bg-panel/60 p-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="font-extrabold text-slate-900">🔐 Extra secret encryption</p>
-          <p className="text-sm text-slate-500">Optional super-private layer on top of the call.</p>
+          <p className="font-display text-2xl tracking-[0.06em] text-paper">
+            Signal Scrambler
+          </p>
+          <p className="mt-1 font-body text-sm italic text-paper-dim">
+            An extra cipher layer. Only you hold the keys.
+          </p>
         </div>
         <button
           type="button"
           onClick={onToggle}
           aria-pressed={enabled}
-          className={`rounded-full border-2 border-slate-900 px-5 py-1.5 text-sm font-extrabold shadow-[2px_2px_0_0_#0f172a] transition hover:-translate-y-0.5 ${
-            enabled ? "bg-teal-300 text-slate-900" : "bg-slate-100 text-slate-500"
+          className={`stamp shrink-0 rotate-[-4deg] transition ${
+            enabled
+              ? "bg-spyteal/15 text-spyteal"
+              : "text-paper-dim"
           }`}
         >
-          {enabled ? "ON" : "OFF"}
+          {enabled ? "Engaged" : "Standby"}
         </button>
       </div>
 
       {enabled && (
-        <p className="mt-4 rounded-xl border-2 border-teal-500 bg-teal-50 p-3 text-sm font-medium text-teal-800">
-          🤐 Keys are generated on your device and shared only with the other person.
-          The server never sees your keys or your content.
+        <p className="mt-5 border-l-2 border-spyteal bg-noir/50 py-3 pl-4 font-type text-sm leading-relaxed text-paper-dim">
+          &gt; Keys generated on your device. Shared only with the other agent.
+          <br />
+          &gt; The Bureau&apos;s servers never see your keys or your words.
         </p>
       )}
-    </div>
+    </section>
   );
 }

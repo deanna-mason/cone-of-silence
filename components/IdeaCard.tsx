@@ -9,29 +9,48 @@ interface IdeaCardProps {
 }
 
 export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
+  const isPriority = idea.priority === "must-have";
+
   return (
-    <li className="overflow-hidden rounded-2xl border-4 border-slate-900 bg-white shadow-[4px_4px_0_0_#0f172a]">
+    <li className="hairline border bg-panel/60">
       <button
         type="button"
         onClick={() => onSelect(idea.id)}
-        className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-amber-50"
+        className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-panel"
       >
-        <span className="font-extrabold text-slate-900">{idea.title}</span>
-        <span
-          className={`shrink-0 rounded-full border-2 border-slate-900 px-2 py-0.5 text-xs font-bold ${
-            idea.priority === "must-have"
-              ? "bg-teal-300 text-slate-900"
-              : "bg-orange-300 text-slate-900"
-          }`}
-        >
-          {idea.priority === "must-have" ? "Must-have" : "Stretch"}
+        <span>
+          <span className="kicker block text-brass">{idea.category}</span>
+          <span className="mt-1 block font-display text-2xl leading-tight tracking-[0.03em] text-paper">
+            {idea.title}
+          </span>
+        </span>
+        <span className="flex shrink-0 items-center gap-3">
+          <span
+            className={`stamp rotate-[-3deg] text-[0.6rem] ${
+              isPriority ? "text-vermilion" : "text-brass"
+            }`}
+          >
+            {isPriority ? "Priority" : "Optional"}
+          </span>
+          <span
+            className={`font-body text-xl text-paper-dim transition-transform ${
+              expanded ? "rotate-45" : ""
+            }`}
+            aria-hidden
+          >
+            +
+          </span>
         </span>
       </button>
 
+      {/* Declassified document insert — aged cream paper */}
       {expanded && (
-        <p className="border-t-4 border-slate-900 bg-violet-50 px-4 py-3 text-sm font-medium text-slate-700">
-          {idea.notes}
-        </p>
+        <div className="mx-4 mb-4 border border-paper/20 bg-paper px-5 py-4 text-ink shadow-[0_8px_24px_-10px_rgba(0,0,0,0.8)]">
+          <p className="kicker mb-2 text-vermilion">Declassified</p>
+          <p className="font-body text-[0.95rem] leading-relaxed text-ink/80">
+            {idea.notes}
+          </p>
+        </div>
       )}
     </li>
   );

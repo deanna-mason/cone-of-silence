@@ -9,37 +9,46 @@ interface RoomControlsProps {
 
 export default function RoomControls({ roomCode, onRoomCodeChange }: RoomControlsProps) {
   return (
-    <div className="rounded-2xl border-4 border-slate-900 bg-white p-5 shadow-[6px_6px_0_0_#0f172a]">
-      <label htmlFor="roomCode" className="block text-sm font-bold text-slate-900">
-        Room code
+    <section className="hairline border bg-panel/60 p-6">
+      <div className="flex items-center justify-between">
+        <p className="kicker text-brass">Briefing Panel</p>
+        <p className="kicker text-paper-dim">File CS-000</p>
+      </div>
+
+      <label htmlFor="roomCode" className="kicker mt-5 block text-paper-dim">
+        Room Cipher
       </label>
       <input
         id="roomCode"
         value={roomCode}
         onChange={(e) => onRoomCodeChange(e.target.value)}
-        placeholder="e.g. quiet-otter-42"
-        className="mt-1 w-full rounded-xl border-2 border-slate-900 bg-amber-50 px-3 py-2 text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-300"
+        placeholder="quiet-otter-42"
+        className="mt-2 w-full border-b-2 border-paper-dim/40 bg-transparent pb-2 font-type text-xl tracking-widest text-paper placeholder-paper-dim/40 focus:border-brass focus:outline-none"
       />
 
-      <div className="mt-5 rounded-xl border-2 border-dashed border-violet-400 bg-violet-50 p-4 text-center">
-        <p className="text-sm font-bold text-violet-700">
-          👇 This is a mockup — click here to see my project brainstorm!
-        </p>
+      {/* Primary action — unmistakable */}
+      <div className="mt-8 border border-dashed border-vermilion/50 p-5">
+        <p className="kicker text-vermilion">▼ Mockup — begin here</p>
         <Link
           href="/brainstorm"
-          className="mt-3 inline-flex items-center gap-2 rounded-xl border-4 border-slate-900 bg-orange-400 px-8 py-4 text-xl font-extrabold text-slate-900 shadow-[6px_6px_0_0_#0f172a] transition hover:-translate-y-1 hover:bg-orange-300 active:translate-y-0 active:shadow-[3px_3px_0_0_#0f172a]"
+          className="cta-glow group mt-3 flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-paper transition hover:bg-vermilion-bright"
         >
-          Create room
-          <span className="inline-block animate-bounce">👉</span>
+          <span>Initiate Contact</span>
+          <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
+            ➔
+          </span>
         </Link>
+        <p className="mt-3 font-body text-sm italic text-paper-dim">
+          Opens the mission dossier — the plan for the full app.
+        </p>
       </div>
 
       <button
         type="button"
-        className="mt-4 w-full rounded-xl border-2 border-slate-900 bg-white px-4 py-2 text-sm font-bold text-slate-500 transition hover:bg-slate-50"
+        className="kicker mt-5 w-full border border-paper-dim/30 py-3 text-paper-dim transition hover:border-brass hover:text-brass"
       >
-        Join existing room
+        Access Existing Channel
       </button>
-    </div>
+    </section>
   );
 }

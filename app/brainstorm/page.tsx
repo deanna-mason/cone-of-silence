@@ -7,9 +7,9 @@ import IdeaCard from "@/components/IdeaCard";
 type Filter = "all" | Priority;
 
 const FILTERS: { value: Filter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "must-have", label: "Must-have" },
-  { value: "stretch", label: "Stretch" },
+  { value: "all", label: "All Files" },
+  { value: "must-have", label: "Priority" },
+  { value: "stretch", label: "Optional" },
 ];
 
 export default function BrainstormPage() {
@@ -24,26 +24,32 @@ export default function BrainstormPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-3xl font-extrabold text-slate-900">
-          💡 Final project brainstorm
+    <div className="space-y-8">
+      <header className="hairline border-b pb-6">
+        <div className="flex items-center justify-between">
+          <p className="kicker text-brass">File No. CS-001</p>
+          <span className="stamp rotate-[3deg] text-vermilion">Classified</span>
+        </div>
+        <h1 className="mt-3 font-display text-6xl leading-[0.9] tracking-[0.04em] text-paper">
+          Mission Dossier
         </h1>
-        <p className="mt-2 text-slate-600">
-          Everything I want in the Cone of Silence app. Click an idea for details.
+        <p className="mt-3 max-w-lg font-body text-lg italic text-paper-dim">
+          Every capability the Cone of Silence must deliver. Tap a file to declassify
+          the details.
         </p>
       </header>
 
-      <div className="flex gap-2">
+      {/* Filter tabs */}
+      <div className="flex flex-wrap gap-3">
         {FILTERS.map((f) => (
           <button
             key={f.value}
             type="button"
             onClick={() => setFilter(f.value)}
-            className={`rounded-full border-2 border-slate-900 px-4 py-1.5 text-sm font-bold shadow-[2px_2px_0_0_#0f172a] transition hover:-translate-y-0.5 ${
+            className={`stamp transition ${
               filter === f.value
-                ? "bg-violet-500 text-white"
-                : "bg-white text-slate-900"
+                ? "bg-vermilion text-paper"
+                : "text-paper-dim hover:text-brass"
             }`}
           >
             {f.label}
@@ -51,7 +57,7 @@ export default function BrainstormPage() {
         ))}
       </div>
 
-      <ul className="space-y-3">
+      <ul className="space-y-4">
         {visibleIdeas.map((idea) => (
           <IdeaCard
             key={idea.id}
