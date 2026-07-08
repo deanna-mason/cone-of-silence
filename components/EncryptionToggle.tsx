@@ -7,13 +7,13 @@ interface EncryptionToggleProps {
 
 export default function EncryptionToggle({ enabled, onToggle }: EncryptionToggleProps) {
   return (
-    <section className="hairline border bg-panel/60 p-6">
+    <section className="hairline border bg-inset p-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="font-display text-2xl tracking-[0.06em] text-paper">
+          <p className="font-display text-2xl tracking-[0.06em] text-ink">
             Signal Scrambler
           </p>
-          <p className="mt-1 font-body text-sm italic text-paper-dim">
+          <p className="mt-1 font-body text-sm italic text-ink-soft">
             An extra cipher layer. Only you hold the keys.
           </p>
         </div>
@@ -24,7 +24,7 @@ export default function EncryptionToggle({ enabled, onToggle }: EncryptionToggle
           className={`stamp shrink-0 rotate-[-4deg] transition ${
             enabled
               ? "bg-spyteal/15 text-spyteal"
-              : "text-paper-dim"
+              : "text-ink-soft"
           }`}
         >
           {enabled ? "Engaged" : "Standby"}
@@ -32,7 +32,7 @@ export default function EncryptionToggle({ enabled, onToggle }: EncryptionToggle
       </div>
 
       {enabled && (
-        <p className="mt-5 border-l-2 border-spyteal bg-noir/50 py-3 pl-4 font-type text-sm leading-relaxed text-paper-dim">
+        <p className="mt-5 border-l-2 border-spyteal bg-field-deep py-3 pl-4 font-type text-sm leading-relaxed text-ink-soft">
           &gt; Keys generated on your device. Shared only with the other agent.
           <br />
           &gt; The Bureau&apos;s servers never see your keys or your words.

@@ -29,7 +29,7 @@ export default function LobbyPage() {
           ◈ Secure Channel — Eyes Only
         </p>
         <h1
-          className="rise font-display text-6xl leading-[0.9] tracking-[0.04em] text-paper sm:text-7xl"
+          className="rise font-display text-6xl leading-[0.9] tracking-[0.04em] text-ink sm:text-7xl"
           style={{ animationDelay: "0.15s" }}
         >
           Enter the
@@ -37,7 +37,7 @@ export default function LobbyPage() {
           <span className="text-vermilion">Cone of Silence</span>
         </h1>
         <p
-          className="rise mt-4 max-w-md font-body text-lg leading-relaxed text-paper-dim"
+          className="rise mt-4 max-w-md font-body text-lg leading-relaxed text-ink-soft"
           style={{ animationDelay: "0.28s" }}
         >
           A private line for two. No recordings. No logs. No trace. When the call
