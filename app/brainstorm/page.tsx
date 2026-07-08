@@ -30,10 +30,10 @@ export default function BrainstormPage() {
           <p className="kicker text-brass">File No. CS-001</p>
           <span className="stamp rotate-[3deg] text-vermilion">Classified</span>
         </div>
-        <h1 className="mt-3 font-display text-6xl leading-[0.9] tracking-[0.04em] text-paper">
+        <h1 className="mt-3 font-display text-6xl leading-[0.9] tracking-[0.04em] text-ink">
           Mission Dossier
         </h1>
-        <p className="mt-3 max-w-lg font-body text-lg italic text-paper-dim">
+        <p className="mt-3 max-w-lg font-body text-lg italic text-ink-soft">
           Every capability the Cone of Silence must deliver. Tap a file to declassify
           the details.
         </p>
@@ -48,8 +48,8 @@ export default function BrainstormPage() {
             onClick={() => setFilter(f.value)}
             className={`stamp transition ${
               filter === f.value
-                ? "bg-vermilion text-paper"
-                : "text-paper-dim hover:text-brass"
+                ? "bg-vermilion text-cream"
+                : "text-ink-soft hover:text-brass"
             }`}
           >
             {f.label}
