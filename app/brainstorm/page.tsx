@@ -27,7 +27,7 @@ export default function BrainstormPage() {
     <div className="space-y-8">
       <header className="hairline border-b pb-6">
         <div className="flex items-center justify-between">
-          <p className="kicker text-brass">File No. CS-001</p>
+          <p className="kicker text-sienna">File No. CS-001</p>
           <span className="stamp rotate-[3deg] text-vermilion">Classified</span>
         </div>
         <h1 className="mt-3 font-display text-6xl leading-[0.9] tracking-[0.04em] text-ink">
@@ -49,7 +49,7 @@ export default function BrainstormPage() {
             className={`stamp transition ${
               filter === f.value
                 ? "bg-vermilion text-cream"
-                : "text-ink-soft hover:text-brass"
+                : "text-ink-soft hover:text-vermilion"
             }`}
           >
             {f.label}

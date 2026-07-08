@@ -11,7 +11,7 @@ export default function RoomControls({ roomCode, onRoomCodeChange }: RoomControl
   return (
     <section className="hairline border bg-inset p-6">
       <div className="flex items-center justify-between">
-        <p className="kicker text-brass">Briefing Panel</p>
+        <p className="kicker text-sienna">Briefing Panel</p>
         <p className="kicker text-ink-soft">File CS-000</p>
       </div>
 
@@ -45,7 +45,7 @@ export default function RoomControls({ roomCode, onRoomCodeChange }: RoomControl
 
       <button
         type="button"
-        className="kicker mt-5 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-brass"
+        className="kicker mt-5 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-vermilion"
       >
         Access Existing Channel
       </button>

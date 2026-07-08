@@ -19,7 +19,7 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
         className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-field-deep"
       >
         <span>
-          <span className="kicker block text-brass">{idea.category}</span>
+          <span className="kicker block text-sienna">{idea.category}</span>
           <span className="mt-1 block font-display text-2xl leading-tight tracking-[0.03em] text-ink">
             {idea.title}
           </span>

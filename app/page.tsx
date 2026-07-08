@@ -25,7 +25,7 @@ export default function LobbyPage() {
           <line x1="0" y1="100" x2="200" y2="100" stroke="currentColor" strokeWidth="1" />
         </svg>
 
-        <p className="kicker rise text-brass" style={{ animationDelay: "0.05s" }}>
+        <p className="kicker rise text-sienna" style={{ animationDelay: "0.05s" }}>
           ◈ Secure Channel — Eyes Only
         </p>
         <h1
