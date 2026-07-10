@@ -65,7 +65,7 @@ export default function RoomPage() {
     const fromHash = parseRoomHash(window.location.hash);
     if (fromHash) {
       stashRoomKeys(fromHash);
-      window.history.replaceState(null, "", window.location.pathname);
+      router.replace(window.location.pathname, { scroll: false });
       setKeys(fromHash);
       setStage("green-room");
       return;
@@ -77,7 +77,7 @@ export default function RoomPage() {
     } else {
       setStage("no-channel");
     }
-  }, []);
+  }, [router]);
 
   // Acquire media when entering the green room (kept across green-room ⇄ in-room).
   useEffect(() => {
