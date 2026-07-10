@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Bebas_Neue, Special_Elite, Spectral } from "next/font/google";
 import "./globals.css";
 import NavBar from "@/components/NavBar";
@@ -26,6 +26,13 @@ export const metadata: Metadata = {
   description: "A private, encrypted line for two. Nothing recorded, nothing remembered.",
 };
 
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#e7d9bb" },
+    { media: "(prefers-color-scheme: dark)", color: "#14110f" },
+  ],
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -39,7 +46,7 @@ export default function RootLayout({
       <body className="flex min-h-full flex-col">
         <NavBar />
         <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-12">{children}</main>
-        <footer className="kicker mx-auto w-full max-w-3xl px-6 py-8 text-paper-dim">
+        <footer className="kicker mx-auto w-full max-w-3xl px-6 py-8 text-ink-soft">
           <span className="hairline border-t pt-3 block">
             Cone of Silence · Property of the Bureau · Destroy after reading
           </span>

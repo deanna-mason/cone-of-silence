@@ -12,15 +12,15 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
   const isPriority = idea.priority === "must-have";
 
   return (
-    <li className="hairline border bg-panel/60">
+    <li className="hairline border bg-inset">
       <button
         type="button"
         onClick={() => onSelect(idea.id)}
-        className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-panel"
+        className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-field-deep"
       >
         <span>
-          <span className="kicker block text-brass">{idea.category}</span>
-          <span className="mt-1 block font-display text-2xl leading-tight tracking-[0.03em] text-paper">
+          <span className="kicker block text-sienna">{idea.category}</span>
+          <span className="mt-1 block font-display text-2xl leading-tight tracking-[0.03em] text-ink">
             {idea.title}
           </span>
         </span>
@@ -33,7 +33,7 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
             {isPriority ? "Priority" : "Optional"}
           </span>
           <span
-            className={`font-body text-xl text-paper-dim transition-transform ${
+            className={`font-body text-xl text-ink-soft transition-transform ${
               expanded ? "rotate-45" : ""
             }`}
             aria-hidden
@@ -45,9 +45,9 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
 
       {/* Declassified document insert — aged cream paper */}
       {expanded && (
-        <div className="mx-4 mb-4 border border-paper/20 bg-paper px-5 py-4 text-ink shadow-[0_8px_24px_-10px_rgba(0,0,0,0.8)]">
-          <p className="kicker mb-2 text-vermilion">Declassified</p>
-          <p className="font-body text-[0.95rem] leading-relaxed text-ink/80">
+        <div className="mx-4 mb-4 border border-reveal/30 bg-reveal px-5 py-4 text-cream shadow-[0_8px_24px_-10px_rgba(23,19,15,0.5)]">
+          <p className="kicker mb-2 text-vermilion-bright">Declassified</p>
+          <p className="font-body text-[0.95rem] leading-relaxed text-cream/85">
             {idea.notes}
           </p>
         </div>
