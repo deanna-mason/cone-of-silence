@@ -53,6 +53,8 @@ export default function RoomPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const [devices, setDevices] = useState<DeviceLists>({ mics: [], cameras: [] });
   const [choice, setChoice] = useState<MediaDeviceChoice>({});
+  const choiceRef = useRef<MediaDeviceChoice>({});
+  const switchGen = useRef(0);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -82,6 +84,7 @@ export default function RoomPage() {
     if (stage !== "green-room" || streamRef.current) return;
     let cancelled = false;
     const stored = readStashedDeviceChoice();
+    choiceRef.current = stored;
     setChoice(stored);
     (async () => {
       try {
@@ -116,10 +119,12 @@ export default function RoomPage() {
   }, []);
 
   async function switchDevice(kind: "audio" | "video", deviceId: string) {
+    const gen = ++switchGen.current;
     const next: MediaDeviceChoice = {
-      ...choice,
+      ...choiceRef.current,
       [kind === "audio" ? "audioDeviceId" : "videoDeviceId"]: deviceId,
     };
+    choiceRef.current = next;
     setChoice(next);
     stashDeviceChoice(next);
     stopStream(streamRef.current);
@@ -127,11 +132,17 @@ export default function RoomPage() {
     setStream(null);
     try {
       const s = await getLocalStream(next);
+      if (switchGen.current !== gen) {
+        // a newer switch superseded this one — don't leak its stream
+        stopStream(s);
+        return;
+      }
       streamRef.current = s;
       setStream(s);
       setMicOn(true);
       setCamOn(s.getVideoTracks().length > 0);
     } catch (err) {
+      if (switchGen.current !== gen) return;
       setFailure(err instanceof MediaError ? err.reason : "unavailable");
       setStage("permission-error");
     }
