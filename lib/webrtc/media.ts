@@ -51,18 +51,26 @@ function toMediaError(err: unknown): MediaError {
   return new MediaError("unavailable", "Camera/microphone could not be started.");
 }
 
-/** Acquire the local stream. If the camera is missing, falls back to mic-only. */
+/**
+ * Acquire the local stream, degrading gracefully:
+ * exact requested devices → default devices → mic-only → MediaError.
+ * Covers stale stashed device IDs (unplugged gear) and machines with no camera.
+ */
 export async function getLocalStream(choice: MediaDeviceChoice = {}): Promise<MediaStream> {
-  const constraints = toConstraints(choice);
   try {
-    return await navigator.mediaDevices.getUserMedia(constraints);
+    return await navigator.mediaDevices.getUserMedia(toConstraints(choice));
   } catch (err) {
     if (!isMissingDevice(err)) throw toMediaError(err);
-    try {
-      return await navigator.mediaDevices.getUserMedia({ audio: constraints.audio, video: false });
-    } catch (audioErr) {
-      throw toMediaError(audioErr);
-    }
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+  } catch (err) {
+    if (!isMissingDevice(err)) throw toMediaError(err);
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (err) {
+    throw toMediaError(err);
   }
 }
 
