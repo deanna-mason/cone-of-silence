@@ -1,16 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { buildRoomHash, createRoomKeys, parseInviteLink } from "@/lib/roomLink";
 
 export default function RoomControls() {
-  const router = useRouter();
   const [invite, setInvite] = useState("");
   const [rejected, setRejected] = useState(false);
 
   function initiateContact() {
-    router.push(`/room${buildRoomHash(createRoomKeys())}`);
+    window.location.assign(`/room${buildRoomHash(createRoomKeys())}`);
   }
 
   function accessChannel() {
@@ -19,7 +17,7 @@ export default function RoomControls() {
       setRejected(true);
       return;
     }
-    router.push(`/room${buildRoomHash(keys)}`);
+    window.location.assign(`/room${buildRoomHash(keys)}`);
   }
 
   return (

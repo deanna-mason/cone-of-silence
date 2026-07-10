@@ -60,12 +60,12 @@ export default function RoomPage() {
   const [copied, setCopied] = useState(false);
 
   // Arrival: read the fragment once, stash it, and strip it from the URL bar
-  // so the secret never lingers in history. Refresh recovers from the stash.
+  // via replaceState so the secret never lingers in history. Refresh recovers from the stash.
   useEffect(() => {
     const fromHash = parseRoomHash(window.location.hash);
     if (fromHash) {
       stashRoomKeys(fromHash);
-      router.replace(window.location.pathname, { scroll: false });
+      window.history.replaceState(null, "", window.location.pathname);
       setKeys(fromHash);
       setStage("green-room");
       return;
@@ -77,7 +77,7 @@ export default function RoomPage() {
     } else {
       setStage("no-channel");
     }
-  }, [router]);
+  }, []);
 
   // Acquire media when entering the green room (kept across green-room ⇄ in-room).
   useEffect(() => {
