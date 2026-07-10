@@ -5,7 +5,6 @@ import RoomControls from "@/components/RoomControls";
 import EncryptionToggle from "@/components/EncryptionToggle";
 
 export default function LobbyPage() {
-  const [roomCode, setRoomCode] = useState("");
   const [encryptionOn, setEncryptionOn] = useState(false);
 
   return (
@@ -46,7 +45,7 @@ export default function LobbyPage() {
       </header>
 
       <div className="rise space-y-6" style={{ animationDelay: "0.4s" }}>
-        <RoomControls roomCode={roomCode} onRoomCodeChange={setRoomCode} />
+        <RoomControls />
         <EncryptionToggle enabled={encryptionOn} onToggle={() => setEncryptionOn((v) => !v)} />
       </div>
     </div>

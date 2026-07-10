@@ -1,51 +1,75 @@
 "use client";
 
-import Link from "next/link";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { buildRoomHash, createRoomKeys, parseInviteLink } from "@/lib/roomLink";
 
-interface RoomControlsProps {
-  roomCode: string;
-  onRoomCodeChange: (value: string) => void;
-}
+export default function RoomControls() {
+  const router = useRouter();
+  const [invite, setInvite] = useState("");
+  const [rejected, setRejected] = useState(false);
 
-export default function RoomControls({ roomCode, onRoomCodeChange }: RoomControlsProps) {
+  function initiateContact() {
+    router.push(`/room${buildRoomHash(createRoomKeys())}`);
+  }
+
+  function accessChannel() {
+    const keys = parseInviteLink(invite);
+    if (!keys) {
+      setRejected(true);
+      return;
+    }
+    router.push(`/room${buildRoomHash(keys)}`);
+  }
+
   return (
     <section className="hairline border bg-inset p-6">
       <div className="flex items-center justify-between">
         <p className="kicker text-sienna">Briefing Panel</p>
-        <p className="kicker text-ink-soft">File CS-000</p>
+        <p className="kicker text-ink-soft">File CS-001</p>
       </div>
 
-      <label htmlFor="roomCode" className="kicker mt-5 block text-ink-soft">
-        Room Cipher
-      </label>
-      <input
-        id="roomCode"
-        value={roomCode}
-        onChange={(e) => onRoomCodeChange(e.target.value)}
-        placeholder="quiet-otter-42"
-        className="mt-2 w-full border-b-2 border-ink-faint/40 bg-transparent pb-2 font-type text-xl tracking-widest text-ink placeholder-ink-faint/40 focus:border-brass focus:outline-none"
-      />
-
-      {/* Primary action — unmistakable */}
-      <div className="mt-8 border border-dashed border-vermilion/50 p-5">
-        <p className="kicker text-vermilion">▼ Mockup — begin here</p>
-        <Link
-          href="/brainstorm"
-          className="cta-glow group mt-3 flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright"
-        >
-          <span>Initiate Contact</span>
-          <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
-            ➔
-          </span>
-        </Link>
-        <p className="mt-3 font-body text-sm italic text-ink-soft">
-          Opens the mission dossier — the plan for the full app.
-        </p>
-      </div>
-
+      {/* Primary action — creates a real room */}
       <button
         type="button"
-        className="kicker mt-5 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
+        onClick={initiateContact}
+        className="cta-glow group mt-6 flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright"
+      >
+        <span>Initiate Contact</span>
+        <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
+          ➔
+        </span>
+      </button>
+      <p className="mt-3 font-body text-sm italic text-ink-soft">
+        Opens a fresh channel and hands you the only key — share the invite link with your
+        contacts.
+      </p>
+
+      <label htmlFor="invite" className="kicker mt-8 block text-ink-soft">
+        Received an invite?
+      </label>
+      <input
+        id="invite"
+        value={invite}
+        onChange={(e) => {
+          setInvite(e.target.value);
+          setRejected(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") accessChannel();
+        }}
+        placeholder="https://…/room#r=…&s=…"
+        className="mt-2 w-full border-b-2 border-ink-faint/40 bg-transparent pb-2 font-type text-base tracking-wide text-ink placeholder-ink-faint/40 focus:border-brass focus:outline-none"
+      />
+      {rejected && (
+        <p role="alert" className="kicker mt-2 text-vermilion">
+          ✕ This document is not one of ours — paste the full invite link.
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={accessChannel}
+        className="kicker mt-4 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
       >
         Access Existing Channel
       </button>
