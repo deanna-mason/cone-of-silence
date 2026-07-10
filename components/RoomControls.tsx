@@ -45,7 +45,7 @@ export default function RoomControls({ roomCode, onRoomCodeChange }: RoomControl
 
       <button
         type="button"
-        className="kicker mt-5 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-vermilion"
+        className="kicker mt-5 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
       >
         Access Existing Channel
       </button>

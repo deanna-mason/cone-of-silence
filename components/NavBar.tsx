@@ -16,14 +16,14 @@ export default function NavBar() {
         <div className="flex items-center gap-5 text-ink-soft">
           <Link
             href="/"
-            className="kicker transition hover:text-vermilion"
+            className="kicker transition hover:text-signal"
           >
             Lobby
           </Link>
           <span className="text-brass/40">/</span>
           <Link
             href="/brainstorm"
-            className="kicker transition hover:text-vermilion"
+            className="kicker transition hover:text-signal"
           >
             Dossier
           </Link>

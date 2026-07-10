@@ -49,7 +49,7 @@ export default function BrainstormPage() {
             className={`stamp transition ${
               filter === f.value
                 ? "bg-vermilion text-cream"
-                : "text-ink-soft hover:text-vermilion"
+                : "text-ink-soft hover:text-signal"
             }`}
           >
             {f.label}
