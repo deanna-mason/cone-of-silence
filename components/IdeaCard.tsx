@@ -45,7 +45,7 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
 
       {/* Declassified document insert — aged cream paper */}
       {expanded && (
-        <div className="mx-4 mb-4 border border-ink/30 bg-ink px-5 py-4 text-cream shadow-[0_8px_24px_-10px_rgba(23,19,15,0.5)]">
+        <div className="mx-4 mb-4 border border-reveal/30 bg-reveal px-5 py-4 text-cream shadow-[0_8px_24px_-10px_rgba(23,19,15,0.5)]">
           <p className="kicker mb-2 text-vermilion-bright">Declassified</p>
           <p className="font-body text-[0.95rem] leading-relaxed text-cream/85">
             {idea.notes}
