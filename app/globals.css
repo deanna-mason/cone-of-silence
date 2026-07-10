@@ -1,19 +1,72 @@
 @import "tailwindcss";
 
-@theme inline {
+/*
+ * Semantic palette. Light (aged-dossier paper) is the default; the
+ * prefers-color-scheme block below resurrects the original spy-noir
+ * palette as night ops. Components consume --color-* utilities only.
+ */
+:root {
+  color-scheme: light dark;
+
   /* Aged-dossier palette (light) */
-  --color-field: #e7d9bb;       /* dominant page background — aged manila */
-  --color-field-deep: #dccba7;  /* dim paper, secondary panels */
-  --color-inset: #f3e9d0;       /* raised paper — inputs, cards */
-  --color-ink: #17130f;         /* primary text */
-  --color-ink-soft: #4a3f2c;    /* secondary text */
-  --color-ink-faint: #6b5c3d;   /* placeholders / meta / hairlines-on-paper */
-  --color-cream: #f5ecd4;       /* text ON vermilion / dark accents */
-  --color-sienna: #9a5a1f;      /* typewriter kickers / labels */
-  --color-vermilion: #d7391f;
-  --color-vermilion-bright: #f0492c;
-  --color-brass: #c79a3b;
-  --color-spyteal: #4a8c86;
+  --field: #e7d9bb;       /* dominant page background — aged manila */
+  --field-deep: #dccba7;  /* dim paper, secondary panels */
+  --inset: #f3e9d0;       /* raised paper — inputs, cards */
+  --ink: #17130f;         /* primary text */
+  --ink-soft: #4a3f2c;    /* secondary text */
+  --ink-faint: #6b5c3d;   /* placeholders / meta / hairlines-on-paper */
+  --cream: #f5ecd4;       /* text ON vermilion / dark accents */
+  --sienna: #9a5a1f;      /* typewriter kickers / labels — brass at night */
+  --signal: #d7391f;      /* interactive hover accent — brass at night */
+  --vermilion: #d7391f;
+  --vermilion-bright: #f0492c;
+  --brass: #c79a3b;
+  --spyteal: #4a8c86;
+
+  /* Mode-dependent atmosphere */
+  --atmosphere: radial-gradient(ellipse 90% 60% at 50% -15%, rgba(199, 154, 59, 0.20), transparent 55%);
+  --grain-blend: multiply;
+  --grain-opacity: 0.06;
+  --hairline-color: color-mix(in srgb, #c79a3b 55%, transparent);
+  --cta-glow-shadow: 0 0 0 1px rgba(215, 57, 31, 0.30), 0 10px 30px -14px rgba(215, 57, 31, 0.55);
+}
+
+/* Night ops: the original spy-noir palette (see the dark-mode spec) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --field: #14110f;
+    --field-deep: #0c0a09;
+    --inset: #1c1815;
+    --ink: #ece1c9;
+    --ink-soft: #a99d81;
+    --ink-faint: #8f8265;
+    --sienna: #c79a3b;
+    --signal: #c79a3b;
+
+    --atmosphere:
+      radial-gradient(ellipse 90% 60% at 50% -15%, rgba(199, 154, 59, 0.14), transparent 55%),
+      radial-gradient(ellipse 80% 50% at 50% 120%, rgba(215, 57, 31, 0.10), transparent 50%);
+    --grain-blend: overlay;
+    --grain-opacity: 0.05;
+    --hairline-color: color-mix(in srgb, #c79a3b 45%, transparent);
+    --cta-glow-shadow: 0 0 0 1px rgba(240, 73, 44, 0.35), 0 10px 40px -12px rgba(215, 57, 31, 0.7);
+  }
+}
+
+@theme inline {
+  --color-field: var(--field);
+  --color-field-deep: var(--field-deep);
+  --color-inset: var(--inset);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-faint: var(--ink-faint);
+  --color-cream: var(--cream);
+  --color-sienna: var(--sienna);
+  --color-signal: var(--signal);
+  --color-vermilion: var(--vermilion);
+  --color-vermilion-bright: var(--vermilion-bright);
+  --color-brass: var(--brass);
+  --color-spyteal: var(--spyteal);
 
   /* Typography (unchanged) */
   --font-display: var(--font-bebas), "Arial Narrow", sans-serif;
@@ -21,11 +74,10 @@
   --font-body: var(--font-spectral), Georgia, serif;
 }
 
-/* Atmospheric cinema background: gold top-light, aged manila base */
+/* Atmospheric cinema background — gold top-light on paper; gold + red under-glow at night */
 body {
-  background-color: #e7d9bb;
-  background-image:
-    radial-gradient(ellipse 90% 60% at 50% -15%, rgba(199, 154, 59, 0.20), transparent 55%);
+  background-color: var(--field);
+  background-image: var(--atmosphere);
   background-attachment: fixed;
   color: var(--color-ink);
   font-family: var(--font-body);
@@ -38,8 +90,8 @@ body::after {
   inset: 0;
   z-index: 50;
   pointer-events: none;
-  opacity: 0.06;
-  mix-blend-mode: multiply;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: var(--grain-blend);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -64,12 +116,12 @@ body::after {
 
 /* Hairline divider in tarnished brass */
 .hairline {
-  border-color: color-mix(in srgb, var(--color-brass) 55%, transparent);
+  border-color: var(--hairline-color);
 }
 
 /* Primary-action glow for the danger-red CTA */
 .cta-glow {
-  box-shadow: 0 0 0 1px rgba(215, 57, 31, 0.30), 0 10px 30px -14px rgba(215, 57, 31, 0.55);
+  box-shadow: var(--cta-glow-shadow);
 }
 
 /* Gun-barrel target that slowly drifts */
