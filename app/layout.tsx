@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Bebas_Neue, Special_Elite, Spectral } from "next/font/google";
 import "./globals.css";
 import NavBar from "@/components/NavBar";
@@ -24,6 +24,13 @@ const spectral = Spectral({
 export const metadata: Metadata = {
   title: "Cone of Silence — Classified",
   description: "A private, encrypted line for two. Nothing recorded, nothing remembered.",
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#e7d9bb" },
+    { media: "(prefers-color-scheme: dark)", color: "#14110f" },
+  ],
 };
 
 export default function RootLayout({
