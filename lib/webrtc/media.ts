@@ -39,6 +39,13 @@ function isMissingDevice(err: unknown): boolean {
   );
 }
 
+function isBusyDevice(err: unknown): boolean {
+  return (
+    err instanceof DOMException &&
+    (err.name === "NotReadableError" || err.name === "AbortError")
+  );
+}
+
 function toMediaError(err: unknown): MediaError {
   if (err instanceof DOMException) {
     if (err.name === "NotAllowedError" || err.name === "SecurityError") {
@@ -53,19 +60,26 @@ function toMediaError(err: unknown): MediaError {
 
 /**
  * Acquire the local stream, degrading gracefully:
- * exact requested devices → default devices → mic-only → MediaError.
- * Covers stale stashed device IDs (unplugged gear) and machines with no camera.
+ * exact requested devices → default devices (only when an explicit choice failed) → mic-only → MediaError.
+ * Covers stale stashed device IDs (unplugged gear), busy devices (held by another app), and machines with no camera.
  */
 export async function getLocalStream(choice: MediaDeviceChoice = {}): Promise<MediaStream> {
+  const hasExplicitChoice = Boolean(choice.audioDeviceId || choice.videoDeviceId);
   try {
     return await navigator.mediaDevices.getUserMedia(toConstraints(choice));
   } catch (err) {
-    if (!isMissingDevice(err)) throw toMediaError(err);
+    // A stale (unplugged) or busy (held by another app) chosen device should
+    // degrade to defaults, not hard-fail; without an explicit choice, stage 1
+    // already asked for defaults, so only a missing device moves us onward.
+    const degradable = isMissingDevice(err) || (hasExplicitChoice && isBusyDevice(err));
+    if (!degradable) throw toMediaError(err);
   }
-  try {
-    return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-  } catch (err) {
-    if (!isMissingDevice(err)) throw toMediaError(err);
+  if (hasExplicitChoice) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    } catch (err) {
+      if (!isMissingDevice(err)) throw toMediaError(err);
+    }
   }
   try {
     return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });

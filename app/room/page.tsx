@@ -120,6 +120,8 @@ export default function RoomPage() {
 
   async function switchDevice(kind: "audio" | "video", deviceId: string) {
     const gen = ++switchGen.current;
+    const keepMicOn = micOn;
+    const keepCamOn = camOn;
     const next: MediaDeviceChoice = {
       ...choiceRef.current,
       [kind === "audio" ? "audioDeviceId" : "videoDeviceId"]: deviceId,
@@ -137,10 +139,12 @@ export default function RoomPage() {
         stopStream(s);
         return;
       }
+      s.getAudioTracks().forEach((t) => (t.enabled = keepMicOn));
+      s.getVideoTracks().forEach((t) => (t.enabled = keepCamOn));
       streamRef.current = s;
       setStream(s);
-      setMicOn(true);
-      setCamOn(s.getVideoTracks().length > 0);
+      setMicOn(keepMicOn);
+      setCamOn(keepCamOn && s.getVideoTracks().length > 0);
     } catch (err) {
       if (switchGen.current !== gen) return;
       setFailure(err instanceof MediaError ? err.reason : "unavailable");
