@@ -1,6 +1,8 @@
 // components/CallControls.tsx
 "use client";
 
+import { LensIcon, MicIcon } from "@/components/icons";
+
 interface CallControlsProps {
   micOn: boolean;
   camOn: boolean;
@@ -21,16 +23,18 @@ export default function CallControls({
   onLeave,
 }: CallControlsProps) {
   const toggleClass = (on: boolean) =>
-    `kicker border px-4 py-3 transition ${
+    `kicker inline-flex items-center gap-2 border px-4 py-3 transition ${
       on ? "border-brass text-ink" : "border-vermilion/60 text-vermilion"
     }`;
 
   return (
     <div className="hairline flex flex-wrap items-center gap-3 border bg-inset p-4">
       <button type="button" aria-pressed={micOn} onClick={onToggleMic} className={toggleClass(micOn)}>
+        <MicIcon on={micOn} />
         {micOn ? "Mic Live" : "Mic Cut"}
       </button>
       <button type="button" aria-pressed={camOn} onClick={onToggleCam} className={toggleClass(camOn)}>
+        <LensIcon on={camOn} />
         {camOn ? "Lens Open" : "Lens Capped"}
       </button>
       <button

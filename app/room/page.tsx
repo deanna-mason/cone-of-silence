@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import VideoTile from "@/components/VideoTile";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
+import { LensIcon, MicIcon } from "@/components/icons";
 import {
   buildInviteLink,
   clearStashedRoomKeys,
@@ -259,20 +260,22 @@ export default function RoomPage() {
             type="button"
             aria-pressed={micOn}
             onClick={toggleMic}
-            className={`kicker border px-4 py-3 transition ${
+            className={`kicker inline-flex items-center gap-2 border px-4 py-3 transition ${
               micOn ? "border-brass text-ink" : "border-vermilion/60 text-vermilion"
             }`}
           >
+            <MicIcon on={micOn} />
             {micOn ? "Mic Live" : "Mic Cut"}
           </button>
           <button
             type="button"
             aria-pressed={camOn}
             onClick={toggleCam}
-            className={`kicker border px-4 py-3 transition ${
+            className={`kicker inline-flex items-center gap-2 border px-4 py-3 transition ${
               camOn ? "border-brass text-ink" : "border-vermilion/60 text-vermilion"
             }`}
           >
+            <LensIcon on={camOn} />
             {camOn ? "Lens Open" : "Lens Capped"}
           </button>
         </div>
