@@ -61,3 +61,104 @@ components/
 lib/
   data.ts             # typed brainstorm data
 ```
+
+## Project 1 — Multitier + Database
+
+Midterm milestone: the lobby is now real. An operator mints single-use
+invite tokens from an admin console; the server verifies them before a
+caller can create a room. Two tiers (Next.js frontend, Express API) share a
+Postgres database on Supabase.
+
+### 1. Pages
+
+- **`/` — Lobby:** reads an invite token from the URL fragment (or
+  `localStorage`, so clearance survives a refresh), shows a clearance
+  badge, and only unlocks "Create room" once the server has verified it.
+- **`/room` — Call room:** the camera/mic green room from Phase 1. Room
+  keys travel in the URL fragment and are stashed in `sessionStorage` on
+  arrival, then the fragment is stripped from the address bar.
+- **`/brainstorm` — Mission dossier:** the static feature-plan page from
+  Assignment 1, unchanged.
+- **`/admin` — Credential desk:** paste the admin secret to unlock a full
+  CRUD console (mint / relabel / revoke / restore / purge tokens) that
+  talks to the server tier over REST with a bearer token.
+
+### 2. Server tier
+
+The trusted tier lives in `server/` (Node/Express/TypeScript):
+
+| Method | Path              | Auth   | Purpose |
+| ------ | ----------------- | ------ | ------- |
+| POST   | /tokens/verify    | none   | Lobby checks an invite token (body: `{token}`) |
+| GET    | /admin/tokens     | Bearer | List grants |
+| POST   | /admin/tokens     | Bearer | Mint (returns plaintext token ONCE) |
+| PATCH  | /admin/tokens/:id | Bearer | `{label}` relabel, or `{revoked}` revoke/restore |
+| DELETE | /admin/tokens/:id | Bearer | Purge a grant and its audit events |
+
+Bearer auth is the `ADMIN_SECRET` value; 5 bad attempts trigger a 60s
+lockout. Every request is validated before it touches the store, and the
+store fails **closed**: if the database is unreachable, verification and
+admin calls return a 503 rather than silently granting access. All of this
+is covered by the vitest suite in `server/test` (34 passing tests, plus a
+shared store-contract suite run against both the file-backed and
+Supabase-backed `TokenStore` — the Supabase half skips automatically
+without live credentials).
+
+### 3. Schema
+
+```
+┌──────────────────────────┐        ┌─────────────────────────────┐
+│ creation_tokens          │        │ token_events                │
+├──────────────────────────┤        ├─────────────────────────────┤
+│ id  uuid PK              │◄───────│ token_id  uuid FK (cascade) │
+│ label  text 1..64        │  1:N   │ id  bigint PK               │
+│ token_hash  text UNIQUE  │        │ event  minted|relabeled|    │
+│ created_at  timestamptz  │        │        revoked|restored     │
+│ last_used_at timestamptz?│        │ occurred_at  timestamptz    │
+│ revoked_at  timestamptz? │        │ detail  jsonb?              │
+└──────────────────────────┘        └─────────────────────────────┘
+   RLS enabled, zero policies — server-only via service-role key.
+   Stores operator config (labels the operator typed + hashes).
+   No user data: no names, no emails, no call records.
+```
+
+### 4. Privacy note
+
+Tokens are stored as SHA-256 hashes, never in plaintext — sound here
+because each token is 128 random bits, so no bcrypt-style key-stretching
+is needed. Token use is deliberately **not** event-logged: a successful
+verify only overwrites `last_used_at` in place, so there's no per-call
+audit trail to leak. There are no accounts, names, or emails anywhere in
+the schema — the database stores operator configuration (who is allowed
+to create a room), not user data.
+
+### 5. Run locally
+
+Two terminals, one for each tier:
+
+```bash
+# terminal 1 — server
+cd server
+cp env.example .env    # fill in ADMIN_SECRET (and SUPABASE_* for TOKEN_STORE=supabase)
+npm install
+npm run dev             # http://localhost:8787
+
+# terminal 2 — frontend (repo root)
+npm install
+npm run dev              # http://localhost:3000
+```
+
+Against a fresh Supabase project, push the schema before starting the
+server with `TOKEN_STORE=supabase`:
+
+```bash
+supabase db push
+```
+
+### 6. Wireframes
+
+No screenshots yet — the four pages, described above, stand in for now:
+the **Lobby** (clearance badge + gated create button), the **Call room**
+(camera/mic green room), the **Mission dossier** (static feature plan),
+and the **Credential desk** (paste-to-unlock admin CRUD table). Screenshots
+can be dropped into `docs/` and linked here later.
