@@ -64,16 +64,21 @@ lib/
 
 ## Project 1 — Multitier + Database
 
-Midterm milestone: the lobby is now real. An operator mints single-use
-invite tokens from an admin console; the server verifies them before a
-caller can create a room. Two tiers (Next.js frontend, Express API) share a
+Midterm milestone: the lobby is now real. An operator mints reusable,
+revocable invite tokens from an admin console; the lobby checks a token
+with the server and gates the Create button client-side on the result.
+Server-side enforcement of room creation itself arrives with Phase 2's
+signaling gate. Two tiers (Next.js frontend, Express API) share a
 Postgres database on Supabase.
 
 ### 1. Pages
 
 - **`/` — Lobby:** reads an invite token from the URL fragment (or
   `localStorage`, so clearance survives a refresh), shows a clearance
-  badge, and only unlocks "Create room" once the server has verified it.
+  badge, and unlocks "Create room" once a token is on file — a stored
+  token unlocks it optimistically even before/without live server
+  confirmation, so the lobby re-verifies in the background and locks
+  back down if the server reports it revoked.
 - **`/room` — Call room:** the camera/mic green room from Phase 1. Room
   keys travel in the URL fragment and are stashed in `sessionStorage` on
   arrival, then the fragment is stripped from the address bar.

@@ -33,7 +33,20 @@ export default function LobbyPage() {
       });
       return;
     }
-    if (readCreateToken()) setClearance({ state: "active" });
+    const stored = readCreateToken();
+    if (stored) {
+      // Show clearance immediately (no flicker), then re-verify in the
+      // background — a stashed token could have been revoked since.
+      setClearance({ state: "active" });
+      void verifyCreateToken(stored).then((status) => {
+        if (status === "inactive") {
+          burnCreateToken();
+          setClearance({ state: "inactive" });
+        }
+        if (status === "unreachable") setClearance({ state: "unreachable" });
+        // "accepted" leaves clearance as "active" — already showing.
+      });
+    }
   }, []);
 
   function handleBurn() {
