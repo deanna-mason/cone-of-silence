@@ -1,8 +1,9 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
+import { StoreUnavailableError } from "../src/tokens/types.js";
 import { runTokenStoreContract } from "./tokenStoreContract.js";
 
 async function freshPath(): Promise<string> {
@@ -30,5 +31,34 @@ describe("FileTokenStore persistence", () => {
       "minted",
       "relabeled",
     ]);
+  });
+});
+
+describe("FileTokenStore corruption handling", () => {
+  it("rejects with StoreUnavailableError when the file contains invalid JSON", async () => {
+    const path = await freshPath();
+    await writeFile(path, "{ not json");
+
+    await expect(FileTokenStore.open(path)).rejects.toBeInstanceOf(
+      StoreUnavailableError,
+    );
+  });
+
+  it("rejects with StoreUnavailableError when the file is valid JSON of the wrong shape", async () => {
+    const path = await freshPath();
+    await writeFile(path, "{}");
+
+    await expect(FileTokenStore.open(path)).rejects.toBeInstanceOf(
+      StoreUnavailableError,
+    );
+  });
+
+  it("starts a working empty store when the file is merely missing", async () => {
+    const path = await freshPath();
+
+    const store = await FileTokenStore.open(path);
+    const { grant } = await store.mint("bob");
+
+    expect((await store.list()).map((g) => g.id)).toEqual([grant.id]);
   });
 });

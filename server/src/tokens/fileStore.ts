@@ -5,6 +5,7 @@ import { generateToken, hashToken } from "./crypto.js";
 import {
   Grant,
   GrantNotFoundError,
+  StoreUnavailableError,
   TokenEvent,
   TokenEventKind,
   TokenStore,
@@ -20,6 +21,15 @@ interface FileShape {
   events: TokenEvent[];
 }
 
+function isFileShape(value: unknown): value is FileShape {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as FileShape).grants) &&
+    Array.isArray((value as FileShape).events)
+  );
+}
+
 /** JSON-file allowlist. Post-class default; also the networkless test double. */
 export class FileTokenStore implements TokenStore {
   private constructor(
@@ -28,20 +38,47 @@ export class FileTokenStore implements TokenStore {
   ) {}
 
   static async open(path: string): Promise<FileTokenStore> {
-    let data: FileShape = { grants: [], events: [] };
+    let raw: string;
     try {
-      data = JSON.parse(await readFile(path, "utf8")) as FileShape;
-    } catch {
-      // missing or unreadable file → start empty; first write creates it
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return new FileTokenStore(path, { grants: [], events: [] });
+      }
+      throw new StoreUnavailableError(
+        `failed to read token store at ${path}: ${(err as Error).message}`,
+      );
     }
-    return new FileTokenStore(path, data);
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw new StoreUnavailableError(
+        `token store at ${path} contains invalid JSON: ${(err as Error).message}`,
+      );
+    }
+
+    if (!isFileShape(parsed)) {
+      throw new StoreUnavailableError(
+        `token store at ${path} has an unexpected shape`,
+      );
+    }
+
+    return new FileTokenStore(path, parsed);
   }
 
   private async save(): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.data, null, 2));
-    await rename(tmp, this.path); // atomic — no torn files on crash
+    try {
+      await mkdir(dirname(this.path), { recursive: true });
+      const tmp = `${this.path}.tmp`;
+      await writeFile(tmp, JSON.stringify(this.data, null, 2));
+      await rename(tmp, this.path); // atomic — no torn files on crash
+    } catch (err) {
+      throw new StoreUnavailableError(
+        `failed to write token store at ${this.path}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private addEvent(
