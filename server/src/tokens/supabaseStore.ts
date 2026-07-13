@@ -61,8 +61,13 @@ export class SupabaseTokenStore implements TokenStore {
       .select("*")
       .eq("id", id)
       .maybeSingle<TokenRow>();
-    // Treat errors (e.g., invalid UUID format) as "not found"
-    if (error || !data) throw new GrantNotFoundError(id);
+    // Invalid UUID input (code 22P02) cannot name any grant — treat as not found.
+    // Any other error is a real outage/auth failure and must fail closed.
+    if (error) {
+      if (error.code === "22P02") throw new GrantNotFoundError(id);
+      this.fail("getRow", error.message);
+    }
+    if (!data) throw new GrantNotFoundError(id);
     return data;
   }
 
@@ -73,7 +78,10 @@ export class SupabaseTokenStore implements TokenStore {
       .eq("id", id)
       .select()
       .maybeSingle<TokenRow>();
-    if (error) this.fail("updateRow", error.message);
+    if (error) {
+      if (error.code === "22P02") throw new GrantNotFoundError(id);
+      this.fail("updateRow", error.message);
+    }
     if (!data) throw new GrantNotFoundError(id);
     return rowToGrant(data);
   }
