@@ -95,6 +95,7 @@ export default function AdminConsole() {
   }
 
   function handleSetRevoked(id: string, revoked: boolean) {
+    setPurgingId(null); // a revoke state change always disarms any pending purge confirmation
     void withBusy(async () => {
       await patchGrant(secret!, id, { revoked });
     });
