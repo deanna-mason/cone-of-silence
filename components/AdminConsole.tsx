@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AdminApiError, listGrants, type Grant } from "@/lib/adminApi";
+import {
+  AdminApiError,
+  buildCreateInviteLink,
+  listGrants,
+  mintGrant,
+  patchGrant,
+  purgeGrant,
+  type Grant,
+} from "@/lib/adminApi";
 
 const SECRET_KEY = "cos-admin-secret"; // sessionStorage: dies with the tab
 
@@ -18,6 +26,13 @@ export default function AdminConsole() {
   const [pasted, setPasted] = useState("");
   const [grants, setGrants] = useState<Grant[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [mintLabel, setMintLabel] = useState("");
+  const [minted, setMinted] = useState<{ label: string; link: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [purgingId, setPurgingId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async (activeSecret: string) => {
     setError(null);
@@ -45,6 +60,52 @@ export default function AdminConsole() {
     const stashed = readStashedSecret();
     if (stashed) void refresh(stashed);
   }, [refresh]);
+
+  async function withBusy(fn: () => Promise<void>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      setGrants(await listGrants(secret!));
+    } catch (err) {
+      setError(err instanceof AdminApiError ? `✕ ${err.message}` : "✕ channel unavailable");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleMint() {
+    const label = mintLabel.trim();
+    if (!label) return;
+    void withBusy(async () => {
+      const { token, grant } = await mintGrant(secret!, label);
+      setMinted({ label: grant.label, link: buildCreateInviteLink(token, window.location.origin) });
+      setCopied(false);
+      setMintLabel("");
+    });
+  }
+
+  function handleRelabel(id: string) {
+    const label = editLabel.trim();
+    if (!label) return;
+    void withBusy(async () => {
+      await patchGrant(secret!, id, { label });
+      setEditingId(null);
+    });
+  }
+
+  function handleSetRevoked(id: string, revoked: boolean) {
+    void withBusy(async () => {
+      await patchGrant(secret!, id, { revoked });
+    });
+  }
+
+  function handlePurge(id: string) {
+    void withBusy(async () => {
+      await purgeGrant(secret!, id);
+      setPurgingId(null);
+    });
+  }
 
   if (secret === null) {
     return (
@@ -109,6 +170,65 @@ export default function AdminConsole() {
         </p>
       )}
 
+      {/* Mint */}
+      <div className="mt-6 flex items-end gap-3">
+        <div className="grow">
+          <label htmlFor="mint-label" className="kicker block text-ink-soft">
+            Issue new credential — codename
+          </label>
+          <input
+            id="mint-label"
+            value={mintLabel}
+            onChange={(e) => setMintLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleMint();
+            }}
+            placeholder="alice"
+            className="mt-2 w-full border-b-2 border-ink-faint/40 bg-transparent pb-2 font-type text-base text-ink placeholder-ink-faint/40 focus:border-brass focus:outline-none"
+          />
+        </div>
+        <button
+          type="button"
+          disabled={busy || !mintLabel.trim()}
+          onClick={handleMint}
+          className="kicker border border-ink-faint/30 px-6 py-3 text-ink-soft transition hover:border-brass hover:text-signal disabled:opacity-40"
+        >
+          Mint
+        </button>
+      </div>
+
+      {/* Show-once invite link */}
+      {minted && (
+        <div className="hairline mt-4 border border-brass/50 bg-inset p-4">
+          <p className="kicker text-sienna">
+            Invitation for “{minted.label}” — visible ONCE. Copy it now; only the codename
+            survives.
+          </p>
+          <p className="mt-2 break-all font-type text-sm text-ink">{minted.link}</p>
+          <div className="mt-3 flex gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(minted.link).then(() => setCopied(true));
+              }}
+              className="kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal"
+            >
+              {copied ? "✓ Copied" : "Copy Link"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMinted(null)}
+              className="kicker px-4 py-2 text-ink-soft transition hover:text-vermilion"
+            >
+              Dismiss
+            </button>
+          </div>
+          <p className="kicker mt-3 text-ink-soft">
+            Send over an end-to-end encrypted channel (Signal, iMessage) — not email.
+          </p>
+        </div>
+      )}
+
       <table className="mt-6 w-full text-left font-type text-sm">
         <thead>
           <tr className="kicker text-ink-soft">
@@ -116,12 +236,28 @@ export default function AdminConsole() {
             <th className="pb-2">Issued</th>
             <th className="pb-2">Last Used</th>
             <th className="pb-2">Status</th>
+            <th className="pb-2">Actions</th>
           </tr>
         </thead>
         <tbody>
           {grants.map((g) => (
             <tr key={g.id} className="border-t border-ink-faint/20">
-              <td className="py-2 text-ink">{g.label}</td>
+              <td className="py-2 text-ink">
+                {editingId === g.id ? (
+                  <input
+                    autoFocus
+                    value={editLabel}
+                    onChange={(e) => setEditLabel(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleRelabel(g.id);
+                      if (e.key === "Escape") setEditingId(null);
+                    }}
+                    className="border-b border-brass bg-transparent font-type text-sm text-ink focus:outline-none"
+                  />
+                ) : (
+                  g.label
+                )}
+              </td>
               <td className="py-2 text-ink-soft">{new Date(g.createdAt).toLocaleDateString()}</td>
               <td className="py-2 text-ink-soft">
                 {g.lastUsedAt ? new Date(g.lastUsedAt).toLocaleString() : "never"}
@@ -133,11 +269,54 @@ export default function AdminConsole() {
                   <span className="kicker text-brass">ACTIVE</span>
                 )}
               </td>
+              <td className="py-2">
+                <span className="flex gap-3">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditingId(g.id);
+                      setEditLabel(g.label);
+                    }}
+                    className="kicker text-ink-soft transition hover:text-signal"
+                  >
+                    Relabel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => handleSetRevoked(g.id, !g.revokedAt)}
+                    className="kicker text-ink-soft transition hover:text-vermilion"
+                  >
+                    {g.revokedAt ? "Restore" : "Revoke"}
+                  </button>
+                  {g.revokedAt &&
+                    (purgingId === g.id ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => handlePurge(g.id)}
+                        className="kicker text-vermilion transition hover:text-vermilion-bright"
+                      >
+                        Confirm Purge
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setPurgingId(g.id)}
+                        className="kicker text-ink-soft transition hover:text-vermilion"
+                      >
+                        Purge
+                      </button>
+                    ))}
+                </span>
+              </td>
             </tr>
           ))}
           {grants.length === 0 && (
             <tr>
-              <td colSpan={4} className="py-6 text-center font-body italic text-ink-soft">
+              <td colSpan={5} className="py-6 text-center font-body italic text-ink-soft">
                 No credentials issued yet.
               </td>
             </tr>
