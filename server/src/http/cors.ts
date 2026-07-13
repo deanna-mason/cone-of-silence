@@ -4,9 +4,9 @@ import type { NextFunction, Request, Response } from "express";
 export function createCors(allowedOrigins: string[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const origin = req.get("origin");
+    res.set("Vary", "Origin");
     if (origin && allowedOrigins.includes(origin)) {
       res.set("Access-Control-Allow-Origin", origin);
-      res.set("Vary", "Origin");
       res.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
       res.set("Access-Control-Allow-Headers", "Authorization,Content-Type");
     }

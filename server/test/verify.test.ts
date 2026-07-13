@@ -5,6 +5,7 @@ import { join } from "node:path";
 import request from "supertest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
+import { StoreUnavailableError, type TokenStore } from "../src/tokens/types.js";
 
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "cos-verify-"));
@@ -43,5 +44,30 @@ describe("POST /tokens/verify", () => {
     const { token } = await store.mint("carol");
     const res = await request(app).post("/tokens/verify").send({ token });
     expect(res.status).toBe(200);
+  });
+
+  it("rejects non-string and missing tokens without consulting the store", async () => {
+    const { app } = await setup();
+    const numeric = await request(app).post("/tokens/verify").send({ token: 123 });
+    expect(numeric.body).toEqual({ valid: false, reason: "invalid" });
+    const missing = await request(app).post("/tokens/verify").send({});
+    expect(missing.body).toEqual({ valid: false, reason: "invalid" });
+  });
+
+  it("store outage → 503 channel unavailable (fail closed)", async () => {
+    const broken: TokenStore = {
+      verify: async () => { throw new StoreUnavailableError("db down"); },
+      mint: async () => { throw new StoreUnavailableError("db down"); },
+      list: async () => { throw new StoreUnavailableError("db down"); },
+      listEvents: async () => { throw new StoreUnavailableError("db down"); },
+      relabel: async () => { throw new StoreUnavailableError("db down"); },
+      revoke: async () => { throw new StoreUnavailableError("db down"); },
+      restore: async () => { throw new StoreUnavailableError("db down"); },
+      purge: async () => { throw new StoreUnavailableError("db down"); },
+    };
+    const app = createApp({ store: broken, adminSecret: "s".repeat(32), allowedOrigins: [] });
+    const res = await request(app).post("/tokens/verify").send({ token: "a".repeat(22) });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: "channel unavailable" });
   });
 });

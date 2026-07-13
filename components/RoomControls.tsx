@@ -27,7 +27,7 @@ export default function RoomControls({ canCreate }: { canCreate: boolean }) {
         <p className="kicker text-ink-soft">File CS-001</p>
       </div>
 
-      {/* Primary action — creates a real room */}
+      {/* Primary action — create (invitation-gated) */}
       {canCreate ? (
         <>
           <button

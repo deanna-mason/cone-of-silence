@@ -46,6 +46,15 @@ export default function AdminConsole() {
       }
     } catch (err) {
       setSecret(null);
+      if (err instanceof AdminApiError && err.status === 401) {
+        // A stashed secret that's no longer valid would otherwise keep
+        // auto-unlocking (and burning lockout attempts) on every reload.
+        try {
+          sessionStorage.removeItem(SECRET_KEY);
+        } catch {
+          // ignore
+        }
+      }
       setError(
         err instanceof AdminApiError && err.status === 401
           ? "✕ Access denied."
@@ -75,6 +84,7 @@ export default function AdminConsole() {
   }
 
   function handleMint() {
+    if (busy) return;
     const label = mintLabel.trim();
     if (!label) return;
     void withBusy(async () => {
@@ -86,6 +96,7 @@ export default function AdminConsole() {
   }
 
   function handleRelabel(id: string) {
+    if (busy) return;
     const label = editLabel.trim();
     if (!label) return;
     void withBusy(async () => {
@@ -158,6 +169,7 @@ export default function AdminConsole() {
             }
             setSecret(null);
             setPasted("");
+            setMinted(null);
           }}
           className="kicker text-ink-soft transition hover:text-vermilion"
         >
@@ -210,7 +222,10 @@ export default function AdminConsole() {
             <button
               type="button"
               onClick={() => {
-                void navigator.clipboard.writeText(minted.link).then(() => setCopied(true));
+                void navigator.clipboard
+                  .writeText(minted.link)
+                  .then(() => setCopied(true))
+                  .catch(() => setCopied(false));
               }}
               className="kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal"
             >

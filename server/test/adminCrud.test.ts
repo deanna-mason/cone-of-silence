@@ -36,7 +36,7 @@ describe("admin CRUD", () => {
       { label: "   " },
       { label: "x".repeat(65) },
       { label: "ok", extra: true },
-      { label: "badbell" }, // embedded control character
+      { label: "bad\x07bell" }, // embedded control character
     ]) {
       const res = await request(app).post("/admin/tokens").set(auth).send(body);
       expect(res.status, JSON.stringify(body)).toBe(400);
