@@ -1,6 +1,7 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import type { TokenStore } from "../tokens/types.js";
 import { createAdminAuth } from "./auth.js";
+import { createAdminRouter } from "./adminRoutes.js";
 import { createCors } from "./cors.js";
 
 export interface AppOptions {
@@ -15,12 +16,7 @@ export function createApp({ store, adminSecret, allowedOrigins }: AppOptions): E
   app.use(createCors(allowedOrigins));
   app.use(express.json());
 
-  const admin = express.Router();
-  admin.use(createAdminAuth(adminSecret));
-  admin.get("/tokens", async (_req: Request, res: Response) => {
-    res.json({ grants: await store.list() });
-  });
-  app.use("/admin", admin);
+  app.use("/admin", createAdminAuth(adminSecret), createAdminRouter(store));
 
   // malformed JSON body → 400, everything else → fail closed
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
