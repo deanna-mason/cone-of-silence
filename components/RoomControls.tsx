@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { buildRoomHash, createRoomKeys, parseInviteLink } from "@/lib/roomLink";
 
-export default function RoomControls() {
+export default function RoomControls({ canCreate }: { canCreate: boolean }) {
   const [invite, setInvite] = useState("");
   const [rejected, setRejected] = useState(false);
 
@@ -28,20 +28,35 @@ export default function RoomControls() {
       </div>
 
       {/* Primary action — creates a real room */}
-      <button
-        type="button"
-        onClick={initiateContact}
-        className="cta-glow group mt-6 flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright"
-      >
-        <span>Initiate Contact</span>
-        <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
-          ➔
-        </span>
-      </button>
-      <p className="mt-3 font-body text-sm italic text-ink-soft">
-        Opens a fresh channel and hands you the only key — share the invite link with your
-        contacts.
-      </p>
+      {canCreate ? (
+        <>
+          <button
+            type="button"
+            onClick={initiateContact}
+            className="cta-glow group mt-6 flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright"
+          >
+            <span>Initiate Contact</span>
+            <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
+              ➔
+            </span>
+          </button>
+          <p className="mt-3 font-body text-sm italic text-ink-soft">
+            Opens a fresh channel and hands you the only key — share the invite link with your
+            contacts.
+          </p>
+        </>
+      ) : (
+        <div className="mt-6 border border-ink-faint/30 px-6 py-5">
+          <p className="font-display text-3xl tracking-[0.06em] text-ink-faint">
+            Initiate Contact
+          </p>
+          <p className="kicker mt-2 text-ink-soft">🔒 creation requires an invitation</p>
+          <p className="mt-2 font-body text-sm italic text-ink-soft">
+            Ask the operator for an invitation link to open channels of your own. Joining an
+            existing channel needs no clearance — paste your invite below.
+          </p>
+        </div>
+      )}
 
       <label htmlFor="invite" className="kicker mt-8 block text-ink-soft">
         Received an invite?

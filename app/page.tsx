@@ -41,6 +41,8 @@ export default function LobbyPage() {
     setClearance({ state: "none" });
   }
 
+  const canCreate = clearance.state !== "none" && clearance.state !== "inactive";
+
   return (
     <div className="space-y-10">
       {/* Hero */}
@@ -80,7 +82,7 @@ export default function LobbyPage() {
 
       <div className="rise space-y-6" style={{ animationDelay: "0.4s" }}>
         <ClearanceBadge clearance={clearance} onBurn={handleBurn} />
-        <RoomControls />
+        <RoomControls canCreate={canCreate} />
         <EncryptionToggle enabled={encryptionOn} onToggle={() => setEncryptionOn((v) => !v)} />
       </div>
     </div>
