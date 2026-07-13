@@ -3,6 +3,7 @@ import type { TokenStore } from "../tokens/types.js";
 import { createAdminAuth } from "./auth.js";
 import { createAdminRouter } from "./adminRoutes.js";
 import { createCors } from "./cors.js";
+import { createVerifyRouter } from "./verifyRoutes.js";
 
 export interface AppOptions {
   store: TokenStore;
@@ -16,6 +17,7 @@ export function createApp({ store, adminSecret, allowedOrigins }: AppOptions): E
   app.use(createCors(allowedOrigins));
   app.use(express.json());
 
+  app.use(createVerifyRouter(store));
   app.use("/admin", createAdminAuth(adminSecret), createAdminRouter(store));
 
   // malformed JSON body → 400, everything else → fail closed
