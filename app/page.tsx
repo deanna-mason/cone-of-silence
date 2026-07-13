@@ -1,11 +1,45 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import RoomControls from "@/components/RoomControls";
 import EncryptionToggle from "@/components/EncryptionToggle";
+import ClearanceBadge, { type Clearance } from "@/components/ClearanceBadge";
+import {
+  burnCreateToken,
+  parseCreateHash,
+  readCreateToken,
+  storeCreateToken,
+  verifyCreateToken,
+} from "@/lib/createToken";
 
 export default function LobbyPage() {
   const [encryptionOn, setEncryptionOn] = useState(false);
+  const [clearance, setClearance] = useState<Clearance>({ state: "none" });
+
+  useEffect(() => {
+    const incoming = parseCreateHash(window.location.hash);
+    if (incoming) {
+      // Store first (server enforces on create anyway), then confirm live.
+      storeCreateToken(incoming);
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      setClearance({ state: "active" });
+      void verifyCreateToken(incoming).then((status) => {
+        if (status === "accepted") setClearance({ state: "accepted" });
+        if (status === "unreachable") setClearance({ state: "unreachable" });
+        if (status === "inactive") {
+          burnCreateToken();
+          setClearance({ state: "inactive" });
+        }
+      });
+      return;
+    }
+    if (readCreateToken()) setClearance({ state: "active" });
+  }, []);
+
+  function handleBurn() {
+    burnCreateToken();
+    setClearance({ state: "none" });
+  }
 
   return (
     <div className="space-y-10">
@@ -45,6 +79,7 @@ export default function LobbyPage() {
       </header>
 
       <div className="rise space-y-6" style={{ animationDelay: "0.4s" }}>
+        <ClearanceBadge clearance={clearance} onBurn={handleBurn} />
         <RoomControls />
         <EncryptionToggle enabled={encryptionOn} onToggle={() => setEncryptionOn((v) => !v)} />
       </div>
