@@ -28,16 +28,20 @@ export function attachSignaling(
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
 
   httpServer.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const pathname = new URL(req.url ?? "/", "http://placeholder").pathname;
-    const origin = req.headers.origin;
-    // Browsers always send Origin on WebSocket upgrades and scripts can't
-    // forge it — fail closed on anything else.
-    if (pathname !== WS_PATH || !origin || !opts.allowedOrigins.includes(origin)) {
-      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+    try {
+      const pathname = new URL(req.url ?? "/", "http://placeholder").pathname;
+      const origin = req.headers.origin;
+      // Browsers always send Origin on WebSocket upgrades and scripts can't
+      // forge it — fail closed on anything else.
+      if (pathname !== WS_PATH || !origin || !opts.allowedOrigins.includes(origin)) {
+        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    } catch {
       socket.destroy();
-      return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
   wss.on("connection", (ws: TrackedSocket) => {
@@ -49,6 +53,9 @@ export function attachSignaling(
       void handler.onMessage(ws, data.toString());
     });
     ws.on("close", () => handler.onClose(ws));
+    // ECONNRESET etc. — without a listener Node re-throws and kills the process;
+    // the paired "close" event runs the normal leave path.
+    ws.on("error", () => {});
   });
 
   const timer = setInterval(() => {

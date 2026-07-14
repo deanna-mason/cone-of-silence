@@ -62,6 +62,20 @@ describe("ws signaling server", () => {
     await expect(connect()).rejects.toThrow("403");
   });
 
+  it("rejects upgrades on any path other than /ws", async () => {
+    const badPathUrl = url.replace("/ws", "/not-ws");
+    await expect(
+      new Promise((resolve, reject) => {
+        const ws = new WebSocket(badPathUrl, { headers: { origin: ORIGIN } });
+        ws.once("open", () => resolve(ws));
+        ws.once("unexpected-response", (_req, res) =>
+          reject(new Error(`upgrade rejected: ${res.statusCode}`)),
+        );
+        ws.once("error", reject);
+      }),
+    ).rejects.toThrow("403");
+  });
+
   it("full call flow over real sockets: create, join, relay, leave", async () => {
     const a = await connect(ORIGIN);
     const created = await send(a, { v: 1, t: "create", roomId: ROOM, token });
