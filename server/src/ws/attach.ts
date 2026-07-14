@@ -50,7 +50,7 @@ export function attachSignaling(
       ws.isAlive = true;
     });
     ws.on("message", (data) => {
-      void handler.onMessage(ws, data.toString());
+      handler.onMessage(ws, data.toString()).catch(() => ws.terminate());
     });
     ws.on("close", () => handler.onClose(ws));
     // ECONNRESET etc. — without a listener Node re-throws and kills the process;

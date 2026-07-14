@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SignalingHandler, type SignalSocket } from "../src/ws/handler.js";
 import { StoreUnavailableError, type Grant, type TokenStore } from "../src/tokens/types.js";
 import type { ServerMessage } from "../../lib/webrtc/protocol.js";
@@ -79,6 +79,19 @@ describe("SignalingHandler", () => {
     await handler.onMessage(a, create());
     expect(a.last()).toMatchObject({ t: "error", reason: "create-refused" });
     expect(handler.registry.roomCount()).toBe(0);
+  });
+
+  it("fails CLOSED (not a process-killing throw) on an unexpected verify error", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = new SignalingHandler(
+      stubStore(async () => { throw new Error("boom"); }),
+    );
+    const a = new FakeSocket();
+    await handler.onMessage(a, create());
+    expect(a.last()).toMatchObject({ t: "error", reason: "create-refused" });
+    expect(handler.registry.roomCount()).toBe(0);
+    expect(a.closed).toBe(false);
+    spy.mockRestore();
   });
 
   it("join-first flow works on one socket: join → room-not-found (open) → create succeeds", async () => {

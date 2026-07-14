@@ -91,11 +91,14 @@ export class SignalingHandler {
     try {
       verdict = await this.store.verify(token); // touch defaults true — creation is a real use
     } catch (err) {
-      if (err instanceof StoreUnavailableError) {
-        this.refuse(sock, "create-refused"); // fail CLOSED
-        return;
+      // Fail CLOSED on any store failure — a refused create must never become
+      // a process-killing unhandled rejection (this tier hosts the admin API
+      // and every live call).
+      if (!(err instanceof StoreUnavailableError)) {
+        console.error("create verify failed:", err);
       }
-      throw err;
+      this.refuse(sock, "create-refused");
+      return;
     }
     if (!verdict.ok) {
       this.refuse(sock, "create-refused");
