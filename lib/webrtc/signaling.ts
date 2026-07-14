@@ -30,6 +30,7 @@ export type SignalingEventMap = {
 
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 10_000;
+const MAX_REFUSAL_RETRIES = 8; // ~60s of backoff — covers the server's ghost-reaping heartbeat
 
 export class SignalingClient {
   readonly events = new Emitter<SignalingEventMap>();
@@ -66,6 +67,7 @@ export class SignalingClient {
   }
 
   private connect(): void {
+    const isReconnect = this.attempt > 0;
     const ws = new WebSocket(this.url);
     this.ws = ws;
     let triedCreate = false;
@@ -101,6 +103,14 @@ export class SignalingClient {
               this.send({ v: PROTOCOL_VERSION, t: "create", roomId: this.roomId, token });
               return;
             }
+          }
+          // room-full on a reconnect is usually our own ghost still holding
+          // the slot (silent socket death) — the heartbeat reaps it within a
+          // minute. Keep retrying for a bounded window instead of going
+          // terminal on someone who was IN the call seconds ago.
+          if (msg.reason === "room-full" && isReconnect && this.attempt <= MAX_REFUSAL_RETRIES) {
+            ws.close(); // onclose path schedules the next backoff attempt
+            return;
           }
           this.stopped = true; // terminal — reconnecting can't fix a refusal
           ws.close();
