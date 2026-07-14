@@ -33,6 +33,7 @@ export function useCallSession(
       session.events.on("status", setStatus),
       session.events.on("remoteStream", setRemoteStream),
       session.events.on("channelOpen", () => setDcOpen(true)),
+      session.events.on("channelClosed", () => setDcOpen(false)),
     ];
     session.start();
     return () => {
@@ -49,7 +50,8 @@ export function useCallSession(
   }, [active, roomId]);
 
   useEffect(() => {
-    if (stream) void sessionRef.current?.setLocalStream(stream);
+    // replaceTrack rejects if the link tore down this tick — harmless race
+    if (stream) sessionRef.current?.setLocalStream(stream).catch(() => {});
   }, [stream]);
 
   return { status, remoteStream, dcOpen };

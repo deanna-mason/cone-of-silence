@@ -24,6 +24,7 @@ export type CallEventMap = {
   status: [CallStatus];
   remoteStream: [MediaStream | null];
   channelOpen: [];
+  channelClosed: [];
 };
 
 export class CallSession {
@@ -107,6 +108,7 @@ export class CallSession {
     this.link = null;
     this.remotePeerId = null;
     this.events.emit("remoteStream", null);
+    this.events.emit("channelClosed");
     this.setStatus(status);
   }
 
