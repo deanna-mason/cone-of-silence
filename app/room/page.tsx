@@ -9,6 +9,8 @@ import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
 import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
+import { useCallSession } from "@/hooks/useCallSession";
+import type { CallStatus } from "@/lib/webrtc/session";
 import {
   buildInviteLink,
   clearStashedRoomKeys,
@@ -36,12 +38,50 @@ const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
   },
 };
 
+type CallFailure = Extract<CallStatus, "room-not-found" | "room-full" | "create-refused" | "signal-lost">;
+
+const CALL_FAILURE_COPY: Record<CallFailure, { kicker: string; title: string; hint: string }> = {
+  "room-not-found": {
+    kicker: "◈ Channel Unknown",
+    title: "This Corridor Is Dark",
+    hint: "The channel was struck or never opened. Request a fresh invite from your contact.",
+  },
+  "room-full": {
+    kicker: "◈ At Capacity",
+    title: "The Cone Seats Two",
+    hint: "This channel already has both agents. Ask your counterpart to open a new line.",
+  },
+  "create-refused": {
+    kicker: "◈ Clearance Refused",
+    title: "Clearance Not Recognized",
+    hint: "The switchboard refused your creation clearance. Contact the quartermaster for a fresh grant.",
+  },
+  "signal-lost": {
+    kicker: "◈ Signal Lost",
+    title: "The Line Went Dead",
+    hint: "The switchboard could not be reached. Return to the lobby and open the channel again.",
+  },
+};
+
+function isCallFailure(status: CallStatus): status is CallFailure {
+  return status in CALL_FAILURE_COPY;
+}
+
 export default function RoomPage() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>("parsing");
   const [keys, setKeys] = useState<RoomKeys | null>(null);
   const [copied, setCopied] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
+  const call = useCallSession(keys?.roomId ?? null, media.stream, stage === "in-room");
+
+  // Debug mirror for the phase2 e2e script — harmless in production.
+  useEffect(() => {
+    (window as unknown as Record<string, unknown>).__cosCall = {
+      status: call.status,
+      dcOpen: call.dcOpen,
+    };
+  }, [call.status, call.dcOpen]);
 
   // Arrival: read the fragment once, stash it, and strip it from the URL bar
   // via replaceState so the secret never lingers in history. Refresh recovers from the stash.
@@ -196,15 +236,40 @@ export default function RoomPage() {
   }
 
   // in-room
+  if (isCallFailure(call.status)) {
+    const copy = CALL_FAILURE_COPY[call.status];
+    return (
+      <section className="hairline border bg-inset p-8 text-center">
+        <p className="kicker text-vermilion">{copy.kicker}</p>
+        <h1 className="mt-3 font-display text-5xl tracking-[0.04em] text-ink">{copy.title}</h1>
+        <p className="mx-auto mt-3 max-w-md font-body text-ink-soft">{copy.hint}</p>
+        <button
+          type="button"
+          onClick={leave}
+          className="kicker mt-6 inline-block border border-ink-faint/30 px-6 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
+        >
+          Return to Lobby
+        </button>
+      </section>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <header className="flex items-center justify-between">
         <p className="kicker text-sienna">◈ Secure Channel</p>
-        <p className="kicker text-ink-soft">Agents present: 1</p>
+        <p className="kicker text-ink-soft" aria-live="polite">
+          {call.status === "reconnecting"
+            ? "Signal lost — re-establishing…"
+            : `Agents present: ${call.remoteStream ? 2 : 1}`}
+        </p>
       </header>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <VideoTile stream={media.stream} label="You" mirrored isSelf camOff={!media.camOn} />
-        <VideoTile stream={null} label="Awaiting agent" />
+        <VideoTile
+          stream={call.remoteStream}
+          label={call.remoteStream ? "Counterpart" : "Awaiting agent"}
+        />
       </div>
       <CallControls
         micOn={media.micOn}
