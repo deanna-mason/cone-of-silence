@@ -1,31 +1,37 @@
-# Cone of Silence — server
+# Cone of Silence — server tier
 
-The trusted tier: creation-token allowlist + admin CRUD API (this phase);
-WebSocket signaling joins it in Phase 2.
+One Node process serving both the trusted-tier HTTP API (Express: admin CRUD +
+`POST /tokens/verify`) and the WebSocket signaling endpoint (`/ws`, protocol
+v1 — types in `../lib/webrtc/protocol.ts`). Rooms live in memory only; the
+creation-token store is the sole persistence (operator config, no user data).
 
-## Run locally
+## Dev workflow (two terminals)
 
-    cp env.example .env    # then fill in ADMIN_SECRET
-    npm install
-    npm run dev            # http://localhost:8787
+    # terminal 1 — frontend (repo root)
+    npm run dev            # Next.js on http://localhost:3000
 
-Two-terminal dev workflow: `npm run dev` here, `npm run dev` at the repo root
-(Next.js on :3000). The frontend reads NEXT_PUBLIC_API_URL (defaults to
-http://localhost:8787).
+    # terminal 2 — this server
+    cd server && npm run dev   # http + ws on :8787, reads .env
 
-## Endpoints
+Room creation needs a creation token in the browser's localStorage — mint one
+via the /admin page (or `POST /admin/tokens` with the bearer ADMIN_SECRET) and
+open the lobby with `#create=<token>` once.
 
-| Method | Path              | Auth   | Purpose |
-| ------ | ----------------- | ------ | ------- |
-| POST   | /tokens/verify    | none   | Lobby checks an invite token (body: `{token}`) |
-| GET    | /admin/tokens     | Bearer | List grants |
-| POST   | /admin/tokens     | Bearer | Mint (returns plaintext token ONCE) |
-| PATCH  | /admin/tokens/:id | Bearer | `{label}` relabel, or `{revoked}` revoke/restore |
-| DELETE | /admin/tokens/:id | Bearer | Purge a grant and its audit events |
+## Environment (`server/.env`, gitignored)
 
-Bearer = the ADMIN_SECRET value. 5 bad attempts → 60s lockout.
-Store outages fail CLOSED (503) — an outage never grants access.
+| Var | Meaning |
+| --- | --- |
+| `PORT` | default 8787 |
+| `ADMIN_SECRET` | 16+ chars; bearer secret for `/admin/*` (required) |
+| `ALLOWED_ORIGINS` | comma-separated; CORS + ws Origin allowlist (default `http://localhost:3000`) |
+| `TOKEN_STORE` | `file` (default) or `supabase` |
+| `TOKEN_FILE` | file-store path (default `data/tokens.json`) |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | required when `TOKEN_STORE=supabase` |
+
+Frontend env (repo root): `NEXT_PUBLIC_API_URL` (default `http://localhost:8787`)
+and `NEXT_PUBLIC_SIGNALING_URL` (default `ws://localhost:8787/ws`).
 
 ## Tests
 
-    npm test               # vitest; networkless (file store)
+    npm test           # vitest
+    npm run typecheck

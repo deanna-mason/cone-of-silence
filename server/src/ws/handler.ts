@@ -30,6 +30,7 @@ interface ConnState {
 
 export class SignalingHandler {
   private conns = new Map<SignalSocket, ConnState>();
+  private gone = new WeakSet<SignalSocket>();
 
   constructor(
     private readonly store: TokenStore,
@@ -72,6 +73,7 @@ export class SignalingHandler {
 
   /** Runs on graceful leave AND abrupt socket close — the single leave path. */
   onClose(sock: SignalSocket): void {
+    this.gone.add(sock);
     const state = this.conns.get(sock);
     if (!state) return;
     this.conns.delete(sock);
@@ -99,6 +101,7 @@ export class SignalingHandler {
       this.refuse(sock, "create-refused");
       return;
     }
+    if (this.gone.has(sock)) return; // socket died during the verify await — nothing to register
     // The verify await yields the event loop: if another message won this
     // socket a room slot meanwhile, a second entry would double-register it.
     if (this.conns.has(sock)) {

@@ -1,5 +1,7 @@
+import { createServer } from "node:http";
 import { createApp } from "./http/app.js";
 import { createStore } from "./tokens/createStore.js";
+import { attachSignaling } from "./ws/attach.js";
 
 const adminSecret = process.env.ADMIN_SECRET ?? "";
 if (adminSecret.length < 16) {
@@ -16,6 +18,8 @@ const port = Number(process.env.PORT ?? 8787);
 
 const store = await createStore(process.env);
 const app = createApp({ store, adminSecret, allowedOrigins });
-app.listen(port, () => {
-  console.log(`cone-of-silence server listening on :${port}`);
+const httpServer = createServer(app);
+attachSignaling(httpServer, { store, allowedOrigins });
+httpServer.listen(port, () => {
+  console.log(`cone-of-silence server (http + ws) listening on :${port}`);
 });

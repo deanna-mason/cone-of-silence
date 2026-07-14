@@ -167,6 +167,23 @@ describe("SignalingHandler", () => {
     expect(a.closed).toBe(true);
   });
 
+  it("a socket that closes during a pending verify never registers a ghost peer", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const handler = new SignalingHandler(
+      stubStore(async (token) => {
+        await gate;
+        return token === GOOD ? { ok: true, grant } : { ok: false, reason: "invalid" };
+      }),
+    );
+    const a = new FakeSocket();
+    const pending = handler.onMessage(a, create());
+    handler.onClose(a); // transport reports the close mid-verify
+    release();
+    await pending;
+    expect(handler.registry.roomCount()).toBe(0); // no ghost room/peer
+  });
+
   it("leave and abrupt close both broadcast peer-left to the survivors", async () => {
     const { handler, a, b, bId } = await callUp();
     await handler.onMessage(b, JSON.stringify({ v: 1, t: "leave" }));
