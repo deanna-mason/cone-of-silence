@@ -83,6 +83,14 @@ export default function RoomPage() {
     };
   }, [call.status, call.dcOpen]);
 
+  // A terminal call failure ends the operation — release the camera/mic so
+  // the tally light matches what the user believes. (media.stop reads refs,
+  // so the churning `media` identity is safe to omit from deps.)
+  useEffect(() => {
+    if (isCallFailure(call.status)) media.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [call.status]);
+
   // Arrival: read the fragment once, stash it, and strip it from the URL bar
   // via replaceState so the secret never lingers in history. Refresh recovers from the stash.
   useEffect(() => {
