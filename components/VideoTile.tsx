@@ -1,7 +1,7 @@
 // components/VideoTile.tsx
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface VideoTileProps {
   stream: MediaStream | null;
@@ -19,10 +19,37 @@ export default function VideoTile({
   camOff = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [, setTrackEpoch] = useState(0);
+  // Remote audio starts muted: unmuted autoplay is blocked by browsers, and
+  // muted playback always starts. The overlay button is the user gesture
+  // that lawfully unmutes.
+  const [audioOn, setAudioOn] = useState(false);
 
+  // Remote streams gain/lose tracks via ontrack/removetrack without any React
+  // render — re-render on stream mutations so `covered` stays truthful.
   useEffect(() => {
-    if (videoRef.current) videoRef.current.srcObject = stream;
+    if (!stream) return;
+    const bump = () => setTrackEpoch((n) => n + 1);
+    stream.addEventListener("addtrack", bump);
+    stream.addEventListener("removetrack", bump);
+    return () => {
+      stream.removeEventListener("addtrack", bump);
+      stream.removeEventListener("removetrack", bump);
+    };
   }, [stream]);
+
+  // React does not reliably manage the `muted` DOM property — set it by ref.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.srcObject = stream;
+    video.muted = isSelf || !audioOn;
+    if (stream) {
+      video.play().catch(() => {
+        // autoplay refused — the Restore Audio gesture retries via this effect
+      });
+    }
+  }, [stream, isSelf, audioOn]);
 
   const hasVideoTrack = stream !== null && stream.getVideoTracks().length > 0;
   const covered = !hasVideoTrack || camOff;
@@ -34,7 +61,6 @@ export default function VideoTile({
           ref={videoRef}
           autoPlay
           playsInline
-          muted={isSelf}
           className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""} ${
             covered ? "invisible" : ""
           }`}
@@ -52,6 +78,15 @@ export default function VideoTile({
             {stream ? (camOff ? "Lens capped" : "Audio only") : "Awaiting agent"}
           </p>
         </div>
+      )}
+      {!isSelf && stream && !audioOn && (
+        <button
+          type="button"
+          onClick={() => setAudioOn(true)}
+          className="kicker absolute right-2 top-2 border border-brass bg-field/80 px-3 py-1.5 text-ink-soft transition hover:text-signal"
+        >
+          Restore Audio
+        </button>
       )}
       <figcaption className="kicker absolute bottom-2 left-2 bg-field/80 px-2 py-1 text-ink-soft">
         {label}
