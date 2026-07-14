@@ -38,16 +38,26 @@ export default function VideoTile({
     };
   }, [stream]);
 
-  // React does not reliably manage the `muted` DOM property — set it by ref.
+  // Bind the stream once per identity change; muted play() always starts.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     video.srcObject = stream;
-    video.muted = isSelf || !audioOn;
+    setAudioOn(false); // a new stream must start muted again
     if (stream) {
       video.play().catch(() => {
-        // autoplay refused — the Restore Audio gesture retries via this effect
+        // autoplay refused — the Restore Audio gesture retries below
       });
+    }
+  }, [stream]);
+
+  // `muted` is a DOM property React doesn't reliably manage — set it via ref.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = isSelf || !audioOn;
+    if (stream && !video.muted) {
+      video.play().catch(() => setAudioOn(false)); // gesture failed — reshow the button
     }
   }, [stream, isSelf, audioOn]);
 
