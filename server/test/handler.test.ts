@@ -145,6 +145,28 @@ describe("SignalingHandler", () => {
     expect(b.closed).toBe(true);
   });
 
+  it("a second create racing a pending verify cannot double-register the socket", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const handler = new SignalingHandler(
+      stubStore(async (token) => {
+        await gate;
+        return token === GOOD ? { ok: true, grant } : { ok: false, reason: "invalid" };
+      }),
+    );
+    const a = new FakeSocket();
+    const p1 = handler.onMessage(a, create());
+    const p2 = handler.onMessage(a, create()); // both now awaiting verify
+    release();
+    await Promise.all([p1, p2]);
+    // exactly one entry may exist for this socket across the room
+    const slots = handler.registry.peersOf(ROOM).filter((p) => p.handle === a);
+    expect(slots.length).toBe(1);
+    // and the loser was refused as a protocol violation
+    expect(a.sent.filter((m) => m.t === "error" && m.reason === "bad-message")).toHaveLength(1);
+    expect(a.closed).toBe(true);
+  });
+
   it("leave and abrupt close both broadcast peer-left to the survivors", async () => {
     const { handler, a, b, bId } = await callUp();
     await handler.onMessage(b, JSON.stringify({ v: 1, t: "leave" }));

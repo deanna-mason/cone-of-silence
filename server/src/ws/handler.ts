@@ -99,6 +99,12 @@ export class SignalingHandler {
       this.refuse(sock, "create-refused");
       return;
     }
+    // The verify await yields the event loop: if another message won this
+    // socket a room slot meanwhile, a second entry would double-register it.
+    if (this.conns.has(sock)) {
+      this.refuse(sock, "bad-message", true); // closing runs onClose → clean leave
+      return;
+    }
     const result = this.registry.create(roomId, sock);
     if (result === "room-exists") {
       this.handleJoin(sock, roomId); // join-first flow: a create race folds into join
