@@ -78,4 +78,14 @@ describe("RoomRegistry", () => {
     reg.sweep(T0 + EMPTY_ROOM_GRACE_MS * 10); // long after — occupied rooms never sweep
     expect(reg.roomCount()).toBe(1);
   });
+
+  it("leave of an unknown peer never refreshes the grace timer", () => {
+    const reg = new RoomRegistry<string>();
+    const created = reg.create(ROOM, "sockA");
+    if (created === "room-exists") throw new Error("unreachable");
+    reg.leave(ROOM, created.selfId, T0);
+    reg.leave(ROOM, "not-a-peer", T0 + 20_000); // stray duplicate close
+    reg.sweep(T0 + EMPTY_ROOM_GRACE_MS + 1_000);
+    expect(reg.roomCount()).toBe(0); // grace measured from the REAL leave
+  });
 });

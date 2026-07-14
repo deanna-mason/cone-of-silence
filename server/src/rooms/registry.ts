@@ -48,8 +48,8 @@ export class RoomRegistry<T> {
   leave(roomId: string, peerId: string, now: number): PeerEntry<T>[] {
     const room = this.rooms.get(roomId);
     if (!room) return [];
-    room.peers.delete(peerId);
-    if (room.peers.size === 0) room.emptySince = now;
+    const removed = room.peers.delete(peerId);
+    if (removed && room.peers.size === 0) room.emptySince = now;
     return [...room.peers].map(([id, handle]) => ({ peerId: id, handle }));
   }
 
