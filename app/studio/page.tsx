@@ -120,8 +120,25 @@ export default function StudioPage() {
               type="file"
               accept={ACCEPT}
               onChange={(e) => setSelectedName(e.target.files?.[0]?.name ?? null)}
-              className="mt-2 w-full font-type text-sm text-ink-soft"
+              className="sr-only"
             />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className={`mt-2 w-full border-2 border-dashed px-4 py-6 text-center font-type text-sm transition ${
+                selectedName
+                  ? "border-brass/60 text-ink"
+                  : "border-ink-faint/40 text-ink-soft hover:border-brass hover:text-signal"
+              }`}
+            >
+              {selectedName ? (
+                <>
+                  <span className="text-brass">✓</span> {selectedName}
+                </>
+              ) : (
+                "Click to choose an audio or video file"
+              )}
+            </button>
           </div>
           <button
             type="submit"
