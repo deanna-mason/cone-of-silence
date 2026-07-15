@@ -5,13 +5,14 @@ import { join } from "node:path";
 import request from "supertest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
+import { FakeAccountStore } from "./fakes.js";
 
 const SECRET = "correct-horse-battery-staple";
 
 async function makeApp() {
   const dir = await mkdtemp(join(tmpdir(), "cos-auth-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
-  return createApp({ store, adminSecret: SECRET, allowedOrigins: [] });
+  return createApp({ store, accounts: new FakeAccountStore(), adminSecret: SECRET, allowedOrigins: [] });
 }
 
 describe("admin auth", () => {

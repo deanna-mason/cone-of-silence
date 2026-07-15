@@ -8,6 +8,7 @@ import WebSocket from "ws";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
 import { attachSignaling, type Signaling } from "../src/ws/attach.js";
+import { FakeAccountStore } from "./fakes.js";
 
 const ORIGIN = "http://localhost:3000";
 const ROOM = "R".repeat(22);
@@ -21,7 +22,12 @@ beforeEach(async () => {
   const dir = await mkdtemp(join(tmpdir(), "cos-ws-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
   token = (await store.mint("ws-test")).token;
-  const app = createApp({ store, adminSecret: "s".repeat(32), allowedOrigins: [ORIGIN] });
+  const app = createApp({
+    store,
+    accounts: new FakeAccountStore(),
+    adminSecret: "s".repeat(32),
+    allowedOrigins: [ORIGIN],
+  });
   httpServer = createServer(app);
   signaling = attachSignaling(httpServer, { store, allowedOrigins: [ORIGIN] });
   await new Promise<void>((r) => httpServer.listen(0, r));

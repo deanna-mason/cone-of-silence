@@ -5,6 +5,7 @@ import { join } from "node:path";
 import request from "supertest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
+import { FakeAccountStore } from "./fakes.js";
 
 const SECRET = "correct-horse-battery-staple";
 
@@ -13,6 +14,7 @@ async function setup() {
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
   const app = createApp({
     store,
+    accounts: new FakeAccountStore(),
     adminSecret: SECRET,
     allowedOrigins: ["http://localhost:3000"],
   });

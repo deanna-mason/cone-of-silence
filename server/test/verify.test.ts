@@ -6,11 +6,17 @@ import request from "supertest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
 import { StoreUnavailableError, type TokenStore } from "../src/tokens/types.js";
+import { FakeAccountStore } from "./fakes.js";
 
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "cos-verify-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
-  const app = createApp({ store, adminSecret: "s".repeat(32), allowedOrigins: [] });
+  const app = createApp({
+    store,
+    accounts: new FakeAccountStore(),
+    adminSecret: "s".repeat(32),
+    allowedOrigins: [],
+  });
   return { app, store };
 }
 
@@ -66,7 +72,12 @@ describe("POST /tokens/verify", () => {
       restore: async () => { throw new StoreUnavailableError("db down"); },
       purge: async () => { throw new StoreUnavailableError("db down"); },
     };
-    const app = createApp({ store: broken, adminSecret: "s".repeat(32), allowedOrigins: [] });
+    const app = createApp({
+      store: broken,
+      accounts: new FakeAccountStore(),
+      adminSecret: "s".repeat(32),
+      allowedOrigins: [],
+    });
     const res = await request(app).post("/tokens/verify").send({ token: "a".repeat(22) });
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: "channel unavailable" });
