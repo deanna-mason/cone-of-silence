@@ -5,7 +5,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
-import { FakeAccountStore } from "./fakes.js";
+import { FakeAccountStore, FakeRecordingStore } from "./fakes.js";
 
 const ADMIN = "test-admin-secret-16chars";
 
@@ -13,11 +13,15 @@ async function makeApp() {
   const dir = await mkdtemp(join(tmpdir(), "cos-auth-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
   const accounts = new FakeAccountStore();
+  const uploadDir = await mkdtemp(join(tmpdir(), "cos-auth-uploads-"));
   const app = createApp({
     store,
     accounts,
     adminSecret: ADMIN,
     allowedOrigins: ["http://localhost:3000"],
+    recordings: new FakeRecordingStore(),
+    uploadDir,
+    runner: { kick() {} },
   });
   return { app, store, accounts };
 }

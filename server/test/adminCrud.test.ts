@@ -6,7 +6,7 @@ import request from "supertest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
 import { StoreUnavailableError, type TokenStore } from "../src/tokens/types.js";
-import { FakeAccountStore } from "./fakes.js";
+import { FakeAccountStore, FakeRecordingStore } from "./fakes.js";
 
 const SECRET = "correct-horse-battery-staple";
 const auth = { Authorization: `Bearer ${SECRET}` };
@@ -14,11 +14,15 @@ const auth = { Authorization: `Bearer ${SECRET}` };
 async function setup(storeOverride?: TokenStore) {
   const dir = await mkdtemp(join(tmpdir(), "cos-crud-"));
   const store = storeOverride ?? (await FileTokenStore.open(join(dir, "tokens.json")));
+  const uploadDir = await mkdtemp(join(tmpdir(), "cos-crud-uploads-"));
   const app = createApp({
     store,
     accounts: new FakeAccountStore(),
     adminSecret: SECRET,
     allowedOrigins: [],
+    recordings: new FakeRecordingStore(),
+    uploadDir,
+    runner: { kick() {} },
   });
   return { app, store };
 }

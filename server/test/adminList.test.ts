@@ -5,18 +5,22 @@ import { join } from "node:path";
 import request from "supertest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
-import { FakeAccountStore } from "./fakes.js";
+import { FakeAccountStore, FakeRecordingStore } from "./fakes.js";
 
 const SECRET = "correct-horse-battery-staple";
 
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "cos-list-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
+  const uploadDir = await mkdtemp(join(tmpdir(), "cos-list-uploads-"));
   const app = createApp({
     store,
     accounts: new FakeAccountStore(),
     adminSecret: SECRET,
     allowedOrigins: ["http://localhost:3000"],
+    recordings: new FakeRecordingStore(),
+    uploadDir,
+    runner: { kick() {} },
   });
   return { app, store };
 }

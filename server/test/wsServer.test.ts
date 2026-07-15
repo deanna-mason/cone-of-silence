@@ -8,7 +8,7 @@ import WebSocket from "ws";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
 import { attachSignaling, type Signaling } from "../src/ws/attach.js";
-import { FakeAccountStore } from "./fakes.js";
+import { FakeAccountStore, FakeRecordingStore } from "./fakes.js";
 
 const ORIGIN = "http://localhost:3000";
 const ROOM = "R".repeat(22);
@@ -22,11 +22,15 @@ beforeEach(async () => {
   const dir = await mkdtemp(join(tmpdir(), "cos-ws-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
   token = (await store.mint("ws-test")).token;
+  const uploadDir = await mkdtemp(join(tmpdir(), "cos-ws-uploads-"));
   const app = createApp({
     store,
     accounts: new FakeAccountStore(),
     adminSecret: "s".repeat(32),
     allowedOrigins: [ORIGIN],
+    recordings: new FakeRecordingStore(),
+    uploadDir,
+    runner: { kick() {} },
   });
   httpServer = createServer(app);
   signaling = attachSignaling(httpServer, { store, allowedOrigins: [ORIGIN] });

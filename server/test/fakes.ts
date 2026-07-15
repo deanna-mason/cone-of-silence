@@ -1,7 +1,24 @@
 import { randomUUID } from "node:crypto";
+import type { Express } from "express";
+import request from "supertest";
 import type { AccountStore, SessionInfo, User } from "../src/accounts/types.js";
 import { UsernameTakenError } from "../src/accounts/types.js";
 import type { Recording, RecordingStatus, RecordingStore } from "../src/studio/types.js";
+import type { TokenStore } from "../src/tokens/types.js";
+
+/** Mints a signup token, signs up, and returns a ready-to-use Authorization bearer value. */
+export async function signupAndLogin(
+  app: Express,
+  store: TokenStore,
+  username: string,
+  password = "opensesame",
+): Promise<string> {
+  const { token } = await store.mint(username, "signup");
+  const res = await request(app)
+    .post("/auth/signup")
+    .send({ token, username, password });
+  return `Bearer ${res.body.session as string}`;
+}
 
 interface StoredUser extends User { passwordHash: string }
 interface StoredSession { userId: string; tokenHash: string; expiresAt: string }
