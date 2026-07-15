@@ -145,14 +145,24 @@ export default function RecordingRow({
 
       <div className="mt-4 flex items-center gap-4">
         {confirmingBurn ? (
-          <button
-            type="button"
-            disabled={burnBusy}
-            onClick={() => void handleBurn()}
-            className="kicker text-vermilion transition hover:text-vermilion-bright disabled:opacity-40"
-          >
-            {burnBusy ? "BURNING…" : "Confirm Burn"}
-          </button>
+          <>
+            <button
+              type="button"
+              disabled={burnBusy}
+              onClick={() => void handleBurn()}
+              className="kicker text-vermilion transition hover:text-vermilion-bright disabled:opacity-40"
+            >
+              {burnBusy ? "BURNING…" : "Confirm Burn"}
+            </button>
+            <button
+              type="button"
+              disabled={burnBusy}
+              onClick={() => setConfirmingBurn(false)}
+              className="kicker text-ink-soft transition hover:text-brass disabled:opacity-40"
+            >
+              Stand Down
+            </button>
+          </>
         ) : (
           <button
             type="button"
