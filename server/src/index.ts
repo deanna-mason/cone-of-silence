@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
-import ws from "ws";
-import { createClient, type WebSocketLikeConstructor } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createApp } from "./http/app.js";
 import { JobRunner } from "./studio/runner.js";
 import { SupabaseRecordingStore } from "./studio/supabaseRecordings.js";
+import { createSupabaseClient } from "./supabaseClient.js";
 import { createStore } from "./tokens/createStore.js";
 import { attachSignaling } from "./ws/attach.js";
 import { SupabaseAccountStore } from "./accounts/supabaseAccounts.js";
@@ -14,18 +14,14 @@ if (adminSecret.length < 16) {
   process.exit(1);
 }
 
-// Interim wiring — Task 8 will fold this into a shared factory alongside createStore.
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!supabaseUrl || !supabaseKey) {
-  console.error("accounts require SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
+// Accounts + Studio require Supabase even when TOKEN_STORE=file.
+let supabase: SupabaseClient;
+try {
+  supabase = createSupabaseClient(process.env);
+} catch (err) {
+  console.error("accounts require SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:", (err as Error).message);
   process.exit(1);
 }
-const supabase = createClient(supabaseUrl, supabaseKey, {
-  auth: { persistSession: false },
-  // Node 20 lacks native WebSocket; supabase-js's constructor requires one even though this store never uses realtime. Remove when the runtime is Node >= 22.
-  realtime: { transport: ws as WebSocketLikeConstructor },
-});
 const accounts = new SupabaseAccountStore(supabase);
 const recordings = new SupabaseRecordingStore(supabase);
 
