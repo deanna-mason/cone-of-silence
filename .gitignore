@@ -53,3 +53,6 @@ CLAUDE.md
 AGENTS.md
 docs/superpowers/
 .superpowers/
+
+# accidental local session/transcript dumps
+2026-*-local-command-*.txt
