@@ -157,4 +157,51 @@ describe("auth routes", () => {
     const res = await request(ctx.app).get("/auth/me").set("Authorization", "Bearer nope");
     expect(res.status).toBe(401);
   });
+
+  it("rejects an over-long username with the same generic 400, before it's used as a lockout key", async () => {
+    const res = await request(ctx.app)
+      .post("/auth/login")
+      .send({ username: "a".repeat(21), password: "opensesame" });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "body must be exactly { username, password }" });
+  });
+
+  it("a 20-char username (the max valid length) is still checked normally, not rejected", async () => {
+    const res = await request(ctx.app)
+      .post("/auth/login")
+      .send({ username: "a".repeat(20), password: "opensesame" });
+    // Not the length-cap 400 — a real (if wrong) credential check happened.
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "denied" });
+  });
+
+  it("a stale lockout entry is evicted and the user can log in again once the window elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const token = await signupToken();
+      await request(ctx.app)
+        .post("/auth/signup")
+        .send({ token, username: "deanna", password: "opensesame" });
+      for (let i = 0; i < 5; i++) {
+        const res = await request(ctx.app)
+          .post("/auth/login")
+          .send({ username: "deanna", password: "wrong" });
+        expect(res.status).toBe(401);
+      }
+      const locked = await request(ctx.app)
+        .post("/auth/login")
+        .send({ username: "deanna", password: "opensesame" });
+      expect(locked.status).toBe(429);
+
+      // Advance past the 60s lockout window: the stale entry must be
+      // evicted (not just re-checked) and a correct password now succeeds.
+      vi.advanceTimersByTime(61_000);
+      const after = await request(ctx.app)
+        .post("/auth/login")
+        .send({ username: "deanna", password: "opensesame" });
+      expect(after.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

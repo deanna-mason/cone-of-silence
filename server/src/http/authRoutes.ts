@@ -10,6 +10,7 @@ import { UsernameTakenError, type AccountStore } from "../accounts/types.js";
 import { hashToken } from "../tokens/crypto.js";
 import type { TokenStore } from "../tokens/types.js";
 import { hasExactKeys } from "./validate.js";
+import { Lockout } from "./lockout.js";
 import { createUserAuth } from "./userAuth.js";
 
 const MAX_FAILURES = 5;
@@ -34,13 +35,14 @@ async function issueSession(accounts: AccountStore, userId: string) {
 
 export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Router {
   const router = Router();
-  const failures = new Map<string, { count: number; lockedUntil: number }>();
+  const failures = new Lockout(MAX_FAILURES, LOCKOUT_MS);
 
   const run = async (res: Response, fn: () => Promise<void>): Promise<void> => {
     try {
       await fn();
-    } catch {
-      res.status(503).json({ error: "channel unavailable" }); // fail closed
+    } catch (err) {
+      console.error("[auth]", err); // fail closed, but don't swallow the cause
+      res.status(503).json({ error: "channel unavailable" });
     }
   };
 
@@ -102,14 +104,16 @@ export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Ro
       if (
         !hasExactKeys(body, ["username", "password"]) ||
         typeof body.username !== "string" ||
-        typeof body.password !== "string"
+        typeof body.password !== "string" ||
+        // A username longer than USERNAME_RE's max can't be a real account —
+        // reject it before it's ever used as a lockout-map key.
+        body.username.length > 20
       ) {
         res.status(400).json({ error: "body must be exactly { username, password }" });
         return;
       }
       const key = `${req.ip ?? "unknown"}:${body.username}`;
-      const record = failures.get(key);
-      if (record && record.lockedUntil > Date.now()) {
+      if (failures.isLocked(key)) {
         res.status(429).json({ error: "too many attempts" });
         return;
       }
@@ -122,15 +126,11 @@ export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Ro
         : await verifyPassword(body.password, DUMMY_HASH);
       const ok = creds !== null && passwordOk;
       if (!ok) {
-        const count = (record?.count ?? 0) + 1;
-        failures.set(key, {
-          count,
-          lockedUntil: count >= MAX_FAILURES ? Date.now() + LOCKOUT_MS : 0,
-        });
+        failures.recordFailure(key);
         res.status(401).json({ error: "denied" }); // deliberately generic
         return;
       }
-      failures.delete(key);
+      failures.clear(key);
       const { session, expiresAt } = await issueSession(accounts, creds.user.id);
       res.json({ session, username: creds.user.username, expiresAt });
     }),

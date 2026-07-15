@@ -30,6 +30,11 @@ export function createApp({
   runner,
 }: AppOptions): Express {
   const app = express();
+  // Caddy fronts this app on the droplet, so req.socket.remoteAddress is
+  // always 127.0.0.1 unless we trust the loopback proxy and read the real
+  // client IP it sets in X-Forwarded-For. Without this, req.ip is constant
+  // for every request and the IP-keyed rate limiters below key on nothing.
+  app.set("trust proxy", "loopback");
   app.disable("x-powered-by");
   app.use(createCors(allowedOrigins));
   app.use(express.json());
@@ -45,6 +50,7 @@ export function createApp({
       res.status(400).json({ error: "invalid JSON" });
       return;
     }
+    console.error("[app] unhandled error", err); // fail closed, but don't swallow the cause
     res.status(503).json({ error: "channel unavailable" });
   });
 

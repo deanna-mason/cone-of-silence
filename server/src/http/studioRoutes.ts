@@ -36,8 +36,9 @@ export function createStudioRouter(store: RecordingStore, deps: StudioDeps): Rou
   const run = async (res: Response, fn: () => Promise<void>): Promise<void> => {
     try {
       await fn();
-    } catch {
-      res.status(503).json({ error: "channel unavailable" }); // fail closed
+    } catch (err) {
+      console.error("[studio]", err); // fail closed, but don't swallow the cause
+      res.status(503).json({ error: "channel unavailable" });
     }
   };
 

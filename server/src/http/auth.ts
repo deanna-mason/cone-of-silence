@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
+import { Lockout } from "./lockout.js";
 
 const MAX_FAILURES = 5;
 const LOCKOUT_MS = 60_000;
@@ -12,28 +13,23 @@ function secretsMatch(a: string, b: string): boolean {
 }
 
 export function createAdminAuth(secret: string) {
-  const failures = new Map<string, { count: number; lockedUntil: number }>();
+  const lockout = new Lockout(MAX_FAILURES, LOCKOUT_MS);
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const ip = req.ip ?? "unknown";
-    const record = failures.get(ip);
-    if (record && record.lockedUntil > Date.now()) {
+    if (lockout.isLocked(ip)) {
       res.status(429).json({ error: "too many attempts" });
       return;
     }
     const header = req.get("authorization") ?? "";
     const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
     if (!presented || !secretsMatch(presented, secret)) {
-      const count = (record?.count ?? 0) + 1;
-      failures.set(ip, {
-        count,
-        lockedUntil: count >= MAX_FAILURES ? Date.now() + LOCKOUT_MS : 0,
-      });
+      lockout.recordFailure(ip);
       // deliberately generic — reveal nothing about why
       res.status(401).json({ error: "denied" });
       return;
     }
-    failures.delete(ip);
+    lockout.clear(ip);
     next();
   };
 }
