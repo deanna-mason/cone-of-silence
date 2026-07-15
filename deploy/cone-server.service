@@ -1,0 +1,16 @@
+[Unit]
+Description=Cone of Silence server (http + ws)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cos
+WorkingDirectory=/opt/cone-of-silence/server
+ExecStart=/opt/cone-of-silence/server/node_modules/.bin/tsx --env-file=.env src/index.ts
+Restart=on-failure
+RestartSec=3
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

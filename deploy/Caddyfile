@@ -1,0 +1,3 @@
+api.coneofsilence.app {
+	reverse_proxy localhost:8787
+}
