@@ -204,4 +204,22 @@ describe("auth routes", () => {
       vi.useRealTimers();
     }
   });
+
+  it("logs the cause and still fails closed with a generic 503 when the store throws", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const boom = new Error("connection reset");
+      vi.spyOn(ctx.accounts, "getCredentials").mockRejectedValueOnce(boom);
+
+      const res = await request(ctx.app)
+        .post("/auth/login")
+        .send({ username: "deanna", password: "opensesame" });
+
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: "channel unavailable" });
+      expect(errorSpy).toHaveBeenCalledWith("[auth]", boom);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
