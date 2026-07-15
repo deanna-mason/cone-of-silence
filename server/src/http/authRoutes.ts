@@ -16,6 +16,11 @@ const MAX_FAILURES = 5;
 const LOCKOUT_MS = 60_000;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
 
+// Burned on every login attempt for an unknown username so the bcrypt
+// compare always runs — otherwise a missing account short-circuits the
+// verify call and the timing difference leaks which usernames exist.
+const DUMMY_HASH = await hashPassword("cone-of-silence-dummy");
+
 function validPassword(value: unknown): value is string {
   return typeof value === "string" && value.length >= 8 && value.length <= 72;
 }
@@ -109,7 +114,13 @@ export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Ro
         return;
       }
       const creds = await accounts.getCredentials(body.username);
-      const ok = creds !== null && (await verifyPassword(body.password, creds.passwordHash));
+      // Always run the bcrypt compare — against the real hash if the
+      // username exists, otherwise against a fixed dummy hash — so a
+      // missing account isn't measurably faster than a wrong password.
+      const passwordOk = creds
+        ? await verifyPassword(body.password, creds.passwordHash)
+        : await verifyPassword(body.password, DUMMY_HASH);
+      const ok = creds !== null && passwordOk;
       if (!ok) {
         const count = (record?.count ?? 0) + 1;
         failures.set(key, {

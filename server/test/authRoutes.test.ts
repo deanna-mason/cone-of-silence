@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
 import { FakeAccountStore } from "./fakes.js";
@@ -82,6 +82,31 @@ describe("auth routes", () => {
     const retry = await request(ctx.app)
       .post("/auth/signup")
       .send({ token: t2, username: "deanna2", password: "opensesame" });
+    expect(retry.status).toBe(201);
+  });
+
+  it("restores the token when createUser loses the race to UsernameTakenError", async () => {
+    // "deanna" already exists.
+    const t1 = await signupToken();
+    await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token: t1, username: "deanna", password: "opensesame" });
+
+    // Force the pre-redeem check to (falsely) report the name free, so the
+    // token gets burned and createUser is the one that discovers the clash.
+    vi.spyOn(ctx.accounts, "getCredentials").mockResolvedValueOnce(null);
+
+    const t2 = await signupToken();
+    const race = await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token: t2, username: "deanna", password: "opensesame" });
+    expect(race.status).toBe(409);
+    expect(race.body).toEqual({ error: "codename taken" });
+
+    // The burn must have been compensated: t2 still works for a fresh name.
+    const retry = await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token: t2, username: "deanna3", password: "opensesame" });
     expect(retry.status).toBe(201);
   });
 
