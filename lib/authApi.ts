@@ -33,6 +33,7 @@ export function getSession(): StoredSession | null {
     }
     return parsed;
   } catch {
+    localStorage.removeItem(SESSION_KEY);
     return null;
   }
 }
