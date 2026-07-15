@@ -27,6 +27,14 @@ export default function NavBar() {
           >
             Dossier
           </Link>
+          <span className="text-brass/40">/</span>
+          <Link href="/studio" className="kicker transition hover:text-signal">
+            Studio
+          </Link>
+          <span className="text-brass/40">/</span>
+          <Link href="/account" className="kicker transition hover:text-signal">
+            Account
+          </Link>
         </div>
       </div>
     </nav>
