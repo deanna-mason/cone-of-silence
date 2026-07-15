@@ -23,7 +23,7 @@ class FakeSocket implements SignalSocket {
 }
 
 const grant: Grant = {
-  id: "1", label: "test", createdAt: "2026-07-13T00:00:00Z", lastUsedAt: null, revokedAt: null,
+  id: "1", label: "test", kind: "room-creation", createdAt: "2026-07-13T00:00:00Z", lastUsedAt: null, revokedAt: null,
 };
 
 function stubStore(verify?: TokenStore["verify"]): TokenStore {

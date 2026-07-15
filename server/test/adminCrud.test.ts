@@ -28,6 +28,32 @@ describe("admin CRUD", () => {
     expect(JSON.stringify(list.body)).not.toContain(res.body.token);
   });
 
+  it("mints a signup token when kind is given", async () => {
+    const { app } = await setup();
+    const res = await request(app)
+      .post("/admin/tokens")
+      .set(auth)
+      .send({ label: "invite", kind: "signup" });
+    expect(res.status).toBe(201);
+    expect(res.body.grant.kind).toBe("signup");
+  });
+
+  it("rejects a bogus kind with 400", async () => {
+    const { app } = await setup();
+    const res = await request(app)
+      .post("/admin/tokens")
+      .set(auth)
+      .send({ label: "invite", kind: "bogus" });
+    expect(res.status).toBe(400);
+  });
+
+  it("defaults to room-creation when kind is omitted", async () => {
+    const { app } = await setup();
+    const res = await request(app).post("/admin/tokens").set(auth).send({ label: "alice2" });
+    expect(res.status).toBe(201);
+    expect(res.body.grant.kind).toBe("room-creation");
+  });
+
   it("rejects bad labels and unknown fields with 400", async () => {
     const { app } = await setup();
     for (const body of [
@@ -95,6 +121,7 @@ describe("admin CRUD", () => {
     const broken: TokenStore = {
       verify: async () => { throw new StoreUnavailableError("db down"); },
       mint: async () => { throw new StoreUnavailableError("db down"); },
+      redeem: async () => { throw new StoreUnavailableError("db down"); },
       list: async () => { throw new StoreUnavailableError("db down"); },
       listEvents: async () => { throw new StoreUnavailableError("db down"); },
       relabel: async () => { throw new StoreUnavailableError("db down"); },

@@ -1,6 +1,9 @@
+export type TokenKind = "room-creation" | "signup";
+
 export interface Grant {
   id: string;
   label: string;
+  kind: TokenKind;
   createdAt: string; // ISO 8601
   lastUsedAt: string | null;
   revokedAt: string | null; // null = active
@@ -10,7 +13,7 @@ export type VerifyResult =
   | { ok: true; grant: Grant }
   | { ok: false; reason: "invalid" | "revoked" };
 
-export type TokenEventKind = "minted" | "relabeled" | "revoked" | "restored";
+export type TokenEventKind = "minted" | "relabeled" | "revoked" | "restored" | "redeemed";
 
 export interface TokenEvent {
   id: string;
@@ -37,9 +40,11 @@ export class StoreUnavailableError extends Error {
 
 export interface TokenStore {
   /** touch=false checks validity without updating lastUsedAt (lobby verify). */
-  verify(token: string, opts?: { touch?: boolean }): Promise<VerifyResult>;
+  verify(token: string, opts?: { touch?: boolean; kind?: TokenKind }): Promise<VerifyResult>;
   /** Returns the plaintext token exactly once; only its hash is stored. */
-  mint(label: string): Promise<{ token: string; grant: Grant }>;
+  mint(label: string, kind?: TokenKind): Promise<{ token: string; grant: Grant }>;
+  /** Single-use burn of an active signup token; wrong kind or already-used → ok:false. */
+  redeem(token: string): Promise<VerifyResult>;
   list(): Promise<Grant[]>;
   listEvents(tokenId: string): Promise<TokenEvent[]>;
   relabel(id: string, label: string): Promise<Grant>;

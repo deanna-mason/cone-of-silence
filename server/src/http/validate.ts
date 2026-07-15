@@ -7,6 +7,11 @@ export function parseLabel(value: unknown): string | null {
   return label;
 }
 
+/** Recognized token kinds; returns null for anything else (including missing/other types). */
+export function parseKind(value: unknown): "room-creation" | "signup" | null {
+  return value === "room-creation" || value === "signup" ? value : null;
+}
+
 /** True when body is a plain object with exactly the given keys. */
 export function hasExactKeys(body: unknown, keys: string[]): boolean {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return false;

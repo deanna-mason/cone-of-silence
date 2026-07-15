@@ -58,6 +58,7 @@ describe("POST /tokens/verify", () => {
     const broken: TokenStore = {
       verify: async () => { throw new StoreUnavailableError("db down"); },
       mint: async () => { throw new StoreUnavailableError("db down"); },
+      redeem: async () => { throw new StoreUnavailableError("db down"); },
       list: async () => { throw new StoreUnavailableError("db down"); },
       listEvents: async () => { throw new StoreUnavailableError("db down"); },
       relabel: async () => { throw new StoreUnavailableError("db down"); },

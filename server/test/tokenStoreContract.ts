@@ -92,5 +92,36 @@ export function runTokenStoreContract(
       await expect(store.restore("nope")).rejects.toBeInstanceOf(GrantNotFoundError);
       await expect(store.purge("nope")).rejects.toBeInstanceOf(GrantNotFoundError);
     });
+
+    it("mints room-creation by default and carries kind on the grant", async () => {
+      const store = await makeStore();
+      const { grant } = await store.mint("default-kind");
+      expect(grant.kind).toBe("room-creation");
+    });
+
+    it("verify rejects a kind mismatch as invalid", async () => {
+      const store = await makeStore();
+      const { token } = await store.mint("signup-tok", "signup");
+      expect(await store.verify(token)).toEqual({ ok: false, reason: "invalid" });
+      const ok = await store.verify(token, { kind: "signup", touch: false });
+      expect(ok.ok).toBe(true);
+    });
+
+    it("redeem burns a signup token exactly once", async () => {
+      const store = await makeStore();
+      const { token, grant } = await store.mint("one-shot", "signup");
+      const first = await store.redeem(token);
+      expect(first.ok).toBe(true);
+      const second = await store.redeem(token);
+      expect(second.ok).toBe(false);
+      const events = await store.listEvents(grant.id);
+      expect(events.map((e) => e.event)).toContain("redeemed");
+    });
+
+    it("redeem refuses room-creation tokens", async () => {
+      const store = await makeStore();
+      const { token } = await store.mint("not-signup");
+      expect(await store.redeem(token)).toEqual({ ok: false, reason: "invalid" });
+    });
   });
 }

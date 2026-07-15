@@ -8,6 +8,7 @@ import {
   StoreUnavailableError,
   TokenEvent,
   TokenEventKind,
+  TokenKind,
   TokenStore,
   VerifyResult,
 } from "./types.js";
@@ -65,6 +66,9 @@ export class FileTokenStore implements TokenStore {
       );
     }
 
+    // Legacy rows predate the kind column — normalize to the prior behavior.
+    parsed.grants = parsed.grants.map((g) => ({ ...g, kind: g.kind ?? "room-creation" }));
+
     return new FileTokenStore(path, parsed);
   }
 
@@ -105,11 +109,15 @@ export class FileTokenStore implements TokenStore {
     return grant;
   }
 
-  async verify(token: string, opts?: { touch?: boolean }): Promise<VerifyResult> {
+  async verify(
+    token: string,
+    opts?: { touch?: boolean; kind?: TokenKind },
+  ): Promise<VerifyResult> {
     const hash = hashToken(token);
     const grant = this.data.grants.find((g) => g.tokenHash === hash);
     if (!grant) return { ok: false, reason: "invalid" };
     if (grant.revokedAt) return { ok: false, reason: "revoked" };
+    if (grant.kind !== (opts?.kind ?? "room-creation")) return { ok: false, reason: "invalid" };
     if (opts?.touch !== false) {
       grant.lastUsedAt = new Date().toISOString();
       await this.save();
@@ -117,11 +125,15 @@ export class FileTokenStore implements TokenStore {
     return { ok: true, grant: FileTokenStore.toPublic(grant) };
   }
 
-  async mint(label: string): Promise<{ token: string; grant: Grant }> {
+  async mint(
+    label: string,
+    kind: TokenKind = "room-creation",
+  ): Promise<{ token: string; grant: Grant }> {
     const token = generateToken();
     const grant: StoredGrant = {
       id: randomUUID(),
       label,
+      kind,
       tokenHash: hashToken(token),
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
@@ -131,6 +143,18 @@ export class FileTokenStore implements TokenStore {
     this.addEvent(grant.id, "minted");
     await this.save();
     return { token, grant: FileTokenStore.toPublic(grant) };
+  }
+
+  async redeem(token: string): Promise<VerifyResult> {
+    const hash = hashToken(token);
+    const grant = this.data.grants.find((g) => g.tokenHash === hash);
+    if (!grant || grant.kind !== "signup") return { ok: false, reason: "invalid" };
+    if (grant.revokedAt) return { ok: false, reason: "revoked" };
+    grant.revokedAt = new Date().toISOString();
+    grant.lastUsedAt = grant.revokedAt;
+    this.addEvent(grant.id, "redeemed");
+    await this.save();
+    return { ok: true, grant: FileTokenStore.toPublic(grant) };
   }
 
   async list(): Promise<Grant[]> {

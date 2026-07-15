@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { GrantNotFoundError, type TokenStore } from "../tokens/types.js";
-import { hasExactKeys, parseLabel } from "./validate.js";
+import { hasExactKeys, parseKind, parseLabel } from "./validate.js";
 
 export function createAdminRouter(store: TokenStore): Router {
   const router = Router();
@@ -26,16 +26,23 @@ export function createAdminRouter(store: TokenStore): Router {
 
   router.post("/tokens", (req: Request, res: Response) =>
     run(res, async () => {
-      if (!hasExactKeys(req.body, ["label"])) {
-        res.status(400).json({ error: "body must be exactly { label }" });
+      const body = req.body as Record<string, unknown>;
+      const withKind = hasExactKeys(body, ["label", "kind"]);
+      if (!withKind && !hasExactKeys(body, ["label"])) {
+        res.status(400).json({ error: "body must be { label } or { label, kind }" });
         return;
       }
-      const label = parseLabel((req.body as Record<string, unknown>).label);
+      const label = parseLabel(body.label);
       if (!label) {
         res.status(400).json({ error: "label must be 1-64 printable characters" });
         return;
       }
-      const { token, grant } = await store.mint(label);
+      const kind = withKind ? parseKind(body.kind) : "room-creation";
+      if (!kind) {
+        res.status(400).json({ error: "kind must be room-creation or signup" });
+        return;
+      }
+      const { token, grant } = await store.mint(label, kind);
       res.status(201).json({ token, grant });
     }),
   );
