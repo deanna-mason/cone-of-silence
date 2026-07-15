@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import ws from "ws";
 import { createClient, type WebSocketLikeConstructor } from "@supabase/supabase-js";
 import { createApp } from "./http/app.js";
+import { JobRunner } from "./studio/runner.js";
 import { SupabaseRecordingStore } from "./studio/supabaseRecordings.js";
 import { createStore } from "./tokens/createStore.js";
 import { attachSignaling } from "./ws/attach.js";
@@ -35,8 +36,10 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:3000")
 
 const port = Number(process.env.PORT ?? 8787);
 const uploadDir = process.env.UPLOAD_DIR ?? "data/uploads";
-// Task 7 replaces this with the JobRunner
-const runner = { kick() {} };
+const runner = new JobRunner(recordings, {
+  uploadDir,
+  rnnoiseModel: process.env.RNNOISE_MODEL ?? "models/std.rnnn",
+});
 
 const store = await createStore(process.env);
 const app = createApp({ store, accounts, adminSecret, allowedOrigins, recordings, uploadDir, runner });
@@ -45,3 +48,6 @@ attachSignaling(httpServer, { store, allowedOrigins });
 httpServer.listen(port, () => {
   console.log(`cone-of-silence server (http + ws) listening on :${port}`);
 });
+// Recover any rows left "processing" by a previous crash, then start draining the
+// queue. Runs after listen() so a slow recover/first-job never delays health checks.
+void runner.recoverAndKick();
