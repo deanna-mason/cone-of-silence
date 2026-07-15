@@ -50,4 +50,4 @@ httpServer.listen(port, () => {
 });
 // Recover any rows left "processing" by a previous crash, then start draining the
 // queue. Runs after listen() so a slow recover/first-job never delays health checks.
-void runner.recoverAndKick();
+runner.recoverAndKick().catch((err) => console.error("recoverAndKick failed:", err));

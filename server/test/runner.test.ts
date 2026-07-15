@@ -67,4 +67,41 @@ describe("JobRunner", () => {
     await vi.waitFor(async () => expect((await store.get(stale.id))?.status).toBe("done"));
     expect(calls).toHaveLength(3); // measure, apply, waveform
   });
+
+  it("kick() drains quietly when store.claimNextQueued rejects; retries on next kick()", async () => {
+    // Subclass to reject once on claimNextQueued
+    class ErrorFirstRecordingStore extends FakeRecordingStore {
+      private callCount = 0;
+      async claimNextQueued() {
+        this.callCount++;
+        if (this.callCount === 1) {
+          return Promise.reject(new Error("db down"));
+        }
+        return super.claimNextQueued();
+      }
+    }
+
+    const store = new ErrorFirstRecordingStore();
+    const rec = await store.create("u1", "test.mp3", ".mp3");
+
+    const calls: string[][] = [];
+    const runFfmpeg = async (args: string[]) => {
+      calls.push(args);
+      const isMeasure = args.join(" ").includes("print_format=json");
+      return { code: 0, stderr: isMeasure ? MEASURE_JSON : "" };
+    };
+
+    const runner = new JobRunner(store, { uploadDir: "/up", rnnoiseModel: "/m/std.rnnn", runFfmpeg });
+
+    // First kick() hits the rejection — drain returns quietly
+    runner.kick();
+    await vi.waitFor(async () => expect((await store.get(rec.id))?.status).toBe("queued"));
+    // Wait for the first drain's finally handler to set running = false
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Second kick() retries — should process normally
+    runner.kick();
+    await vi.waitFor(async () => expect((await store.get(rec.id))?.status).toBe("done"));
+    expect(calls).toHaveLength(3); // measure, apply, waveform
+  });
 });
