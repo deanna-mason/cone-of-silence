@@ -7,6 +7,7 @@ import { API_URL } from "./config";
 export interface Grant {
   id: string;
   label: string;
+  kind: "room-creation" | "signup";
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
@@ -50,8 +51,12 @@ export async function listGrants(secret: string): Promise<Grant[]> {
 export async function mintGrant(
   secret: string,
   label: string,
+  kind: "room-creation" | "signup" = "room-creation",
 ): Promise<{ token: string; grant: Grant }> {
-  return req("/admin/tokens", secret, { method: "POST", body: JSON.stringify({ label }) });
+  return req("/admin/tokens", secret, {
+    method: "POST",
+    body: JSON.stringify({ label, kind }),
+  });
 }
 
 export async function patchGrant(

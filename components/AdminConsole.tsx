@@ -27,7 +27,12 @@ export default function AdminConsole() {
   const [grants, setGrants] = useState<Grant[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [mintLabel, setMintLabel] = useState("");
-  const [minted, setMinted] = useState<{ label: string; link: string } | null>(null);
+  const [mintKind, setMintKind] = useState<"room-creation" | "signup">("room-creation");
+  const [minted, setMinted] = useState<
+    | { kind: "room-creation"; label: string; link: string }
+    | { kind: "signup"; label: string; token: string }
+    | null
+  >(null);
   const [copied, setCopied] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
@@ -88,8 +93,16 @@ export default function AdminConsole() {
     const label = mintLabel.trim();
     if (!label) return;
     void withBusy(async () => {
-      const { token, grant } = await mintGrant(secret!, label);
-      setMinted({ label: grant.label, link: buildCreateInviteLink(token, window.location.origin) });
+      const { token, grant } = await mintGrant(secret!, label, mintKind);
+      setMinted(
+        grant.kind === "signup"
+          ? { kind: "signup", label: grant.label, token }
+          : {
+              kind: "room-creation",
+              label: grant.label,
+              link: buildCreateInviteLink(token, window.location.origin),
+            },
+      );
       setCopied(false);
       setMintLabel("");
     });
@@ -210,8 +223,37 @@ export default function AdminConsole() {
         </button>
       </div>
 
-      {/* Show-once invite link */}
-      {minted && (
+      <div className="mt-3 flex gap-2" role="radiogroup" aria-label="Credential kind">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mintKind === "room-creation"}
+          onClick={() => setMintKind("room-creation")}
+          className={`kicker border px-4 py-2 transition ${
+            mintKind === "room-creation"
+              ? "border-brass text-signal"
+              : "border-ink-faint/30 text-ink-soft hover:border-brass hover:text-signal"
+          }`}
+        >
+          Room Creation
+        </button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mintKind === "signup"}
+          onClick={() => setMintKind("signup")}
+          className={`kicker border px-4 py-2 transition ${
+            mintKind === "signup"
+              ? "border-brass text-signal"
+              : "border-ink-faint/30 text-ink-soft hover:border-brass hover:text-signal"
+          }`}
+        >
+          Signup — single use
+        </button>
+      </div>
+
+      {/* Show-once reveal */}
+      {minted && minted.kind === "room-creation" && (
         <div className="hairline mt-4 border border-brass/50 bg-inset p-4">
           <p className="kicker text-sienna">
             Invitation for “{minted.label}” — visible ONCE. Copy it now; only the codename
@@ -245,10 +287,45 @@ export default function AdminConsole() {
         </div>
       )}
 
+      {minted && minted.kind === "signup" && (
+        <div className="hairline mt-4 border border-brass/50 bg-inset p-4">
+          <p className="kicker text-sienna">
+            Signup token for “{minted.label}” — visible ONCE. Copy it now; only the codename
+            survives.
+          </p>
+          <p className="mt-2 break-all font-type text-sm text-ink">{minted.token}</p>
+          <div className="mt-3 flex gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(minted.token)
+                  .then(() => setCopied(true))
+                  .catch(() => setCopied(false));
+              }}
+              className="kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal"
+            >
+              {copied ? "✓ Copied" : "Copy Token"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMinted(null)}
+              className="kicker px-4 py-2 text-ink-soft transition hover:text-vermilion"
+            >
+              Dismiss
+            </button>
+          </div>
+          <p className="kicker mt-3 text-ink-soft">
+            Hand this to one person — it dies on use.
+          </p>
+        </div>
+      )}
+
       <table className="mt-6 w-full text-left font-type text-sm">
         <thead>
           <tr className="kicker text-ink-soft">
             <th className="pb-2">Label</th>
+            <th className="pb-2">Kind</th>
             <th className="pb-2">Issued</th>
             <th className="pb-2">Last Used</th>
             <th className="pb-2">Status</th>
@@ -273,6 +350,11 @@ export default function AdminConsole() {
                 ) : (
                   g.label
                 )}
+              </td>
+              <td className="py-2">
+                <span className="kicker text-ink-soft">
+                  {g.kind === "signup" ? "SIGNUP — single-use" : "ROOM CREATION"}
+                </span>
               </td>
               <td className="py-2 text-ink-soft">{new Date(g.createdAt).toLocaleDateString()}</td>
               <td className="py-2 text-ink-soft">
@@ -332,7 +414,7 @@ export default function AdminConsole() {
           ))}
           {grants.length === 0 && (
             <tr>
-              <td colSpan={5} className="py-6 text-center font-body italic text-ink-soft">
+              <td colSpan={6} className="py-6 text-center font-body italic text-ink-soft">
                 No credentials issued yet.
               </td>
             </tr>
