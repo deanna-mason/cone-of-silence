@@ -62,3 +62,32 @@ describe("FileTokenStore corruption handling", () => {
     expect((await store.list()).map((g) => g.id)).toEqual([grant.id]);
   });
 });
+
+describe("FileTokenStore legacy grant normalization", () => {
+  it("normalizes legacy grants without kind field to room-creation", async () => {
+    const path = await freshPath();
+    const legacyGrant = {
+      id: "test-grant-id",
+      label: "legacy-token",
+      tokenHash: "abc123hash",
+      createdAt: "2026-01-01T00:00:00Z",
+      lastUsedAt: null,
+      revokedAt: null,
+      // Note: no 'kind' field (legacy shape)
+    };
+    await writeFile(
+      path,
+      JSON.stringify({
+        grants: [legacyGrant],
+        events: [],
+      }),
+    );
+
+    const store = await FileTokenStore.open(path);
+    const grants = await store.list();
+
+    expect(grants).toHaveLength(1);
+    expect(grants[0]?.id).toBe("test-grant-id");
+    expect(grants[0]?.kind).toBe("room-creation");
+  });
+});
