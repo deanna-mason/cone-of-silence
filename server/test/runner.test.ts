@@ -67,9 +67,7 @@ describe("JobRunner", () => {
     const store = new FakeRecordingStore();
     const stale = await store.create("u1", "stale.mp3", ".mp3");
     // simulate a crash mid-job: the row was left in "processing" with no runner alive to finish it
-    const raw = store.recordings.find((r) => r.id === stale.id);
-    if (!raw) throw new Error("seed row missing");
-    raw.status = "processing";
+    await store.setStatus(stale.id, "processing");
 
     const calls: string[][] = [];
     const runFfmpeg = async (args: string[]) => {

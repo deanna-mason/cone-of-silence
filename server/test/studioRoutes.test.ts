@@ -60,7 +60,8 @@ describe("studio routes", () => {
       .set("Authorization", bearer)
       .attach("file", Buffer.from("nope"), "malware.exe");
     expect(res.status).toBe(400);
-    expect(ctx.recordings.recordings).toHaveLength(0);
+    const list = await request(ctx.app).get("/studio/recordings").set("Authorization", bearer);
+    expect(list.body.recordings).toHaveLength(0);
   });
 
   it("store.create rejecting during upload fails closed with 503 and cleans up the tmp file", async () => {
@@ -188,7 +189,8 @@ describe("studio routes", () => {
       .set("Authorization", bearer);
     expect(del.status).toBe(204);
 
-    expect(ctx.recordings.recordings).toHaveLength(0);
+    const list = await request(ctx.app).get("/studio/recordings").set("Authorization", bearer);
+    expect(list.body.recordings).toHaveLength(0);
     await expect(stat(dir)).rejects.toThrow();
   });
 
@@ -210,7 +212,8 @@ describe("studio routes", () => {
     expect(second.status).toBe(507);
     expect(second.body.error).toBe("storage full — burn old recordings to free space");
     // no second row, no leaked tmp file
-    expect(small.recordings.recordings).toHaveLength(1);
+    const list = await request(small.app).get("/studio/recordings").set("Authorization", smallBearer);
+    expect(list.body.recordings).toHaveLength(1);
     const leftovers = await readdir(join(small.uploadDir, "tmp"));
     expect(leftovers).toHaveLength(0);
   });
