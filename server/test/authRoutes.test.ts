@@ -205,6 +205,29 @@ describe("auth routes", () => {
     }
   });
 
+  it("locks out repeated signup probes from one IP after 5 tries, mirroring login's lockout", async () => {
+    // Seed an existing account so a still-valid, unburned signup token can be
+    // replayed against it to probe "codename taken" — the enumeration oracle
+    // this lockout closes (tokens.verify peeks without burning).
+    const seedToken = await signupToken();
+    await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token: seedToken, username: "deanna", password: "opensesame" });
+
+    const probeToken = await signupToken();
+    for (let i = 0; i < 5; i++) {
+      const res = await request(ctx.app)
+        .post("/auth/signup")
+        .send({ token: probeToken, username: "deanna", password: "opensesame" });
+      expect(res.status).toBe(409);
+    }
+    const locked = await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token: probeToken, username: "deanna", password: "opensesame" });
+    expect(locked.status).toBe(429);
+    expect(locked.body).toEqual({ error: "too many attempts" });
+  });
+
   it("logs the cause and still fails closed with a generic 503 when the store throws", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

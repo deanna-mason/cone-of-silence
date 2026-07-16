@@ -36,6 +36,7 @@ async function issueSession(accounts: AccountStore, userId: string) {
 export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Router {
   const router = Router();
   const failures = new Lockout(MAX_FAILURES, LOCKOUT_MS);
+  const signupFailures = new Lockout(MAX_FAILURES, LOCKOUT_MS);
 
   const run = async (res: Response, fn: () => Promise<void>): Promise<void> => {
     try {
@@ -66,18 +67,30 @@ export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Ro
         res.status(400).json({ error: "password: 8-72 characters" });
         return;
       }
+      // IP-keyed lockout: a live signup token can be peeked (never burned)
+      // against arbitrary usernames, so without this a single token lets a
+      // caller enumerate the whole username namespace. Mirrors /auth/login's
+      // Lockout thresholds and 429 body exactly.
+      const key = req.ip ?? "unknown";
+      if (signupFailures.isLocked(key)) {
+        res.status(429).json({ error: "too many attempts" });
+        return;
+      }
       // Peek before burning so a taken username doesn't waste the token.
       const peek = await tokens.verify(token, { touch: false, kind: "signup" });
       if (!peek.ok) {
+        signupFailures.recordFailure(key);
         res.status(401).json({ error: "denied" });
         return;
       }
       if (await accounts.getCredentials(username)) {
+        signupFailures.recordFailure(key);
         res.status(409).json({ error: "codename taken" });
         return;
       }
       const burned = await tokens.redeem(token);
       if (!burned.ok) {
+        signupFailures.recordFailure(key);
         res.status(401).json({ error: "denied" }); // lost a race
         return;
       }
@@ -88,11 +101,13 @@ export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Ro
       } catch (err) {
         if (err instanceof UsernameTakenError) {
           await tokens.restore(burned.grant.id); // compensate: give the token back
+          signupFailures.recordFailure(key);
           res.status(409).json({ error: "codename taken" });
           return;
         }
         throw err;
       }
+      signupFailures.clear(key);
       const { session, expiresAt } = await issueSession(accounts, userId);
       res.status(201).json({ session, username, expiresAt });
     }),
