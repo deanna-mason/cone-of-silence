@@ -333,8 +333,10 @@ export default function AdminConsole() {
           </tr>
         </thead>
         <tbody>
-          {grants.map((g) => (
-            <tr key={g.id} className="border-t border-ink-faint/20">
+          {grants.map((g) => {
+            const used = g.kind === "signup" && g.revokedAt !== null && g.lastUsedAt !== null;
+            return (
+              <tr key={g.id} className="border-t border-ink-faint/20">
               <td className="py-2 text-ink">
                 {editingId === g.id ? (
                   <input
@@ -361,7 +363,9 @@ export default function AdminConsole() {
                 {g.lastUsedAt ? new Date(g.lastUsedAt).toLocaleString() : "never"}
               </td>
               <td className="py-2">
-                {g.revokedAt ? (
+                {used ? (
+                  <span className="kicker text-ink-soft">USED</span>
+                ) : g.revokedAt ? (
                   <span className="kicker text-vermilion">REVOKED</span>
                 ) : (
                   <span className="kicker text-brass">ACTIVE</span>
@@ -380,14 +384,16 @@ export default function AdminConsole() {
                   >
                     Relabel
                   </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => handleSetRevoked(g.id, !g.revokedAt)}
-                    className="kicker text-ink-soft transition hover:text-vermilion"
-                  >
-                    {g.revokedAt ? "Restore" : "Revoke"}
-                  </button>
+                  {!used && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleSetRevoked(g.id, !g.revokedAt)}
+                      className="kicker text-ink-soft transition hover:text-vermilion"
+                    >
+                      {g.revokedAt ? "Restore" : "Revoke"}
+                    </button>
+                  )}
                   {g.revokedAt &&
                     (purgingId === g.id ? (
                       <button
@@ -411,7 +417,8 @@ export default function AdminConsole() {
                 </span>
               </td>
             </tr>
-          ))}
+            );
+          })}
           {grants.length === 0 && (
             <tr>
               <td colSpan={6} className="py-6 text-center font-body italic text-ink-soft">
