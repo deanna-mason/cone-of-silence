@@ -22,6 +22,11 @@ rebuild the box from scratch.
 | Host | Type | Data | TTL |
 | --- | --- | --- | --- |
 | api | A | 143.110.227.84 | 30 min |
+| @ | A | 76.76.21.21 (Vercel) | 30 min |
+| www | CNAME | cname.vercel-dns.com | 30 min |
+
+Vercel treats **www.coneofsilence.app as the primary** frontend domain; the
+apex 308-redirects to it. Both origins are in ALLOWED_ORIGINS.
 
 `.app` is HSTS-preloaded: HTTPS-only by design; Caddy handles certs + the
 80→443 redirect.
@@ -39,7 +44,7 @@ rebuild the box from scratch.
    `ADMIN_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (from the
    password manager / local `server/.env`), plus:
    `TOKEN_STORE=supabase`,
-   `ALLOWED_ORIGINS=https://cone-of-silence.vercel.app,http://localhost:3000`,
+   `ALLOWED_ORIGINS=https://coneofsilence.app,https://www.coneofsilence.app,https://cone-of-silence.vercel.app,http://localhost:3000`,
    `PORT=8787`, `UPLOAD_DIR=/opt/cone-of-silence/uploads`,
    `RNNOISE_MODEL=/opt/cone-of-silence/models/std.rnnn`.
    Secrets are typed onto the box only — never committed.
