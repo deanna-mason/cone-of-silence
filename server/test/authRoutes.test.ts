@@ -5,6 +5,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { FileTokenStore } from "../src/tokens/fileStore.js";
+import { StoreUnavailableError } from "../src/tokens/types.js";
 import { FakeAccountStore, FakeRecordingStore } from "./fakes.js";
 
 const ADMIN = "test-admin-secret-16chars";
@@ -156,6 +157,20 @@ describe("auth routes", () => {
   it("unknown bearer on /auth/me is 401", async () => {
     const res = await request(ctx.app).get("/auth/me").set("Authorization", "Bearer nope");
     expect(res.status).toBe(401);
+  });
+
+  it("session-store outage during the userAuth gate fails closed with 503 on a studio route", async () => {
+    const token = await signupToken();
+    const signup = await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token, username: "deanna", password: "opensesame" });
+    const bearer = `Bearer ${signup.body.session as string}`;
+
+    vi.spyOn(ctx.accounts, "getSession").mockRejectedValueOnce(new StoreUnavailableError("db down"));
+
+    const res = await request(ctx.app).get("/studio/recordings").set("Authorization", bearer);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: "channel unavailable" });
   });
 
   it("rejects an over-long username with the same generic 400, before it's used as a lockout key", async () => {

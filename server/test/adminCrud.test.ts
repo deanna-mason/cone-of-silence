@@ -127,6 +127,17 @@ describe("admin CRUD", () => {
     expect(del.status).toBe(404);
   });
 
+  it("malformed JSON body → 400 invalid JSON", async () => {
+    const { app } = await setup();
+    const res = await request(app)
+      .post("/admin/tokens")
+      .set(auth)
+      .set("Content-Type", "application/json")
+      .send("{ this is not json");
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "invalid JSON" });
+  });
+
   it("store outage → 503 channel unavailable (fail closed)", async () => {
     const broken: TokenStore = {
       verify: async () => { throw new StoreUnavailableError("db down"); },

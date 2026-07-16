@@ -63,6 +63,31 @@ describe("studio routes", () => {
     expect(ctx.recordings.recordings).toHaveLength(0);
   });
 
+  it("store.create rejecting during upload fails closed with 503 and cleans up the tmp file", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      vi.spyOn(ctx.recordings, "create").mockRejectedValueOnce(new Error("db down"));
+      const res = await request(ctx.app)
+        .post("/studio/recordings")
+        .set("Authorization", bearer)
+        .attach("file", Buffer.from("fake-mp3-bytes"), "boom.mp3");
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: "channel unavailable" });
+      const leftovers = await readdir(join(ctx.uploadDir, "tmp"));
+      expect(leftovers).toHaveLength(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects an upload with no file field attached", async () => {
+    const res = await request(ctx.app)
+      .post("/studio/recordings")
+      .set("Authorization", bearer);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "file must be one of: mp3 m4a wav aac flac ogg webm mp4 mov mkv" });
+  });
+
   it("401 without a session", async () => {
     const res = await request(ctx.app).post("/studio/recordings")
       .attach("file", Buffer.from("x"), "a.mp3");

@@ -135,6 +135,24 @@ describe("SignalingHandler", () => {
     expect(b.sent.filter((m) => m.t === "relay")).toHaveLength(0);
   });
 
+  it("relay sent as the very first message (before create/join) is refused as bad-message and closes the socket", async () => {
+    const handler = new SignalingHandler(stubStore());
+    const a = new FakeSocket();
+    await handler.onMessage(a, relay("someone", "payload"));
+    expect(a.last()).toMatchObject({ t: "error", reason: "bad-message" });
+    expect(a.closed).toBe(true);
+    expect(handler.registry.roomCount()).toBe(0);
+  });
+
+  it("leave sent as the very first message (before create/join) is refused as bad-message and closes the socket", async () => {
+    const handler = new SignalingHandler(stubStore());
+    const a = new FakeSocket();
+    await handler.onMessage(a, JSON.stringify({ v: 1, t: "leave" }));
+    expect(a.last()).toMatchObject({ t: "error", reason: "bad-message" });
+    expect(a.closed).toBe(true);
+    expect(handler.registry.roomCount()).toBe(0);
+  });
+
   it("relay to a departed peer is silently dropped", async () => {
     const { handler, a, b, aId } = await callUp();
     handler.onClose(a);
