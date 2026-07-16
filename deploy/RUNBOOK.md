@@ -62,6 +62,23 @@ rebuild the box from scratch.
 bash deploy/deploy.sh 143.110.227.84
 ```
 
+## Disk headroom
+
+The droplet's 25 GB SSD holds the OS (~3 GB), swap (2 GB), and uploads.
+Guards in the app: uploads are capped at 1 GiB per file and **2 GiB per
+user total**, and the raw `source.*` file is deleted automatically after a
+successful enhance — steady-state cost per recording is just
+`enhanced.m4a` + `waveform.png`. Check headroom with:
+
+```bash
+ssh root@143.110.227.84 'df -h / && du -sh /opt/cone-of-silence/uploads'
+```
+
+If the disk ever fills anyway: find the biggest offenders with
+`du -sh /opt/cone-of-silence/uploads/*`, and free space by deleting the
+corresponding recordings from the Studio UI (which removes both the row
+and the directory) rather than `rm`ing directories by hand.
+
 ## Vercel (frontend) env — set BEFORE pushing frontend changes that need them
 
 - `NEXT_PUBLIC_API_URL=https://api.coneofsilence.app`

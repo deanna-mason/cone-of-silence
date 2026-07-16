@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { RecordingStore } from "./types.js";
 import { applyArgs, measureArgs, parseLoudnorm, waveformArgs } from "./ffmpegArgs.js";
@@ -61,6 +62,10 @@ export class JobRunner {
       try {
         await this.process(job.userId, job.id, job.sourceExt);
         await this.store.setStatus(job.id, "done");
+        // The raw upload is spent once enhanced.m4a exists — reclaim its disk.
+        // Best-effort: a leftover source is only wasted space, never wrong state.
+        const dir = recordingDir(this.opts.uploadDir, job.userId, job.id);
+        await unlink(sourcePath(dir, job.sourceExt)).catch(() => {});
       } catch (err) {
         const message = err instanceof Error ? err.message.slice(0, 300) : "processing failed";
         await this.store.setStatus(job.id, "error", message).catch(() => {});

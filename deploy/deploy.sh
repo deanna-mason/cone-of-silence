@@ -14,7 +14,7 @@ rsync -az \
 
 ssh root@"$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
-rsync -a --delete --exclude .env --exclude node_modules /tmp/cos-server/ /opt/cone-of-silence/server/
+rsync -a --delete --exclude .env --exclude node_modules --exclude data /tmp/cos-server/ /opt/cone-of-silence/server/
 mkdir -p /opt/cone-of-silence/lib/webrtc
 mv /tmp/cos-protocol.ts /opt/cone-of-silence/lib/webrtc/protocol.ts
 chown -R cos:cos /opt/cone-of-silence

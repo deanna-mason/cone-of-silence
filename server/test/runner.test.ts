@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { JobRunner } from "../src/studio/runner.js";
 import { FakeRecordingStore } from "./fakes.js";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { recordingDir, sourcePath } from "../src/studio/paths.js";
 
 const MEASURE_JSON = `frame=... blah\n{\n"input_i" : "-23.06",\n"input_tp" : "-5.20",\n"input_lra" : "9.90",\n"input_thresh" : "-33.53",\n"target_offset" : "0.31"\n}\n`;
 
@@ -103,5 +107,28 @@ describe("JobRunner", () => {
     runner.kick();
     await vi.waitFor(async () => expect((await store.get(rec.id))?.status).toBe("done"));
     expect(calls).toHaveLength(3); // measure, apply, waveform
+  });
+
+  it("deletes the source file after a successful enhance; keeps it when the job errors", async () => {
+    const uploadDir = await mkdtemp(join(tmpdir(), "cos-runner-"));
+    const store = new FakeRecordingStore();
+    const ok = await store.create("u1", "one.mp3", ".mp3");
+    const bad = await store.create("u1", "two.mp3", ".mp3");
+    for (const rec of [ok, bad]) {
+      const dir = recordingDir(uploadDir, "u1", rec.id);
+      await mkdir(dir, { recursive: true });
+      await writeFile(sourcePath(dir, ".mp3"), "bytes");
+    }
+    const runFfmpeg = async (args: string[]) => {
+      const isMeasure = args.join(" ").includes("print_format=json");
+      if (isMeasure && args.some((a) => a.includes(bad.id))) return { code: 1, stderr: "boom" };
+      return { code: 0, stderr: isMeasure ? MEASURE_JSON : "" };
+    };
+    const runner = new JobRunner(store, { uploadDir, rnnoiseModel: "/m/std.rnnn", runFfmpeg });
+    runner.kick();
+    await vi.waitFor(async () => expect((await store.get(ok.id))?.status).toBe("done"));
+    await vi.waitFor(async () => expect((await store.get(bad.id))?.status).toBe("error"));
+    await expect(stat(sourcePath(recordingDir(uploadDir, "u1", ok.id), ".mp3"))).rejects.toThrow();
+    await expect(stat(sourcePath(recordingDir(uploadDir, "u1", bad.id), ".mp3"))).resolves.toBeTruthy();
   });
 });
