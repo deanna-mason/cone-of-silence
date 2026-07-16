@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- NavBar bullseye mark: vermilion ring + center dot (brighter in dark tabs) -->
+  <style>
+    .mark { fill: none; stroke: #d7391f; }
+    .dot { fill: #d7391f; stroke: none; }
+    @media (prefers-color-scheme: dark) {
+      .mark { stroke: #f0492c; }
+      .dot { fill: #f0492c; }
+    }
+  </style>
+  <circle class="mark" cx="16" cy="16" r="12" stroke-width="4"/>
+  <circle class="dot" cx="16" cy="16" r="4.5"/>
+</svg>
