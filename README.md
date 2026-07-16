@@ -53,14 +53,15 @@ droplet behind Caddy TLS at `api.coneofsilence.app`, where ffmpeg runs.
 | DELETE | /studio/recordings/:id | session | Burn a recording + its files |
 | GET/POST | /admin/tokens | operator | List / mint invite tokens |
 | PATCH/DELETE | /admin/tokens/:id | operator | Relabel, revoke/restore / purge |
+| WS | /ws | origin-checked | Call signaling (room create gated by invite token) |
 
 Everything is validated before it touches the database, and every store
 failure **fails closed** (503, never a silent grant). Wrong passwords and
 unknown usernames are indistinguishable (constant-time compares); repeated
 bad logins, signups, and admin attempts hit a lockout. Uploads are capped at
 1 GiB per file and 2 GiB per user, recordings are scoped to their owner
-(anyone else gets a plain 404), and the whole surface is covered by the
-vitest suite in `server/test`.
+(anyone else gets a plain 404), and every endpoint has happy- and sad-path
+coverage in the vitest suite in `server/test` (130 tests).
 
 The enhancement pipeline is my own podcast chain, run verbatim by the server
 job runner: highpass → RNNoise denoise → de-esser → compressor → EQ →
