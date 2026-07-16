@@ -9,6 +9,16 @@ export type FfmpegRunner = (args: string[]) => Promise<{ code: number; stderr: s
 
 const STDERR_CAP = 64 * 1024;
 
+/** Maps an internal failure message (which may embed an ffmpeg stderr tail
+ * and thus an absolute droplet path) to a fixed, stage-only message safe to
+ * store and show to the recording's owner. */
+function stageMessage(detail: string): string {
+  if (detail.startsWith("measure pass failed")) return "enhancement failed at the measure pass";
+  if (detail.startsWith("enhance pass failed")) return "enhancement failed at the enhance pass";
+  if (detail.startsWith("waveform failed")) return "enhancement failed at the waveform step";
+  return "enhancement failed";
+}
+
 export const spawnFfmpeg: FfmpegRunner = (args) =>
   new Promise((resolve, reject) => {
     const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
@@ -67,7 +77,13 @@ export class JobRunner {
         const dir = recordingDir(this.opts.uploadDir, job.userId, job.id);
         await unlink(sourcePath(dir, job.sourceExt)).catch(() => {});
       } catch (err) {
-        const message = err instanceof Error ? err.message.slice(0, 300) : "processing failed";
+        const detail = err instanceof Error ? err.message.slice(0, 300) : "processing failed";
+        // The full detail (which can include an ffmpeg stderr tail — and, for
+        // a missing/unreadable source, nothing but the absolute upload path)
+        // is server-log-only. The stored/user-visible message names the
+        // stage and nothing else.
+        console.error("[runner]", job.id, detail);
+        const message = stageMessage(detail);
         await this.store.setStatus(job.id, "error", message).catch(() => {});
       }
     }

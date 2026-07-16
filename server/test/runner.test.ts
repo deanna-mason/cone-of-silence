@@ -28,27 +28,39 @@ describe("JobRunner", () => {
     expect(calls[1]?.join(" ")).toContain("measured_I=-23.06"); // apply consumed the measure
   });
 
-  it("a failing ffmpeg marks error with a message and continues to the next job", async () => {
-    const store = new FakeRecordingStore();
-    const a = await store.create("u1", "one.mp3", ".mp3");
-    const b = await store.create("u1", "two.mp3", ".mp3");
-    const calls: string[][] = [];
-    const runFfmpeg = async (args: string[]) => {
-      calls.push(args);
-      const isMeasure = args.join(" ").includes("print_format=json");
-      // first recording's measure call fails; everything else succeeds
-      if (isMeasure && args.some((arg) => arg.includes(a.id))) {
-        return { code: 1, stderr: "boom" };
-      }
-      return { code: 0, stderr: isMeasure ? MEASURE_JSON : "" };
-    };
-    const runner = new JobRunner(store, { uploadDir: "/up", rnnoiseModel: "/m/std.rnnn", runFfmpeg });
-    runner.kick();
-    await vi.waitFor(async () => expect((await store.get(b.id))?.status).toBe("done"));
-    const recA = await store.get(a.id);
-    expect(recA?.status).toBe("error");
-    expect(recA?.error).toContain("boom");
-    expect((await store.get(b.id))?.status).toBe("done");
+  it("a failing ffmpeg marks error with a stage-only message, keeps stderr out of it, and logs the detail server-side", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const store = new FakeRecordingStore();
+      const a = await store.create("u1", "one.mp3", ".mp3");
+      const b = await store.create("u1", "two.mp3", ".mp3");
+      const calls: string[][] = [];
+      const runFfmpeg = async (args: string[]) => {
+        calls.push(args);
+        const isMeasure = args.join(" ").includes("print_format=json");
+        // first recording's measure call fails; everything else succeeds
+        if (isMeasure && args.some((arg) => arg.includes(a.id))) {
+          return { code: 1, stderr: "boom /opt/cone-of-silence/uploads/u1/one/source.mp3" };
+        }
+        return { code: 0, stderr: isMeasure ? MEASURE_JSON : "" };
+      };
+      const runner = new JobRunner(store, { uploadDir: "/up", rnnoiseModel: "/m/std.rnnn", runFfmpeg });
+      runner.kick();
+      await vi.waitFor(async () => expect((await store.get(b.id))?.status).toBe("done"));
+      const recA = await store.get(a.id);
+      expect(recA?.status).toBe("error");
+      expect(recA?.error).toBe("enhancement failed at the measure pass");
+      expect(recA?.error).not.toContain("boom");
+      expect((await store.get(b.id))?.status).toBe("done");
+      // full detail, including the stderr tail, goes to the server log only
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[runner]",
+        a.id,
+        expect.stringContaining("boom /opt/cone-of-silence/uploads/u1/one/source.mp3"),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("recoverAndKick flips stale processing rows back to queued and drains them", async () => {
