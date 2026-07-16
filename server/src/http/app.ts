@@ -18,6 +18,7 @@ export interface AppOptions {
   recordings: RecordingStore;
   uploadDir: string;
   runner: { kick(): void };
+  userQuotaBytes?: number;
 }
 
 export function createApp({
@@ -28,6 +29,7 @@ export function createApp({
   recordings,
   uploadDir,
   runner,
+  userQuotaBytes,
 }: AppOptions): Express {
   const app = express();
   // Caddy fronts this app on the droplet, so req.socket.remoteAddress is
@@ -42,7 +44,7 @@ export function createApp({
   app.use(createVerifyRouter(store));
   app.use("/admin", createAdminAuth(adminSecret), createAdminRouter(store));
   app.use("/auth", createAuthRouter(accounts, store));
-  app.use("/studio", createUserAuth(accounts), createStudioRouter(recordings, { uploadDir, runner }));
+  app.use("/studio", createUserAuth(accounts), createStudioRouter(recordings, { uploadDir, runner, userQuotaBytes }));
 
   // malformed JSON body → 400, everything else → fail closed
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

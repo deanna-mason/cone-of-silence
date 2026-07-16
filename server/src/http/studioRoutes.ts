@@ -11,13 +11,18 @@ import {
   MAX_UPLOAD_BYTES,
   recordingDir,
   sourcePath,
+  USER_QUOTA_BYTES,
   WAVEFORM_NAME,
 } from "../studio/paths.js";
+import { dirSizeBytes } from "../studio/usage.js";
 
 export interface StudioDeps {
   uploadDir: string;
   runner: { kick(): void };
+  userQuotaBytes?: number;
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function createStudioRouter(store: RecordingStore, deps: StudioDeps): Router {
   const router = Router();
@@ -60,6 +65,13 @@ export function createStudioRouter(store: RecordingStore, deps: StudioDeps): Rou
         const ext = extname(req.file.originalname).toLowerCase();
         const name = req.file.originalname.slice(0, 200);
         try {
+          const quota = deps.userQuotaBytes ?? USER_QUOTA_BYTES;
+          const used = await dirSizeBytes(join(deps.uploadDir, sessionOf(res).userId));
+          if (used + req.file.size > quota) {
+            await unlink(req.file.path).catch(() => {});
+            res.status(507).json({ error: "storage full — burn old recordings to free space" });
+            return;
+          }
           const rec = await store.create(sessionOf(res).userId, name, ext);
           const dir = recordingDir(deps.uploadDir, rec.userId, rec.id);
           await mkdir(dir, { recursive: true });
@@ -82,7 +94,12 @@ export function createStudioRouter(store: RecordingStore, deps: StudioDeps): Rou
 
   /** Load + ownership check; null ⇒ 404 already sent. */
   const owned = async (req: Request, res: Response) => {
-    const rec = await store.get(req.params.id as string);
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) {
+      res.status(404).json({ error: "not found" });
+      return null;
+    }
+    const rec = await store.get(id);
     if (!rec || rec.userId !== sessionOf(res).userId) {
       res.status(404).json({ error: "not found" });
       return null;

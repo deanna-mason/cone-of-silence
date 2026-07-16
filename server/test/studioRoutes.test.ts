@@ -1,4 +1,4 @@
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { FakeAccountStore, FakeRecordingStore, signupAndLogin } from "./fakes.js
 
 const ADMIN = "test-admin-secret-16chars";
 
-async function makeApp() {
+async function makeApp(overrides: { userQuotaBytes?: number } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "cos-studio-"));
   const store = await FileTokenStore.open(join(dir, "tokens.json"));
   const accounts = new FakeAccountStore();
@@ -26,6 +26,7 @@ async function makeApp() {
     recordings,
     uploadDir,
     runner,
+    ...overrides,
   });
   return { app, store, accounts, recordings, uploadDir, runner };
 }
@@ -164,5 +165,40 @@ describe("studio routes", () => {
 
     expect(ctx.recordings.recordings).toHaveLength(0);
     await expect(stat(dir)).rejects.toThrow();
+  });
+
+  it("rejects an upload that would exceed the per-user quota with 507; tmp is cleaned", async () => {
+    // Tiny injected quota so the test doesn't write gigabytes.
+    const small = await makeApp({ userQuotaBytes: 1000 });
+    const smallBearer = await signupAndLogin(small.app, small.store, "quotauser");
+
+    const first = await request(small.app)
+      .post("/studio/recordings")
+      .set("Authorization", smallBearer)
+      .attach("file", Buffer.alloc(600, 1), "one.mp3");
+    expect(first.status).toBe(201);
+
+    const second = await request(small.app)
+      .post("/studio/recordings")
+      .set("Authorization", smallBearer)
+      .attach("file", Buffer.alloc(600, 1), "two.mp3");
+    expect(second.status).toBe(507);
+    expect(second.body.error).toBe("storage full — burn old recordings to free space");
+    // no second row, no leaked tmp file
+    expect(small.recordings.recordings).toHaveLength(1);
+    const leftovers = await readdir(join(small.uploadDir, "tmp"));
+    expect(leftovers).toHaveLength(0);
+  });
+
+  it("a non-UUID recording id 404s without touching the store", async () => {
+    // Mimic the Supabase store, which throws when the id can't cast to uuid.
+    ctx.recordings.get = async () => {
+      throw new Error("invalid input syntax for type uuid");
+    };
+    const res = await request(ctx.app)
+      .get("/studio/recordings/not-a-uuid")
+      .set("Authorization", bearer);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("not found");
   });
 });
