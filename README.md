@@ -52,8 +52,9 @@ policies, so only the server's service-role key can read anything.
 - No PII: an account is a codename + bcrypt hash. Tokens stored as hashes.
 - Uploads live on hardware I control; the raw file is deleted once the
   enhanced version exists; burning removes everything.
-- Calls are STUN-only for now: strict/symmetric NAT (e.g. phone on
-  cellular) can fail to connect until TURN lands in the final project.
+- Calls are STUN-only for now — in practice, expect video to connect only
+  when both people are on the same network (e.g. same wifi). A TURN relay
+  fixes this and lands in the final project.
 
 ## Run locally
 
