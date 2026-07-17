@@ -47,13 +47,18 @@ function isBusyDevice(err: unknown): boolean {
 }
 
 function toMediaError(err: unknown): MediaError {
+  // Users report failures as the card's spy-themed title; keep the real
+  // DOMException in the console so remote reports can be diagnosed.
   if (err instanceof DOMException) {
+    console.error(`[cone] getUserMedia failed: ${err.name} — ${err.message}`);
     if (err.name === "NotAllowedError" || err.name === "SecurityError") {
       return new MediaError("denied", "Permission to use camera/microphone was denied.");
     }
     if (err.name === "NotFoundError") {
       return new MediaError("no-devices", "No camera or microphone was found.");
     }
+  } else {
+    console.error("[cone] getUserMedia failed:", err);
   }
   return new MediaError("unavailable", "Camera/microphone could not be started.");
 }

@@ -26,7 +26,7 @@ type Stage = "parsing" | "no-channel" | "green-room" | "in-room";
 const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
   denied: {
     title: "Surveillance Equipment Compromised",
-    hint: "The browser was refused access to your camera and microphone. Re-arm permissions in the address bar (camera icon), then retry.",
+    hint: "The browser was refused access to your camera and microphone. Re-arm permissions in the address bar (camera icon), then retry. Already allowed there? Your operating system may be blocking the browser itself — on macOS, check System Settings → Privacy & Security → Camera and Microphone.",
   },
   "no-devices": {
     title: "No Equipment Detected",
