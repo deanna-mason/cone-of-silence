@@ -75,7 +75,7 @@ export default function RoomPage() {
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys?.roomId ?? null, media.stream, stage === "in-room");
 
-  // Debug mirror for the phase2 e2e script — harmless in production.
+  // Debug mirror for e2e/phase2-e2e.js — harmless in production.
   useEffect(() => {
     (window as unknown as Record<string, unknown>).__cosCall = {
       status: call.status,
