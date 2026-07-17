@@ -68,7 +68,7 @@ export class SupabaseRecordingStore implements RecordingStore {
   async setStatus(id: string, status: RecordingStatus, error: string | null = null): Promise<void> {
     const { error: updErr } = await this.db
       .from("recordings")
-      .update({ status, error, updated_at: new Date().toISOString() })
+      .update({ status, error })
       .eq("id", id);
     if (updErr) this.fail("setStatus", updErr.message);
   }
@@ -90,7 +90,7 @@ export class SupabaseRecordingStore implements RecordingStore {
     if (!next) return null;
     const { data: won, error: updErr } = await this.db
       .from("recordings")
-      .update({ status: "processing", updated_at: new Date().toISOString() })
+      .update({ status: "processing" })
       .eq("id", next.id)
       .eq("status", "queued") // only if still queued
       .select()
@@ -102,7 +102,7 @@ export class SupabaseRecordingStore implements RecordingStore {
   async recoverStale(): Promise<void> {
     const { error } = await this.db
       .from("recordings")
-      .update({ status: "queued", updated_at: new Date().toISOString() })
+      .update({ status: "queued" })
       .eq("status", "processing");
     if (error) this.fail("recoverStale", error.message);
   }

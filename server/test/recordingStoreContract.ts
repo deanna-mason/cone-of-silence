@@ -26,6 +26,16 @@ export function recordingStoreContract(makeStore: (userIds: string[]) => Promise
     expect((await store.get(first.id))?.status).toBe("queued");
   });
 
+  it("setStatus bumps updatedAt without the caller supplying a timestamp", async () => {
+    const store = await makeStore(ids);
+    const rec = await store.create(alice, "clock.mp3", ".mp3");
+    // clock granularity: guarantee the update lands in a later instant
+    await new Promise((r) => setTimeout(r, 10));
+    await store.setStatus(rec.id, "processing");
+    const got = await store.get(rec.id);
+    expect(new Date(got!.updatedAt).getTime()).toBeGreaterThan(new Date(rec.updatedAt).getTime());
+  });
+
   it("setStatus stores an error message; remove deletes; get of stranger id is null", async () => {
     const store = await makeStore(ids);
     const rec = await store.create(alice, "bad.mp3", ".mp3");
