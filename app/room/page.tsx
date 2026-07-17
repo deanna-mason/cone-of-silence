@@ -21,7 +21,7 @@ import {
 } from "@/lib/roomLink";
 import { type MediaFailure } from "@/lib/webrtc/media";
 
-type Stage = "parsing" | "no-channel" | "green-room" | "permission-error" | "in-room";
+type Stage = "parsing" | "no-channel" | "green-room" | "in-room";
 
 const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
   denied: {
@@ -111,11 +111,6 @@ export default function RoomPage() {
     }
   }, []);
 
-  // Media failure is the hook's state; the stage machine mirrors it.
-  useEffect(() => {
-    if (media.failure) setStage("permission-error");
-  }, [media.failure]);
-
   async function copyInvite() {
     if (!keys) return;
     try {
@@ -158,8 +153,12 @@ export default function RoomPage() {
     );
   }
 
-  if (stage === "permission-error") {
-    const copy = FAILURE_COPY[media.failure ?? "unavailable"];
+  // From here down the view is DERIVED from media state, never set optimistically:
+  // failure → error card; no stream yet → equipment-check interstitial; stream →
+  // green room / call. Retry just clears the failure and the view follows the
+  // actual getUserMedia outcome (no flash back to the green room).
+  if (media.failure) {
+    const copy = FAILURE_COPY[media.failure];
     return (
       <section className="hairline border bg-inset p-8 text-center">
         <p className="kicker text-vermilion">◈ Equipment Check Failed</p>
@@ -167,14 +166,25 @@ export default function RoomPage() {
         <p className="mx-auto mt-3 max-w-md font-body text-ink-soft">{copy.hint}</p>
         <button
           type="button"
-          onClick={() => {
-            media.retry();
-            setStage("green-room");
-          }}
+          onClick={media.retry}
           className="kicker mt-6 inline-block border border-ink-faint/30 px-6 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
         >
           Retry Equipment Check
         </button>
+      </section>
+    );
+  }
+
+  if (stage === "green-room" && !media.stream) {
+    return (
+      <section className="hairline border bg-inset p-8 text-center">
+        <p className="kicker text-sienna">◈ Equipment Check</p>
+        <h1 className="mt-3 font-display text-5xl tracking-[0.04em] text-ink">
+          Running Equipment Check…
+        </h1>
+        <p className="mx-auto mt-3 max-w-md font-body text-ink-soft">
+          Awaiting camera and microphone clearance from the browser.
+        </p>
       </section>
     );
   }
