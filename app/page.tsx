@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import RoomControls from "@/components/RoomControls";
-import EncryptionToggle from "@/components/EncryptionToggle";
 import ClearanceBadge, { type Clearance } from "@/components/ClearanceBadge";
 import {
   burnCreateToken,
@@ -13,7 +12,6 @@ import {
 } from "@/lib/createToken";
 
 export default function LobbyPage() {
-  const [encryptionOn, setEncryptionOn] = useState(false);
   const [clearance, setClearance] = useState<Clearance>({ state: "none" });
 
   useEffect(() => {
@@ -96,7 +94,6 @@ export default function LobbyPage() {
       <div className="rise space-y-6" style={{ animationDelay: "0.4s" }}>
         <ClearanceBadge clearance={clearance} onBurn={handleBurn} />
         <RoomControls canCreate={canCreate} />
-        <EncryptionToggle enabled={encryptionOn} onToggle={() => setEncryptionOn((v) => !v)} />
       </div>
     </div>
   );
