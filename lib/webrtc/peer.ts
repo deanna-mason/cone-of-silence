@@ -2,7 +2,7 @@
 // One peer connection wrapped in the W3C/MDN "perfect negotiation" pattern —
 // glare (simultaneous offers) resolves deterministically via polite/impolite
 // roles assigned by join order (Phase 2: the pair's newcomer is polite).
-// STUN only for now; TURN credentials arrive in Phase 3 via the join reply.
+// STUN only for now; TURN credentials arrive via the join reply (Phase 4A).
 // The data channel is negotiated (same id both sides) so its creation can't
 // glare; it carries the Phase 5/6 protocols later.
 
@@ -16,6 +16,8 @@ interface SignalPayload {
 export interface PeerLinkOptions {
   polite: boolean;
   localStream: MediaStream;
+  iceServers?: RTCIceServer[]; // from the join reply (Phase 4A); STUN fallback otherwise
+  forceRelay?: boolean; // ?forceTurn=1 debug flag — relay-only ICE
   sendSignal: (payload: string) => void;
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState?: (state: RTCPeerConnectionState) => void;
@@ -29,7 +31,10 @@ export class PeerLink {
   private ignoreOffer = false;
 
   constructor(private readonly opts: PeerLinkOptions) {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({
+      iceServers: opts.iceServers ?? ICE_SERVERS,
+      ...(opts.forceRelay ? { iceTransportPolicy: "relay" as const } : {}),
+    });
     this.pc = pc;
 
     this.channel = pc.createDataChannel("cos", { negotiated: true, id: 0 });
