@@ -5,9 +5,11 @@
 
 import { StoreUnavailableError, type TokenStore, type VerifyResult } from "../tokens/types.js";
 import { RoomRegistry } from "../rooms/registry.js";
+import { STUN_SERVERS } from "../turn/creds.js";
 import {
   parseClientMessage,
   type ErrorReason,
+  type IceServer,
   type ServerMessage,
 } from "../../../lib/webrtc/protocol.js";
 
@@ -36,6 +38,7 @@ export class SignalingHandler {
     private readonly store: TokenStore,
     readonly registry: RoomRegistry<SignalSocket> = new RoomRegistry(),
     private readonly clock: () => number = Date.now,
+    private readonly ice: () => IceServer[] = () => STUN_SERVERS,
   ) {}
 
   async onMessage(sock: SignalSocket, raw: string): Promise<void> {
@@ -117,7 +120,7 @@ export class SignalingHandler {
       return;
     }
     this.conns.set(sock, { roomId, peerId: result.selfId });
-    this.deliver(sock, { v: 1, t: "created", selfId: result.selfId });
+    this.deliver(sock, { v: 1, t: "created", selfId: result.selfId, ice: this.ice() });
   }
 
   private handleJoin(sock: SignalSocket, roomId: string): void {
@@ -130,6 +133,7 @@ export class SignalingHandler {
     this.deliver(sock, {
       v: 1, t: "joined", selfId: result.selfId,
       peers: result.peers.map((p) => ({ peerId: p.peerId })),
+      ice: this.ice(),
     });
     for (const { handle } of this.registry.peersOf(roomId, result.selfId)) {
       this.deliver(handle, { v: 1, t: "peer-joined", peerId: result.selfId });

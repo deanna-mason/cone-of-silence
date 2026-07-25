@@ -6,6 +6,7 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { TokenStore } from "../tokens/types.js";
+import type { IceServer } from "../../../lib/webrtc/protocol.js";
 import { SignalingHandler } from "./handler.js";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -22,9 +23,9 @@ type TrackedSocket = WebSocket & { isAlive?: boolean };
 
 export function attachSignaling(
   httpServer: Server,
-  opts: { store: TokenStore; allowedOrigins: string[] },
+  opts: { store: TokenStore; allowedOrigins: string[]; iceServers?: () => IceServer[] },
 ): Signaling {
-  const handler = new SignalingHandler(opts.store);
+  const handler = new SignalingHandler(opts.store, undefined, undefined, opts.iceServers);
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
 
   httpServer.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {

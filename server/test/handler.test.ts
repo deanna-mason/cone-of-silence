@@ -226,3 +226,36 @@ describe("SignalingHandler", () => {
     expect(handler.registry.roomCount()).toBe(1); // still inside the grace window at T0
   });
 });
+
+describe("ice servers in entry replies", () => {
+  const TURN_ICE = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: ["turn:turn.example.com:3478?transport=udp"], username: "999", credential: "mac" },
+  ];
+
+  it("created carries the injected ice list", async () => {
+    const handler = new SignalingHandler(stubStore(), undefined, () => T0, () => TURN_ICE);
+    const a = new FakeSocket();
+    await handler.onMessage(a, create());
+    expect(a.last()).toMatchObject({ t: "created", ice: TURN_ICE });
+  });
+
+  it("joined carries the injected ice list", async () => {
+    const handler = new SignalingHandler(stubStore(), undefined, () => T0, () => TURN_ICE);
+    const a = new FakeSocket();
+    const b = new FakeSocket();
+    await handler.onMessage(a, create());
+    await handler.onMessage(b, join());
+    expect(b.last()).toMatchObject({ t: "joined", ice: TURN_ICE });
+  });
+
+  it("defaults to STUN-only when no provider is injected", async () => {
+    const handler = new SignalingHandler(stubStore());
+    const a = new FakeSocket();
+    await handler.onMessage(a, create());
+    expect(a.last()).toMatchObject({
+      t: "created",
+      ice: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+  });
+});
