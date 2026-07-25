@@ -22,6 +22,7 @@ rebuild the box from scratch.
 | Host | Type | Data | TTL |
 | --- | --- | --- | --- |
 | api | A | 143.110.227.84 | 30 min |
+| turn | A | 143.110.227.84 | 30 min |
 | @ | A | 76.76.21.21 (Vercel) | 30 min |
 | www | CNAME | cname.vercel-dns.com | 30 min |
 
@@ -36,8 +37,9 @@ apex 308-redirects to it. Both origins are in ALLOWED_ORIGINS.
 1. Create droplet as above; add your SSH key.
 2. `scp deploy/provision.sh root@<IP>: && ssh root@<IP> 'bash provision.sh'`
    — installs Node 22 (NodeSource), Caddy 2 (official repo), ffmpeg (verify
-   `arnndn` in the output!), rsync, ufw (22/80/443 only), 2 GB swap, creates
-   system user `cos` and `/opt/cone-of-silence/{server,models,uploads}`.
+   `arnndn` in the output!), rsync, coturn, ufw (22/80/443, plus 3478 udp/tcp
+   and 49160–49200/udp for TURN), 2 GB swap, creates system user `cos` and
+   `/opt/cone-of-silence/{server,models,uploads}`.
 3. Copy the RNNoise model (from the humanym pipeline folder on the laptop):
    `scp .../models/std.rnnn root@<IP>:/tmp/ && ssh root@<IP> 'mv /tmp/std.rnnn /opt/cone-of-silence/models/ && chown cos:cos /opt/cone-of-silence/models/std.rnnn'`
 4. Create `/opt/cone-of-silence/server/.env` (mode 600, owner cos) with:
@@ -46,12 +48,17 @@ apex 308-redirects to it. Both origins are in ALLOWED_ORIGINS.
    `TOKEN_STORE=supabase`,
    `ALLOWED_ORIGINS=https://coneofsilence.app,https://www.coneofsilence.app,https://cone-of-silence.vercel.app,http://localhost:3000`,
    `PORT=8787`, `UPLOAD_DIR=/opt/cone-of-silence/uploads`,
-   `RNNOISE_MODEL=/opt/cone-of-silence/models/std.rnnn`.
+   `RNNOISE_MODEL=/opt/cone-of-silence/models/std.rnnn`,
+   `TURN_SECRET` (from password manager; generate with `openssl rand -hex 32`),
+   `TURN_URLS=turn:turn.coneofsilence.app:3478?transport=udp,turn:turn.coneofsilence.app:3478?transport=tcp`
+   (optional `TURN_TTL_SECONDS`, default 43200).
    Secrets are typed onto the box only — never committed.
 5. `bash deploy/deploy.sh <IP>` — rsyncs `server/` + `lib/webrtc/protocol.ts`
    (the ws handler imports it at `../../../lib/webrtc/protocol.js`, so it must
    land at `/opt/cone-of-silence/lib/webrtc/protocol.ts`), chowns, `npm ci`
-   as `cos`, restarts the service.
+   as `cos`, restarts the service. Also writes `/etc/turnserver.conf`
+   (committed template + `TURN_SECRET` appended from `.env`), restarts
+   coturn, and installs the Supabase keepalive cron.
 6. `scp deploy/cone-server.service root@<IP>:/tmp/ && scp deploy/Caddyfile root@<IP>:/tmp/`
    then on the box: move them to `/etc/systemd/system/` and
    `/etc/caddy/Caddyfile`, `systemctl daemon-reload`,
@@ -84,6 +91,29 @@ If the disk ever fills anyway: find the biggest offenders with
 corresponding recordings from the Studio UI (which removes both the row
 and the directory) rather than `rm`ing directories by hand.
 
+## TURN verification
+
+On the box (uses the real secret, exercises allocate → relay):
+
+    SECRET=$(grep '^TURN_SECRET=' /opt/cone-of-silence/server/.env | cut -d= -f2-)
+    turnutils_uclient -y -W "$SECRET" 127.0.0.1
+
+Expected: allocation succeeds, "Total transmit time" stats, 0 errors.
+Negative check (stale/bogus creds must be REJECTED):
+
+    turnutils_uclient -y -u bogus -w bogus 127.0.0.1
+
+Expected: 401/allocation failure. From a browser: open a room with
+`?forceTurn=1` — the call must still connect (relay-only), and
+`chrome://webrtc-internals` shows the selected candidate pair type `relay`.
+Health: `systemctl is-active coturn` alongside the existing checks.
+
+## Supabase keepalive
+
+Daily cron `/etc/cron.d/cos-keepalive` runs `/opt/cone-of-silence/keepalive.sh`
+(read-only `creation_tokens` select) — if the Supabase project ever pauses
+again, check `grep cos-keepalive /var/log/syslog` first.
+
 ## Vercel (frontend) env — set BEFORE pushing frontend changes that need them
 
 - `NEXT_PUBLIC_API_URL=https://api.coneofsilence.app`
@@ -91,7 +121,5 @@ and the directory) rather than `rm`ing directories by hand.
 
 ## Known limitations (Phase 3A)
 
-- STUN-only calls: peers behind strict/symmetric NAT may fail to connect
-  until coturn lands (Phase 4).
 - Server logs: `journalctl -u cone-server -f`. Caddy/TLS logs:
   `journalctl -u caddy -f`.

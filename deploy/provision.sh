@@ -35,6 +35,10 @@ apt-get install -y caddy
 # ffmpeg (Phase 3B pipeline) + rsync (deploys)
 apt-get install -y ffmpeg rsync
 
+# coturn (Phase 4A TURN relay) — /etc/turnserver.conf is installed by deploy.sh
+apt-get install -y coturn
+ufw allow 3478/udp && ufw allow 3478/tcp && ufw allow 49160:49200/udp
+
 # App user + directories
 id -u cos &>/dev/null || useradd --system --create-home --shell /usr/sbin/nologin cos
 mkdir -p /opt/cone-of-silence/{server,models,uploads}
@@ -42,5 +46,6 @@ chown -R cos:cos /opt/cone-of-silence
 
 echo "=== versions ==="
 node -v; caddy version; ffmpeg -version | head -1
+turnserver --version | head -1 || true
 echo "=== arnndn available? ==="
 ffmpeg -hide_banner -filters 2>/dev/null | grep arnndn || echo "MISSING arnndn — STOP and flag"
