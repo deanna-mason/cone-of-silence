@@ -18,7 +18,7 @@ const { spawn } = require("child_process");
 const BASE = "http://localhost:3000";
 const PORT = 8787;
 const ADMIN_SECRET = "phase2-e2e-secret-0123456789";
-const REPO_ROOT = path.join(__dirname, "..", "..");
+const REPO_ROOT = path.join(__dirname, "..");
 const SERVER_DIR = path.join(REPO_ROOT, "server");
 
 const SHELL_ROOT = path.join(os.homedir(), "Library/Caches/ms-playwright");
@@ -122,6 +122,10 @@ async function spawnServer(tokenFile) {
       TOKEN_STORE: "file",
       TOKEN_FILE: tokenFile,
       ALLOWED_ORIGINS: "http://localhost:3000",
+      // Startup requires these since Phase 3B (accounts tier), but no phase-2
+      // scenario touches accounts/Studio — dummies keep this run hermetic.
+      SUPABASE_URL: "http://127.0.0.1:1",
+      SUPABASE_SERVICE_ROLE_KEY: "e2e-dummy-key",
     },
   });
 
