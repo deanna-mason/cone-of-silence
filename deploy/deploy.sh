@@ -26,8 +26,9 @@ systemctl restart cone-server 2>/dev/null || echo "(cone-server unit not install
 # TURN: committed config + secret appended from the server .env (single source).
 if grep -q '^TURN_SECRET=' /opt/cone-of-silence/server/.env 2>/dev/null; then
   SECRET=$(grep '^TURN_SECRET=' /opt/cone-of-silence/server/.env | cut -d= -f2-)
-  { cat /tmp/cos-turnserver.conf; echo "static-auth-secret=$SECRET"; } > /etc/turnserver.conf
-  chown root:turnserver /etc/turnserver.conf && chmod 640 /etc/turnserver.conf
+  ( umask 077; { cat /tmp/cos-turnserver.conf; echo "static-auth-secret=$SECRET"; } > /etc/turnserver.conf )
+  chown root:turnserver /etc/turnserver.conf 2>/dev/null || echo "(warn: turnserver group missing — conf stays root-owned)"
+  chmod 640 /etc/turnserver.conf
   systemctl enable coturn >/dev/null 2>&1 || true
   systemctl restart coturn
 else
