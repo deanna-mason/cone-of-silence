@@ -84,3 +84,8 @@ export function clearStashedRoomKeys(): void {
     // ignore
   }
 }
+
+/** ?forceTurn=1 debug flag (Phase 4A): force calls through the TURN relay. */
+export function readForceTurn(search: string): boolean {
+  return new URLSearchParams(search).get("forceTurn") === "1";
+}

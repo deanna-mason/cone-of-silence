@@ -15,6 +15,7 @@ import {
   buildInviteLink,
   clearStashedRoomKeys,
   parseRoomHash,
+  readForceTurn,
   readStashedRoomKeys,
   stashRoomKeys,
   type RoomKeys,
@@ -72,8 +73,9 @@ export default function RoomPage() {
   const [stage, setStage] = useState<Stage>("parsing");
   const [keys, setKeys] = useState<RoomKeys | null>(null);
   const [copied, setCopied] = useState(false);
+  const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
-  const call = useCallSession(keys?.roomId ?? null, media.stream, stage === "in-room");
+  const call = useCallSession(keys?.roomId ?? null, media.stream, stage === "in-room", forceRelay);
 
   // Debug mirror for e2e/phase2-e2e.js — harmless in production.
   useEffect(() => {
@@ -94,6 +96,7 @@ export default function RoomPage() {
   // Arrival: read the fragment once, stash it, and strip it from the URL bar
   // via replaceState so the secret never lingers in history. Refresh recovers from the stash.
   useEffect(() => {
+    setForceRelay(readForceTurn(window.location.search));
     const fromHash = parseRoomHash(window.location.hash);
     if (fromHash) {
       stashRoomKeys(fromHash);

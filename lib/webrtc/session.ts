@@ -8,6 +8,7 @@ import { readCreateToken } from "../createToken";
 import { SIGNALING_URL } from "../config";
 import { Emitter } from "./emitter";
 import { PeerLink } from "./peer";
+import type { IceServer } from "./protocol";
 import { SignalingClient } from "./signaling";
 
 export type CallStatus =
@@ -34,13 +35,22 @@ export class CallSession {
   private remotePeerId: string | null = null;
   private localStream: MediaStream;
   private currentStatus: CallStatus = "connecting";
+  private iceServers: IceServer[] | undefined;
+  private readonly forceRelay: boolean;
 
-  constructor(roomId: string, localStream: MediaStream, url: string = SIGNALING_URL) {
+  constructor(
+    roomId: string,
+    localStream: MediaStream,
+    url: string = SIGNALING_URL,
+    opts: { forceRelay?: boolean } = {},
+  ) {
+    this.forceRelay = opts.forceRelay ?? false;
     this.localStream = localStream;
     this.signaling = new SignalingClient(url, roomId, readCreateToken);
     const ev = this.signaling.events;
 
     ev.on("entered", (info) => {
+      this.iceServers = info.ice; // freshest creds — reconnects re-mint via the join reply
       const other = info.peers[0]; // MAX_PEERS = 2 → at most one
       if (other) {
         this.connectTo(other.peerId, true); // we are the newcomer → polite
@@ -94,6 +104,8 @@ export class CallSession {
     this.link = new PeerLink({
       polite,
       localStream: this.localStream,
+      iceServers: this.iceServers,
+      forceRelay: this.forceRelay,
       sendSignal: (payload) => this.signaling.sendRelay(peerId, payload),
       onRemoteStream: (stream) => {
         this.events.emit("remoteStream", stream);

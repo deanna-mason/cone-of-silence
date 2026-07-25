@@ -11,12 +11,14 @@ import {
   parseServerMessage,
   type ClientMessage,
   type ErrorReason,
+  type IceServer,
   type PeerInfo,
 } from "./protocol";
 
 export interface EntryInfo {
   selfId: string;
   peers: PeerInfo[];
+  ice?: IceServer[];
 }
 
 export type SignalingEventMap = {
@@ -80,11 +82,11 @@ export class SignalingClient {
       switch (msg.t) {
         case "created":
           this.attempt = 0;
-          this.events.emit("entered", { selfId: msg.selfId, peers: [] });
+          this.events.emit("entered", { selfId: msg.selfId, peers: [], ice: msg.ice });
           return;
         case "joined":
           this.attempt = 0;
-          this.events.emit("entered", { selfId: msg.selfId, peers: msg.peers });
+          this.events.emit("entered", { selfId: msg.selfId, peers: msg.peers, ice: msg.ice });
           return;
         case "peer-joined":
           this.events.emit("peerJoined", msg.peerId);

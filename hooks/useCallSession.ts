@@ -16,6 +16,7 @@ export function useCallSession(
   roomId: string | null,
   stream: MediaStream | null,
   active: boolean,
+  forceRelay = false,
 ): CallState {
   const [status, setStatus] = useState<CallStatus>("connecting");
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -27,7 +28,7 @@ export function useCallSession(
   useEffect(() => {
     const local = streamRef.current;
     if (!active || !roomId || !local) return;
-    const session = new CallSession(roomId, local);
+    const session = new CallSession(roomId, local, undefined, { forceRelay });
     sessionRef.current = session;
     const offs = [
       session.events.on("status", setStatus),
@@ -47,7 +48,7 @@ export function useCallSession(
     // `stream` is deliberately absent: device switches flow through
     // setLocalStream below instead of rebuilding the whole session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, roomId]);
+  }, [active, roomId, forceRelay]);
 
   useEffect(() => {
     // replaceTrack rejects if the link tore down this tick — harmless race
