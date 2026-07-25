@@ -17,6 +17,13 @@ export interface PeerInfo {
   peerId: string;
 }
 
+/** Structural twin of the DOM's RTCIceServer — this file stays DOM-free. */
+export interface IceServer {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
 export type ClientMessage =
   | { v: 1; t: "create"; roomId: string; token: string }
   | { v: 1; t: "join"; roomId: string }
@@ -26,8 +33,8 @@ export type ClientMessage =
 export type ErrorReason = "room-not-found" | "room-full" | "create-refused" | "bad-message";
 
 export type ServerMessage =
-  | { v: 1; t: "created"; selfId: string }
-  | { v: 1; t: "joined"; selfId: string; peers: PeerInfo[] }
+  | { v: 1; t: "created"; selfId: string; ice?: IceServer[] }
+  | { v: 1; t: "joined"; selfId: string; peers: PeerInfo[]; ice?: IceServer[] }
   | { v: 1; t: "peer-joined"; peerId: string }
   | { v: 1; t: "peer-left"; peerId: string }
   | { v: 1; t: "relay"; from: string; payload: string }
@@ -73,12 +80,40 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   }
 }
 
+function parseIceServers(val: unknown): IceServer[] | null | undefined {
+  if (val === undefined) return undefined;
+  if (!Array.isArray(val)) return null;
+  const out: IceServer[] = [];
+  for (const item of val) {
+    if (typeof item !== "object" || item === null) return null;
+    const rec = item as Record<string, unknown>;
+    const urls = rec.urls;
+    const urlsOk =
+      typeof urls === "string" ||
+      (Array.isArray(urls) && urls.length > 0 && urls.every((u) => typeof u === "string"));
+    if (!urlsOk) return null;
+    if (rec.username !== undefined && typeof rec.username !== "string") return null;
+    if (rec.credential !== undefined && typeof rec.credential !== "string") return null;
+    const entry: IceServer = { urls: urls as string | string[] };
+    if (rec.username !== undefined) entry.username = rec.username;
+    if (rec.credential !== undefined) entry.credential = rec.credential;
+    out.push(entry);
+  }
+  return out;
+}
+
 export function parseServerMessage(raw: string): ServerMessage | null {
   const m = parseEnvelope(raw);
   if (!m) return null;
   switch (m.t) {
-    case "created":
-      return typeof m.selfId === "string" ? { v: 1, t: "created", selfId: m.selfId } : null;
+    case "created": {
+      if (typeof m.selfId !== "string") return null;
+      const ice = parseIceServers(m.ice);
+      if (ice === null) return null;
+      return ice
+        ? { v: 1, t: "created", selfId: m.selfId, ice }
+        : { v: 1, t: "created", selfId: m.selfId };
+    }
     case "joined": {
       if (typeof m.selfId !== "string" || !Array.isArray(m.peers)) return null;
       const peers: PeerInfo[] = [];
@@ -87,7 +122,11 @@ export function parseServerMessage(raw: string): ServerMessage | null {
         if (typeof peerId !== "string") return null;
         peers.push({ peerId });
       }
-      return { v: 1, t: "joined", selfId: m.selfId, peers };
+      const ice = parseIceServers(m.ice);
+      if (ice === null) return null;
+      return ice
+        ? { v: 1, t: "joined", selfId: m.selfId, peers, ice }
+        : { v: 1, t: "joined", selfId: m.selfId, peers };
     }
     case "peer-joined":
       return typeof m.peerId === "string" ? { v: 1, t: "peer-joined", peerId: m.peerId } : null;

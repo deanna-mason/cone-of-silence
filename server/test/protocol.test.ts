@@ -57,3 +57,38 @@ describe("parseServerMessage", () => {
     expect(parseServerMessage(JSON.stringify({ v: 1, t: "error", reason: "made-up", message: "m" }))).toBeNull();
   });
 });
+
+describe("ice field on created/joined", () => {
+  const ICE = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: ["turn:turn.example.com:3478?transport=udp"], username: "123", credential: "abc" },
+  ];
+
+  it("parses created with a valid ice list", () => {
+    const raw = JSON.stringify({ v: 1, t: "created", selfId: "s", ice: ICE });
+    expect(parseServerMessage(raw)).toEqual({ v: 1, t: "created", selfId: "s", ice: ICE });
+  });
+
+  it("parses joined with a valid ice list", () => {
+    const raw = JSON.stringify({ v: 1, t: "joined", selfId: "s", peers: [], ice: ICE });
+    expect(parseServerMessage(raw)).toEqual({ v: 1, t: "joined", selfId: "s", peers: [], ice: ICE });
+  });
+
+  it("created/joined without ice still parse (additive field)", () => {
+    expect(parseServerMessage(JSON.stringify({ v: 1, t: "created", selfId: "s" })))
+      .toEqual({ v: 1, t: "created", selfId: "s" });
+    expect(parseServerMessage(JSON.stringify({ v: 1, t: "joined", selfId: "s", peers: [] })))
+      .toEqual({ v: 1, t: "joined", selfId: "s", peers: [] });
+  });
+
+  it("rejects malformed ice shapes", () => {
+    const bad = [
+      { v: 1, t: "created", selfId: "s", ice: "not-an-array" },
+      { v: 1, t: "created", selfId: "s", ice: [{ urls: 42 }] },
+      { v: 1, t: "created", selfId: "s", ice: [{ urls: [] }] },
+      { v: 1, t: "created", selfId: "s", ice: [{ urls: "turn:x", username: 7 }] },
+      { v: 1, t: "created", selfId: "s", ice: [null] },
+    ];
+    for (const msg of bad) expect(parseServerMessage(JSON.stringify(msg))).toBeNull();
+  });
+});
