@@ -33,6 +33,7 @@ describe("PeerLink ICE configuration", () => {
   it("defaults to the built-in STUN list", () => {
     new PeerLink(base);
     expect(FakePC.lastConfig).toEqual({ iceServers: ICE_SERVERS });
+    expect(Object.hasOwn(FakePC.lastConfig!, "iceTransportPolicy")).toBe(false);
   });
 
   it("uses injected ice servers when provided", () => {
@@ -48,6 +49,6 @@ describe("PeerLink ICE configuration", () => {
 
   it("no forceRelay → no iceTransportPolicy key", () => {
     new PeerLink(base);
-    expect(FakePC.lastConfig?.iceTransportPolicy).toBeUndefined();
+    expect(Object.hasOwn(FakePC.lastConfig!, "iceTransportPolicy")).toBe(false);
   });
 });
