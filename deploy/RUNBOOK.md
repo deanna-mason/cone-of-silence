@@ -98,7 +98,7 @@ On the box (uses the real secret, exercises allocate → relay):
     SECRET=$(grep '^TURN_SECRET=' /opt/cone-of-silence/server/.env | cut -d= -f2-)
     turnutils_uclient -y -W "$SECRET" 127.0.0.1
 
-Expected: allocation succeeds, "Total transmit time" stats, 0 errors.
+Expected: allocation and authentication succeed ("Total transmit time" stats), but relayed echo data is intentionally dropped by denied-peer-ip (100% lost packets = the loopback guardrail working).
 Negative check (stale/bogus creds must be REJECTED):
 
     turnutils_uclient -y -u bogus -w bogus 127.0.0.1
