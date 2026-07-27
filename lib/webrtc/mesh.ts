@@ -63,6 +63,10 @@ export const DISCONNECTED_RESTART_MS = 3_000;
 export const RESTART_RECOVERY_MS = 10_000;
 /** Rebuild attempts per link before we stop and let the badge tell the truth. */
 export const MAX_LINK_REBUILDS = 2;
+/** Bound on a peer's queued-but-not-yet-applied signals (drop oldest past
+ *  this) — a peer that never gets a link back (rebuild capped, or the
+ *  rebuild's own construction throws) must not grow this without bound. */
+export const MAX_PENDING_SIGNALS = 64;
 
 interface Entry {
   /** null until this link's staggered construction turn comes up. */
@@ -84,6 +88,8 @@ interface Entry {
   /** Pending failed/disconnected escalation, cancelled on recovery/removal. */
   recoveryTimer: ReturnType<typeof setTimeout> | null;
   rebuilds: number;
+  /** Set once the pending queue has dropped a signal, so the cap only warns once. */
+  pendingCapWarned: boolean;
 }
 
 export class Mesh {
@@ -111,10 +117,12 @@ export class Mesh {
    * Every entry exists immediately — roster, size and relay routing all know
    * the full peer set from this tick on — but the links come up one per
    * STAGGER_MS, the first one included, so none is constructed inside the
-   * signaling handler's tick and no two share a tick (see STAGGER_MS).
+   * signaling handler's tick and no two share a tick (see STAGGER_MS). The
+   * schedule falls out of add()'s own stagger cursor now (see add()) — no
+   * index math needed here.
    */
   addExistingPeers(peerIds: string[]): void {
-    peerIds.forEach((id, i) => this.add(id, true, (i + 1) * STAGGER_MS));
+    peerIds.forEach((id) => this.add(id, true));
     this.emitRoster();
   }
 
@@ -125,7 +133,7 @@ export class Mesh {
    *  the one remaining in-tick construction path. */
   addNewcomer(peerId: string): void {
     if (this.entries.has(peerId)) return; // duplicate announce — ignore
-    this.add(peerId, false, STAGGER_MS);
+    this.add(peerId, false);
     this.emitRoster();
   }
 
@@ -142,11 +150,20 @@ export class Mesh {
   relay(from: string, payload: string): void {
     const entry = this.entries.get(from);
     if (!entry) return;
-    // The link may not be built yet (staggered bring-up). Queue rather than
-    // drop: losing an initial offer deadlocks the pair — nothing re-triggers
-    // negotiation.
+    // The link may not be built yet (staggered bring-up, or a rebuild in
+    // flight). Queue rather than drop: losing an initial offer deadlocks the
+    // pair — nothing re-triggers negotiation. Capped so a peer whose link
+    // never comes back (rebuild exhausted, or its construction throws)
+    // doesn't grow this without bound.
     if (!entry.link) {
       entry.pending.push(payload);
+      if (entry.pending.length > MAX_PENDING_SIGNALS) {
+        entry.pending.shift(); // drop oldest
+        if (!entry.pendingCapWarned) {
+          entry.pendingCapWarned = true;
+          console.warn(`[mesh] pending signal queue capped at ${MAX_PENDING_SIGNALS} for ${from}; dropping oldest`);
+        }
+      }
       return;
     }
     this.feed(entry, entry.link, payload);
@@ -172,7 +189,17 @@ export class Mesh {
     this.emitRoster();
   }
 
-  private add(peerId: string, polite: boolean, delayMs: number): void {
+  /**
+   * Unified stagger cursor: this entry lands one STAGGER_MS slot after
+   * however many other entries are already waiting on their own
+   * construction timer — reproducing addExistingPeers' old (i + 1) index
+   * math for a whole batch, while also spacing out two newcomers who
+   * announce in the same tick. There is deliberately no path left that
+   * constructs inside the caller's own tick (see STAGGER_MS) — the last one
+   * (addNewcomer's synchronous incumbent build) closed in the recovery
+   * work above.
+   */
+  private add(peerId: string, polite: boolean): void {
     if (this.entries.has(peerId)) return;
     const entry: Entry = {
       link: null,
@@ -185,49 +212,66 @@ export class Mesh {
       channelOpen: false,
       recoveryTimer: null,
       rebuilds: 0,
+      pendingCapWarned: false,
     };
     this.entries.set(peerId, entry);
-    if (delayMs <= 0) {
-      this.construct(peerId, entry);
-      return;
-    }
+    let pendingSlots = 0;
+    for (const e of this.entries.values()) if (e !== entry && e.timer !== null) pendingSlots += 1;
+    const delay = STAGGER_MS * (pendingSlots + 1);
     entry.timer = setTimeout(() => {
       entry.timer = null;
       if (this.entries.get(peerId) !== entry) return; // removed while waiting
       this.construct(peerId, entry);
-    }, delayMs);
+    }, delay);
   }
 
-  private construct(peerId: string, entry: Entry): void {
+  /**
+   * @param onThrow How to handle the factory throwing. "evict" (initial
+   *   construction): drop the peer — a half-initialized entry that can never
+   *   connect is worse than no entry. "keep-failed" (rebuild path): the peer
+   *   was live a moment ago; evicting it would vanish a real participant
+   *   over a transient factory error, so keep the entry mapped with no link
+   *   and connectionState "failed" — the badge tells the truth instead.
+   */
+  private construct(peerId: string, entry: Entry, onThrow: "evict" | "keep-failed" = "evict"): void {
     let link: MeshLink;
     try {
       link = this.createLink(peerId, entry.polite, {
         onRemoteStream: (stream) => {
-          if (this.entries.get(peerId) !== entry) return; // stale link — dropped already
+          // entry.link !== link: this link was superseded by a rebuild —
+          // discarded links can still fire trailing events asynchronously.
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
           entry.stream = stream;
           this.emitRoster();
         },
         onConnectionState: (state) => {
-          if (this.entries.get(peerId) !== entry) return;
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
           entry.connectionState = state;
           this.onLinkState(peerId, entry, state);
           this.emitRoster();
         },
         onChannelOpen: () => {
-          if (this.entries.get(peerId) !== entry) return;
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
           const wasOpen = this.openChannels() > 0;
           entry.channelOpen = true;
           if (!wasOpen) this.cb.onChannelOpen();
         },
       });
     } catch (err) {
-      // Construction usually runs on a timer tick, where a throwing factory
-      // would surface as an uncaught error and strand a half-initialized
-      // entry (roster row that can never connect, queue that never drains).
-      // Drop the peer instead; the roster shows the truth.
-      this.entries.delete(peerId);
-      this.cancelPending(entry);
       console.error(`[mesh] link construction failed for ${peerId}`, err);
+      if (onThrow === "evict") {
+        // Construction usually runs on a timer tick, where a throwing
+        // factory would surface as an uncaught error and strand a
+        // half-initialized entry (roster row that can never connect, queue
+        // that never drains). Drop the peer instead; the roster shows the truth.
+        this.entries.delete(peerId);
+        this.cancelPending(entry);
+        this.emitRoster();
+        return;
+      }
+      entry.link = null;
+      entry.connectionState = "failed";
+      entry.chain = Promise.resolve();
       this.emitRoster();
       return;
     }
@@ -237,18 +281,29 @@ export class Mesh {
     for (const payload of queued) this.feed(entry, link, payload);
   }
 
-  /** Per-link recovery: failed → restart now, rebuild if that doesn't take;
-   *  disconnected → restart only once it outlives the self-heal grace. */
+  /**
+   * Per-link recovery: failed → restart now, rebuild if that doesn't take;
+   * disconnected → restart only once it outlives the self-heal grace.
+   *
+   * Once a recovery timer is armed it runs to completion regardless of
+   * intermediate connectionState churn — only "connected" cancels it. This
+   * replaces an earlier design that cleared the timer on every transition:
+   * restartIce reliably moves the state through "connecting", which used to
+   * disarm the fallback before it could ever fire — the fallback was dead
+   * code against real browsers, and repeated failures could restart ICE
+   * indefinitely with no bound.
+   */
   private onLinkState(peerId: string, entry: Entry, state: RTCPeerConnectionState): void {
-    if (entry.recoveryTimer !== null) {
-      clearTimeout(entry.recoveryTimer);
-      entry.recoveryTimer = null;
-    }
     if (state === "connected") {
+      if (entry.recoveryTimer !== null) {
+        clearTimeout(entry.recoveryTimer);
+        entry.recoveryTimer = null;
+      }
       entry.rebuilds = 0;
       return;
     }
     if (state === "failed") {
+      if (entry.recoveryTimer !== null) return; // fallback already pending — one restart per armed cycle
       entry.link?.restartIce();
       entry.recoveryTimer = setTimeout(() => {
         entry.recoveryTimer = null;
@@ -258,10 +313,15 @@ export class Mesh {
       return;
     }
     if (state === "disconnected") {
+      if (entry.recoveryTimer !== null) return; // grace or fallback already pending
       entry.recoveryTimer = setTimeout(() => {
         entry.recoveryTimer = null;
         if (this.entries.get(peerId) !== entry) return;
-        if (entry.connectionState !== "disconnected") return; // healed meanwhile
+        // Load-bearing under the "leave armed timers alone" rule above: an
+        // intermediate state can no longer cancel this timer on its own, so
+        // a genuine self-heal is only detectable here — by connectionState
+        // having reached "connected" by the time the grace period elapses.
+        if (entry.connectionState === "connected") return;
         entry.link?.restartIce();
         entry.recoveryTimer = setTimeout(() => {
           entry.recoveryTimer = null;
@@ -269,7 +329,9 @@ export class Mesh {
           this.rebuildLink(peerId, entry);
         }, RESTART_RECOVERY_MS);
       }, DISCONNECTED_RESTART_MS);
+      return;
     }
+    // "new", "connecting", "closed": leave any armed timer alone.
   }
 
   /** Last resort for a link restartIce couldn't save: tear down just this
@@ -287,14 +349,25 @@ export class Mesh {
     entry.link = null;
     entry.stream = null;
     entry.chain = Promise.resolve();
+    // connectionState is deliberately left alone here (typically "failed")
+    // through the whole rebuild window — Task 4's badge reads this field
+    // directly, and a peer with no link should read as failed, not silently
+    // revert to "new".
     const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
     entry.channelOpen = false; // old channel died with the old pc
     if (wasOnlyOpen) this.cb.onChannelClosed();
     this.emitRoster();
+    if (entry.timer !== null) {
+      // Defensive: nothing should already have a construction timer pending
+      // on a live entry, but never stack two.
+      clearTimeout(entry.timer);
+    }
     entry.timer = setTimeout(() => {
       entry.timer = null;
       if (this.entries.get(peerId) !== entry) return;
-      this.construct(peerId, entry);
+      // "keep-failed": a rebuild's own construction throwing must not evict
+      // a peer that was live a moment ago (see construct()'s onThrow doc).
+      this.construct(peerId, entry, "keep-failed");
     }, STAGGER_MS); // never construct in the current tick (4B rule)
   }
 

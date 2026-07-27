@@ -5,6 +5,7 @@ import {
   DISCONNECTED_RESTART_MS,
   RESTART_RECOVERY_MS,
   MAX_LINK_REBUILDS,
+  MAX_PENDING_SIGNALS,
   type LinkEvents,
   type MeshLink,
   type RemotePeer,
@@ -549,5 +550,140 @@ describe("Mesh link recovery (Phase 4C)", () => {
     expect(made).toHaveLength(0); // not in the calling tick
     vi.advanceTimersByTime(STAGGER_MS);
     expect(made).toHaveLength(1);
+  });
+});
+
+describe("Mesh link recovery — fix wave (fallback survives intermediate states)", () => {
+  it("an intermediate 'connecting' state does not disarm the failed fallback", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(1_000);
+    made[0].events.onConnectionState("connecting"); // restartIce's own transition
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS - 1_000); // original deadline, minus the 1s already spent
+    expect(made).toHaveLength(1); // fallback fires here, but construction is itself deferred
+    vi.advanceTimersByTime(STAGGER_MS);
+    expect(made).toHaveLength(2); // fallback still fired despite the intermediate state
+  });
+
+  it("failed → connected cancels the pending rebuild AND resets the rebuild counter", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    // Burn one rebuild.
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    expect(made).toHaveLength(2); // one rebuild happened
+
+    // Fully recover.
+    made[1].events.onConnectionState("connected");
+
+    // If the counter weren't reset, only MAX_LINK_REBUILDS - 1 more rebuilds
+    // would be available. Burn a full MAX_LINK_REBUILDS worth here to prove
+    // the counter actually reset, not just that the pending timer cancelled.
+    for (let i = 0; i < MAX_LINK_REBUILDS; i++) {
+      made.at(-1)!.events.onConnectionState("failed");
+      vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    }
+    expect(made).toHaveLength(2 + MAX_LINK_REBUILDS);
+  });
+
+  it("a second failed while the fallback is armed does not call restartIce again", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce();
+    made[0].events.onConnectionState("failed"); // still within the armed window
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce(); // not called again
+  });
+
+  it("old link's late events are ignored once a rebuild has replaced it (link-identity guard)", () => {
+    const { mesh, made, rosters } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS); // fallback fires -> rebuildLink
+    vi.advanceTimersByTime(STAGGER_MS); // new link constructed
+    expect(made).toHaveLength(2);
+
+    // The discarded link reports its own late "failed" — it must not touch
+    // the entry now owned by the new link (no restartIce, no burned rebuild).
+    made[0].events.onConnectionState("failed");
+    expect(made[1].link.restartIce).not.toHaveBeenCalled();
+
+    // Stale stream/channel events from the old link are ignored too.
+    made[0].events.onRemoteStream(fakeStream);
+    made[0].events.onChannelOpen();
+    expect(rosters.at(-1)?.[0].stream).toBeNull();
+
+    // And no rebuild was burned by the stale "failed" — nothing fires later.
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS + 1_000);
+    expect(made).toHaveLength(2);
+  });
+
+  it("a construction failure during rebuild keeps the peer mapped as failed, not evicted", () => {
+    const rosters: RemotePeer[][] = [];
+    const cb = {
+      onRoster: vi.fn((r: RemotePeer[]) => rosters.push(r)),
+      onChannelOpen: vi.fn(),
+      onChannelClosed: vi.fn(),
+    };
+    const madeLocal: Array<{ events: LinkEvents; link: FakeLink }> = [];
+    let attempts = 0;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mesh = new Mesh((_peerId, _polite, events) => {
+      attempts += 1;
+      if (attempts === 1) {
+        const link = new FakeLink();
+        madeLocal.push({ events, link });
+        return link;
+      }
+      throw new Error("rebuild construction blew up");
+    }, cb);
+
+    mesh.addNewcomer("p1");
+    settle();
+    madeLocal[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS); // fallback fires -> rebuildLink
+    vi.advanceTimersByTime(STAGGER_MS); // deferred construct runs and throws
+
+    expect(mesh.size).toBe(1); // still mapped, not evicted
+    expect(rosters.at(-1)).toEqual([{ peerId: "p1", stream: null, connectionState: "failed" }]);
+    expect(logged).toHaveBeenCalledOnce();
+    logged.mockRestore();
+  });
+
+  it("caps the pending-signal queue at MAX_PENDING_SIGNALS, dropping oldest", async () => {
+    const { mesh, made } = harness();
+    mesh.addExistingPeers(["p1"]);
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const total = MAX_PENDING_SIGNALS + 5;
+    for (let i = 0; i < total; i++) mesh.relay("p1", `sig-${i}`);
+    settle();
+    // The drain chain is MAX_PENDING_SIGNALS deep — flush()'s fixed 10-tick
+    // budget isn't enough to walk it; wait until every queued payload has
+    // actually reached handleSignal instead of a fixed number of ticks.
+    for (let i = 0; i < MAX_PENDING_SIGNALS * 10 && made[0].link.handleSignal.mock.calls.length < MAX_PENDING_SIGNALS; i++) {
+      await Promise.resolve();
+    }
+    const applied = made[0].link.handleSignal.mock.calls.map((c) => c[0]);
+    expect(applied).toHaveLength(MAX_PENDING_SIGNALS);
+    expect(applied[0]).toBe("sig-5"); // the oldest 5 were dropped
+    expect(applied.at(-1)).toBe(`sig-${total - 1}`);
+    expect(warned).toHaveBeenCalledOnce(); // single warn despite multiple drops
+    warned.mockRestore();
+  });
+
+  it("a rebuild of the only-open-channel link fires onChannelClosed", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onChannelOpen();
+    expect(cb.onChannelOpen).toHaveBeenCalledOnce();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS);
+    expect(cb.onChannelClosed).toHaveBeenCalledOnce();
   });
 });
