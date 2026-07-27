@@ -49,8 +49,8 @@ const CALL_FAILURE_COPY: Record<CallFailure, { kicker: string; title: string; hi
   },
   "room-full": {
     kicker: "◈ At Capacity",
-    title: "The Cone Seats Two",
-    hint: "This channel already has both agents. Ask your counterpart to open a new line.",
+    title: "The Cone Seats Four",
+    hint: "This channel already has four agents. Ask your counterparts to open a new line.",
   },
   "create-refused": {
     kicker: "◈ Clearance Refused",
@@ -276,8 +276,18 @@ export default function RoomPage() {
     );
   }
 
+  // No-scroll rule (Deanna, 2026-07-25): every face visible at once on a
+  // phone. Height = 100dvh minus the fixed chrome above this block — sticky
+  // NavBar (py-4 + 1.5rem logo row ≈ 3.5rem) + main's top padding (py-12 =
+  // 3rem) = 6.5rem. The footer intentionally falls below the fold in-call.
+  const tileCount = 1 + Math.max(call.peers.length, 1);
+  const gridClass =
+    tileCount <= 2
+      ? "grid-cols-1 grid-rows-[repeat(2,minmax(0,1fr))] sm:grid-cols-2 sm:grid-rows-[minmax(0,1fr)]"
+      : "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]";
+
   return (
-    <div className="space-y-6">
+    <div className="flex h-[calc(100dvh-6.5rem)] min-h-[20rem] flex-col gap-3">
       <header className="flex items-center justify-between">
         <p className="kicker text-sienna">◈ Secure Channel</p>
         <p className="kicker text-ink-soft" aria-live="polite">
@@ -286,12 +296,12 @@ export default function RoomPage() {
             : `Agents present: ${1 + call.peers.length}`}
         </p>
       </header>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <VideoTile stream={media.stream} label="You" mirrored isSelf camOff={!media.camOn} />
+      <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>
+        <VideoTile fill stream={media.stream} label="You" mirrored isSelf camOff={!media.camOn} />
         {call.peers.map((p, i) => (
-          <VideoTile key={p.peerId} stream={p.stream} label={`Agent ${i + 2}`} />
+          <VideoTile key={p.peerId} fill stream={p.stream} label={`Agent ${i + 2}`} />
         ))}
-        {call.peers.length === 0 && <VideoTile stream={null} label="Awaiting agent" />}
+        {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}
       </div>
       <CallControls
         micOn={media.micOn}

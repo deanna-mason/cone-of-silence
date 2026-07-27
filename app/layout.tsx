@@ -23,7 +23,7 @@ const spectral = Spectral({
 
 export const metadata: Metadata = {
   title: "Cone of Silence — Classified",
-  description: "A private, encrypted line for two. Nothing recorded, nothing remembered.",
+  description: "A private, encrypted line for up to four. Nothing recorded, nothing remembered.",
 };
 
 export const viewport: Viewport = {

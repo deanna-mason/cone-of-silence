@@ -13,7 +13,7 @@ Express + WebSockets + ffmpeg (DigitalOcean), Supabase Postgres.
 | Route | Page |
 | --- | --- |
 | `/` | Lobby — invite-token check gates room creation |
-| `/room` | Two-person WebRTC call |
+| `/room` | WebRTC call (up to four) |
 | `/account` | Invite-only register / login (codename + passphrase only) |
 | `/studio` | Upload → watch it process → listen, download, or burn |
 | `/admin` | Operator console: mint / relabel / revoke / purge invite tokens |
@@ -52,9 +52,8 @@ policies, so only the server's service-role key can read anything.
 - No PII: an account is a codename + bcrypt hash. Tokens stored as hashes.
 - Uploads live on hardware I control; the raw file is deleted once the
   enhanced version exists; burning removes everything.
-- Calls are STUN-only for now — in practice, expect video to connect only
-  when both people are on the same network (e.g. same wifi). A TURN relay
-  fixes this and lands in the final project.
+- Calls try a direct P2P path first and fall back to a TURN relay on
+  hostile networks (e.g. cellular). Up to four participants.
 
 ## Run locally
 

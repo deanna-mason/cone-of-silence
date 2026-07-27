@@ -86,7 +86,7 @@ export default function LobbyPage() {
           className="rise mt-4 max-w-md font-body text-lg leading-relaxed text-ink-soft"
           style={{ animationDelay: "0.28s" }}
         >
-          A private line for two. No recordings. No logs. No trace. When the call
+          A private line for up to four. No recordings. No logs. No trace. When the call
           ends, it never happened.
         </p>
       </header>

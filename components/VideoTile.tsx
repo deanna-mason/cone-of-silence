@@ -9,6 +9,7 @@ interface VideoTileProps {
   mirrored?: boolean;
   isSelf?: boolean;
   camOff?: boolean;
+  fill?: boolean; // Phase 4B: size from the parent grid cell instead of aspect-video
 }
 
 export default function VideoTile({
@@ -17,6 +18,7 @@ export default function VideoTile({
   mirrored = false,
   isSelf = false,
   camOff = false,
+  fill = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
@@ -65,7 +67,11 @@ export default function VideoTile({
   const covered = !hasVideoTrack || camOff;
 
   return (
-    <figure className="hairline relative aspect-video overflow-hidden border bg-inset">
+    <figure
+      className={`hairline relative overflow-hidden border bg-inset ${
+        fill ? "h-full min-h-0 w-full" : "aspect-video"
+      }`}
+    >
       {stream && (
         <video
           ref={videoRef}
