@@ -82,8 +82,9 @@ export default function RoomPage() {
     (window as unknown as Record<string, unknown>).__cosCall = {
       status: call.status,
       dcOpen: call.dcOpen,
+      peers: call.peers.length,
     };
-  }, [call.status, call.dcOpen]);
+  }, [call.status, call.dcOpen, call.peers]);
 
   // A terminal call failure ends the operation — release the camera/mic so
   // the tally light matches what the user believes. (media.stop reads refs,
@@ -282,15 +283,15 @@ export default function RoomPage() {
         <p className="kicker text-ink-soft" aria-live="polite">
           {call.status === "reconnecting"
             ? "Signal lost — re-establishing…"
-            : `Agents present: ${call.remoteStream ? 2 : 1}`}
+            : `Agents present: ${1 + call.peers.length}`}
         </p>
       </header>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <VideoTile stream={media.stream} label="You" mirrored isSelf camOff={!media.camOn} />
-        <VideoTile
-          stream={call.remoteStream}
-          label={call.remoteStream ? "Counterpart" : "Awaiting agent"}
-        />
+        {call.peers.map((p, i) => (
+          <VideoTile key={p.peerId} stream={p.stream} label={`Agent ${i + 2}`} />
+        ))}
+        {call.peers.length === 0 && <VideoTile stream={null} label="Awaiting agent" />}
       </div>
       <CallControls
         micOn={media.micOn}

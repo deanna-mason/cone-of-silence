@@ -1,7 +1,8 @@
 // lib/webrtc/peer.ts
 // One peer connection wrapped in the W3C/MDN "perfect negotiation" pattern —
 // glare (simultaneous offers) resolves deterministically via polite/impolite
-// roles assigned by join order (Phase 2: the pair's newcomer is polite).
+// roles assigned by join order (Phase 4B: the newcomer is polite toward
+// every peer already present; one PeerLink per pair, owned by the Mesh).
 // STUN only for now; TURN credentials arrive via the join reply (Phase 4A).
 // The data channel is negotiated (same id both sides) so its creation can't
 // glare; it carries the Phase 5/6 protocols later.

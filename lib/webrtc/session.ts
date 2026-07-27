@@ -1,15 +1,17 @@
 // lib/webrtc/session.ts
-// The React-free call orchestrator (spec approach A): owns the signaling
-// client and (Phase 2) a single PeerLink, runs the status machine, and emits
-// UI-facing events. React renders what this reports; it never drives
-// negotiation. Phase 4's mesh manager replaces the single link.
+// The React-free call orchestrator: owns the signaling client and (Phase 4B)
+// a Mesh of PeerLinks, runs the status machine, and emits UI-facing events.
+// React renders what this reports; it never drives negotiation.
 
 import { readCreateToken } from "../createToken";
 import { SIGNALING_URL } from "../config";
 import { Emitter } from "./emitter";
+import { Mesh, type RemotePeer } from "./mesh";
 import { PeerLink } from "./peer";
 import type { IceServer } from "./protocol";
 import { SignalingClient } from "./signaling";
+
+export type { RemotePeer } from "./mesh";
 
 export type CallStatus =
   | "connecting"
@@ -23,7 +25,7 @@ export type CallStatus =
 
 export type CallEventMap = {
   status: [CallStatus];
-  remoteStream: [MediaStream | null];
+  roster: [RemotePeer[]];
   channelOpen: [];
   channelClosed: [];
 };
@@ -31,8 +33,7 @@ export type CallEventMap = {
 export class CallSession {
   readonly events = new Emitter<CallEventMap>();
   private readonly signaling: SignalingClient;
-  private link: PeerLink | null = null;
-  private remotePeerId: string | null = null;
+  private readonly mesh: Mesh;
   private localStream: MediaStream;
   private currentStatus: CallStatus = "connecting";
   private iceServers: IceServer[] | undefined;
@@ -47,33 +48,50 @@ export class CallSession {
     this.forceRelay = opts.forceRelay ?? false;
     this.localStream = localStream;
     this.signaling = new SignalingClient(url, roomId, readCreateToken);
+    this.mesh = new Mesh(
+      (peerId, polite, ev) =>
+        new PeerLink({
+          polite,
+          localStream: this.localStream,
+          iceServers: this.iceServers,
+          forceRelay: this.forceRelay,
+          sendSignal: (payload) => this.signaling.sendRelay(peerId, payload),
+          onRemoteStream: ev.onRemoteStream,
+          onConnectionState: ev.onConnectionState,
+          onChannelOpen: ev.onChannelOpen,
+        }),
+      {
+        onRoster: (roster) => {
+          this.events.emit("roster", roster);
+          // ≥1 flowing remote stream = the call is up (aggregate status).
+          if (roster.some((p) => p.stream)) this.setStatus("connected");
+        },
+        onChannelOpen: () => this.events.emit("channelOpen"),
+        onChannelClosed: () => this.events.emit("channelClosed"),
+      },
+    );
     const ev = this.signaling.events;
 
     ev.on("entered", (info) => {
       this.iceServers = info.ice; // freshest creds — reconnects re-mint via the join reply
-      const other = info.peers[0]; // MAX_PEERS = 2 → at most one
-      if (other) {
-        this.connectTo(other.peerId, true); // we are the newcomer → polite
-      } else {
+      if (info.peers.length === 0) {
         this.setStatus("waiting");
+      } else {
+        // We are the newcomer → polite toward every incumbent.
+        this.mesh.addExistingPeers(info.peers.map((p) => p.peerId));
       }
     });
-    ev.on("peerJoined", (peerId) => {
-      if (!this.link) this.connectTo(peerId, false); // they are the newcomer → we are impolite
-    });
+    ev.on("peerJoined", (peerId) => this.mesh.addNewcomer(peerId));
     ev.on("peerLeft", (peerId) => {
-      if (peerId === this.remotePeerId) this.dropLink("waiting");
+      this.mesh.remove(peerId);
+      if (this.mesh.size === 0) this.setStatus("waiting");
     });
-    ev.on("relay", (from, payload) => {
-      // handleSignal can reject on straggler ICE after an ignored offer —
-      // expected negotiation noise, never fatal to the session.
-      if (from === this.remotePeerId) this.link?.handleSignal(payload).catch(() => {});
-    });
-    // Socket lost: keep local media, tear the peer down, rebuild fresh after
-    // rejoin (decision Q3-A — no ICE restart until Phase 4).
-    ev.on("reconnecting", () => this.dropLink("reconnecting"));
+    ev.on("relay", (from, payload) => this.mesh.relay(from, payload));
+    // Socket lost: keep local media, tear all links down, rebuild fresh after
+    // rejoin (no ICE restart until Phase 4C).
+    ev.on("reconnecting", () => this.dropAll("reconnecting"));
     ev.on("refused", (reason) => {
-      this.dropLink(reason === "bad-message" ? "signal-lost" : reason);
+      this.dropAll(reason === "bad-message" ? "signal-lost" : reason);
     });
   }
 
@@ -85,42 +103,20 @@ export class CallSession {
     this.signaling.start();
   }
 
-  /** Stops signaling and the peer. Local media belongs to useLocalMedia. */
+  /** Stops signaling and every peer link. Local media belongs to useLocalMedia. */
   leave(): void {
     this.signaling.stop();
-    this.link?.close();
-    this.link = null;
-    this.remotePeerId = null;
+    this.mesh.closeAll();
   }
 
-  /** Device switch: swap tracks on the live link without renegotiating. */
+  /** Device switch: swap tracks on every live link without renegotiating. */
   async setLocalStream(stream: MediaStream): Promise<void> {
     this.localStream = stream;
-    await this.link?.replaceStream(stream);
+    await this.mesh.replaceStreamAll(stream);
   }
 
-  private connectTo(peerId: string, polite: boolean): void {
-    this.remotePeerId = peerId;
-    this.link = new PeerLink({
-      polite,
-      localStream: this.localStream,
-      iceServers: this.iceServers,
-      forceRelay: this.forceRelay,
-      sendSignal: (payload) => this.signaling.sendRelay(peerId, payload),
-      onRemoteStream: (stream) => {
-        this.events.emit("remoteStream", stream);
-        if (stream) this.setStatus("connected");
-      },
-      onChannelOpen: () => this.events.emit("channelOpen"),
-    });
-  }
-
-  private dropLink(status: CallStatus): void {
-    this.link?.close();
-    this.link = null;
-    this.remotePeerId = null;
-    this.events.emit("remoteStream", null);
-    this.events.emit("channelClosed");
+  private dropAll(status: CallStatus): void {
+    this.mesh.closeAll();
     this.setStatus(status);
   }
 

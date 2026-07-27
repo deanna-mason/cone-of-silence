@@ -4,11 +4,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CallSession, type CallStatus } from "@/lib/webrtc/session";
+import { CallSession, type CallStatus, type RemotePeer } from "@/lib/webrtc/session";
 
 export interface CallState {
   status: CallStatus;
-  remoteStream: MediaStream | null;
+  peers: RemotePeer[];
   dcOpen: boolean;
 }
 
@@ -19,7 +19,7 @@ export function useCallSession(
   forceRelay = false,
 ): CallState {
   const [status, setStatus] = useState<CallStatus>("connecting");
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [peers, setPeers] = useState<RemotePeer[]>([]);
   const [dcOpen, setDcOpen] = useState(false);
   const sessionRef = useRef<CallSession | null>(null);
   const streamRef = useRef<MediaStream | null>(stream);
@@ -32,7 +32,7 @@ export function useCallSession(
     sessionRef.current = session;
     const offs = [
       session.events.on("status", setStatus),
-      session.events.on("remoteStream", setRemoteStream),
+      session.events.on("roster", setPeers),
       session.events.on("channelOpen", () => setDcOpen(true)),
       session.events.on("channelClosed", () => setDcOpen(false)),
     ];
@@ -42,7 +42,7 @@ export function useCallSession(
       session.leave();
       sessionRef.current = null;
       setStatus("connecting");
-      setRemoteStream(null);
+      setPeers([]);
       setDcOpen(false);
     };
     // `stream` is deliberately absent: device switches flow through
@@ -51,9 +51,9 @@ export function useCallSession(
   }, [active, roomId, forceRelay]);
 
   useEffect(() => {
-    // replaceTrack rejects if the link tore down this tick — harmless race
+    // replaceTrack rejects if a link tore down this tick — harmless race
     if (stream) sessionRef.current?.setLocalStream(stream).catch(() => {});
   }, [stream]);
 
-  return { status, remoteStream, dcOpen };
+  return { status, peers, dcOpen };
 }
