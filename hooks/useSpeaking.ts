@@ -17,6 +17,20 @@ function audioContext(): AudioContext | null {
 
 export function useSpeaking(stream: MediaStream | null): boolean {
   const [speaking, setSpeaking] = useState(false);
+  const [trackEpoch, setTrackEpoch] = useState(0);
+
+  // Re-evaluate when the stream's track set changes (video-first arrival race).
+  // VideoTile uses the same pattern: stream identity is stable, tracks mutate.
+  useEffect(() => {
+    if (!stream) return;
+    const bump = () => setTrackEpoch((n) => n + 1);
+    stream.addEventListener("addtrack", bump);
+    stream.addEventListener("removetrack", bump);
+    return () => {
+      stream.removeEventListener("addtrack", bump);
+      stream.removeEventListener("removetrack", bump);
+    };
+  }, [stream]);
 
   useEffect(() => {
     if (!stream || stream.getAudioTracks().length === 0) {
@@ -25,6 +39,7 @@ export function useSpeaking(stream: MediaStream | null): boolean {
     }
     const ctx = audioContext();
     if (!ctx) return;
+    void ctx.resume(); // autoplay-policy insurance; ignore rejection
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
@@ -38,9 +53,10 @@ export function useSpeaking(stream: MediaStream | null): boolean {
     return () => {
       clearInterval(timer);
       source.disconnect();
+      // analyser.disconnect() not needed; it has no downstream connections.
       setSpeaking(false);
     };
-  }, [stream]);
+  }, [stream, trackEpoch]);
 
   return speaking;
 }
