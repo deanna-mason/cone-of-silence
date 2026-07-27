@@ -1,8 +1,10 @@
 // e2e/phase2-e2e.js
-// Phase 4B regression: a four-browser mesh call over the ws signaling server
-// (grown from the Phase 2 two-browser script). Owns the signaling server's
-// lifecycle itself (spawns it on :8787 with a throwaway file store +
-// test-only admin secret).
+// Phase 4C regression: a 14-check, four-browser mesh call over the ws
+// signaling server (grown from the Phase 2 two-browser script, then the
+// 12-check Phase 4B mesh scenario). Owns the signaling server's lifecycle
+// itself (spawns it on :8787 with a throwaway file store + test-only admin
+// secret) — including a mid-call kill+respawn for Check 13 (server-kill
+// recovery) and Check 14 (the exhausted-recovery terminal copy).
 // This is the consumer of the window.__cosCall debug mirror in app/room/page.tsx.
 //
 // Run (macOS): `npm i --no-save playwright-core` once, have `next dev` on :3000
@@ -365,6 +367,40 @@ async function mintToken() {
     await enterGreenRoomAndProceed(pageF, inviteUrl(otherKeys));
     await pageF.getByText("This Corridor Is Dark").waitFor();
     check(true, "F: different invite, no token — 'This Corridor Is Dark' (join never auto-creates)");
+
+    // ---- Check 13: server killed mid-call — both seats self-heal, no fresh invite ----
+    // A (token holder) + B open a NEW room; the old server process is killed
+    // and respawned on the same port with the same token file. A's rejoin hits
+    // room-not-found and re-creates via its stored token (shipped Phase-2
+    // behavior); B's rejoin rides the Phase-4C wall-clock recovery window.
+    const recoveryKeys = mkRoomKeys();
+    const recoveryUrl = inviteUrl(recoveryKeys);
+    await joinUntilFlowing(pageA, recoveryUrl, []);
+    await joinUntilFlowing(pageB, recoveryUrl, [[pageA, 1], [pageB, 1]]);
+    await pageA.getByText("Agents present: 2").waitFor();
+
+    server.kill("SIGTERM");
+    await new Promise((resolve) => {
+      server.once("exit", resolve);
+      setTimeout(resolve, 3000);
+    });
+    await pageA.getByText("Signal lost — re-establishing…").waitFor({ timeout: 20000 });
+    await pageB.getByText("Signal lost — re-establishing…").waitFor({ timeout: 20000 });
+
+    server = await spawnServer(tokenFile);
+    await pageA.getByText("Agents present: 2").waitFor({ timeout: 90000 });
+    await pageB.getByText("Agents present: 2").waitFor({ timeout: 90000 });
+    await waitRemoteVideosFlowing(pageA, 1, 30000);
+    await waitRemoteVideosFlowing(pageB, 1, 30000);
+    check(true, "server killed mid-call: A re-creates via token, B recovers inside the window, video flows again");
+
+    // ---- Check 14: recovery window exhausts honestly ----
+    // D has been sitting alone in the Check-11 room since before the kill.
+    // That room died with the old process and nobody holds a token to
+    // resurrect it — D must retry patiently and then land on the NEW
+    // distinct terminal copy, not the cold "channel was struck" card.
+    await pageD.getByText("The Channel Could Not Be Re-Established").waitFor({ timeout: 150000 });
+    check(true, "D: exhausted recovery shows 'The Channel Could Not Be Re-Established'");
 
     await ctxA.close();
     await ctxB.close();
