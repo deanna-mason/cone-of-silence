@@ -4,7 +4,7 @@
 
 import { randomBytes } from "node:crypto";
 
-export const MAX_PEERS = 2; // Phase 4 raises this to 4 when the mesh manager exists
+export const MAX_PEERS = 4; // Phase 4B mesh — the client's Mesh manager handles 1–3 remote links
 export const EMPTY_ROOM_GRACE_MS = 30_000;
 
 export type JoinRefusal = "room-not-found" | "room-full";

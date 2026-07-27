@@ -4,7 +4,7 @@ import { EMPTY_ROOM_GRACE_MS, MAX_PEERS, RoomRegistry } from "../src/rooms/regis
 const ROOM = "R".repeat(22);
 const T0 = 1_000_000;
 
-function fullRoom() {
+function pairRoom() {
   const reg = new RoomRegistry<string>();
   const created = reg.create(ROOM, "sockA");
   if (created === "room-exists") throw new Error("unreachable");
@@ -45,15 +45,59 @@ describe("RoomRegistry", () => {
     expect(reg.roomCount()).toBe(0);
   });
 
-  it("caps the room at MAX_PEERS (2 in Phase 2)", () => {
-    expect(MAX_PEERS).toBe(2);
-    const { reg } = fullRoom();
-    expect(reg.join(ROOM, "sockC")).toBe("room-full");
+  it("leave returns the remaining peers to notify", () => {
+    const { reg, aId, bId } = pairRoom();
+    expect(reg.leave(ROOM, bId, T0)).toEqual([{ peerId: aId, handle: "sockA" }]);
   });
 
-  it("leave returns the remaining peers to notify", () => {
-    const { reg, aId, bId } = fullRoom();
-    expect(reg.leave(ROOM, bId, T0)).toEqual([{ peerId: aId, handle: "sockA" }]);
+  function meshRoom() {
+    const reg = new RoomRegistry<string>();
+    const created = reg.create(ROOM, "sockA");
+    if (created === "room-exists") throw new Error("unreachable");
+    const ids: string[] = [created.selfId];
+    for (const sock of ["sockB", "sockC", "sockD"]) {
+      const joined = reg.join(ROOM, sock);
+      if (typeof joined === "string") throw new Error("unreachable");
+      ids.push(joined.selfId);
+    }
+    return { reg, ids: ids as [string, string, string, string] };
+  }
+
+  it("seats four and refuses the fifth (Phase 4B)", () => {
+    expect(MAX_PEERS).toBe(4);
+    const { reg } = meshRoom();
+    expect(reg.join(ROOM, "sockE")).toBe("room-full");
+  });
+
+  it("each joiner receives the full roster present at join time", () => {
+    const reg = new RoomRegistry<string>();
+    const created = reg.create(ROOM, "sockA");
+    if (created === "room-exists") throw new Error("unreachable");
+    const b = reg.join(ROOM, "sockB");
+    const c = reg.join(ROOM, "sockC");
+    const d = reg.join(ROOM, "sockD");
+    if (typeof b === "string" || typeof c === "string" || typeof d === "string")
+      throw new Error("unreachable");
+    expect(b.peers.map((p) => p.handle)).toEqual(["sockA"]);
+    expect(c.peers.map((p) => p.handle)).toEqual(["sockA", "sockB"]);
+    expect(d.peers.map((p) => p.handle)).toEqual(["sockA", "sockB", "sockC"]);
+  });
+
+  it("creator-first leave keeps the room alive and frees the seat", () => {
+    const { reg, ids } = meshRoom();
+    const remaining = reg.leave(ROOM, ids[0], T0);
+    expect(remaining.map((p) => p.peerId)).toEqual(ids.slice(1));
+    expect(reg.roomCount()).toBe(1);
+    expect(typeof reg.join(ROOM, "sockE")).not.toBe("string"); // seat freed
+  });
+
+  it("middle leave then rejoin refills the freed seat", () => {
+    const { reg, ids } = meshRoom();
+    reg.leave(ROOM, ids[2], T0);
+    const rejoin = reg.join(ROOM, "sockC2");
+    if (typeof rejoin === "string") throw new Error("unreachable");
+    expect(rejoin.peers).toHaveLength(3);
+    expect(reg.join(ROOM, "sockF")).toBe("room-full");
   });
 
   it("an empty room survives inside the grace window and dies after it", () => {

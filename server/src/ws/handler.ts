@@ -20,7 +20,7 @@ export interface SignalSocket {
 
 export const REFUSAL_COPY: Record<ErrorReason, string> = {
   "room-not-found": "This corridor is dark — the channel was struck or never opened.",
-  "room-full": "The cone seats two. This channel is at capacity.",
+  "room-full": "The cone seats four. This channel is at capacity.",
   "create-refused": "Clearance not recognized. No channel was opened.",
   "bad-message": "Garbled transmission. Line closed.",
 };

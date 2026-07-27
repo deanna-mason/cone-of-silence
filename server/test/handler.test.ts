@@ -120,11 +120,25 @@ describe("SignalingHandler", () => {
     expect(a.sent[1]).toEqual({ v: 1, t: "peer-joined", peerId: bId });
   });
 
-  it("a third joiner is refused with room-full", async () => {
-    const { handler } = await callUp();
+  it("third and fourth joiners are seated with full rosters; the fifth is refused", async () => {
+    const { handler, a, b, aId, bId } = await callUp();
     const c = new FakeSocket();
+    const d = new FakeSocket();
     await handler.onMessage(c, join());
-    expect(c.last()).toMatchObject({ t: "error", reason: "room-full" });
+    await handler.onMessage(d, join());
+    const cId = idOf(c.sent[0]);
+    expect(c.sent[0]).toMatchObject({ t: "joined", peers: [{ peerId: aId }, { peerId: bId }] });
+    expect(d.sent[0]).toMatchObject({
+      t: "joined",
+      peers: [{ peerId: aId }, { peerId: bId }, { peerId: cId }],
+    });
+    // incumbents each heard every later arrival
+    expect(a.sent.filter((m) => m.t === "peer-joined")).toHaveLength(3); // b, c, d
+    expect(b.sent.filter((m) => m.t === "peer-joined")).toHaveLength(2); // c, d
+    const e = new FakeSocket();
+    await handler.onMessage(e, join());
+    expect(e.last()).toMatchObject({ t: "error", reason: "room-full" });
+    expect(e.closed).toBe(false);
   });
 
   it("relay routes the opaque payload only to the addressed peer", async () => {

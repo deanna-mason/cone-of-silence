@@ -116,14 +116,18 @@ describe("ws signaling server", () => {
     w.close();
   });
 
-  it("a third joiner is politely refused", async () => {
+  it("a fifth joiner is politely refused", async () => {
     const a = await connect(ORIGIN);
     await send(a, { v: 1, t: "create", roomId: ROOM, token });
-    const b = await connect(ORIGIN);
-    await send(b, { v: 1, t: "join", roomId: ROOM });
-    const c = await connect(ORIGIN);
-    const full = await send(c, { v: 1, t: "join", roomId: ROOM });
+    const others = [];
+    for (let i = 0; i < 3; i++) {
+      const w = await connect(ORIGIN);
+      await send(w, { v: 1, t: "join", roomId: ROOM });
+      others.push(w);
+    }
+    const e = await connect(ORIGIN);
+    const full = await send(e, { v: 1, t: "join", roomId: ROOM });
     expect(full).toMatchObject({ t: "error", reason: "room-full" });
-    for (const ws of [a, b, c]) ws.close();
+    for (const ws of [a, ...others, e]) ws.close();
   });
 });
