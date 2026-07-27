@@ -723,7 +723,29 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
   });
 });
 
-describe("Mesh rebuild roster honesty (Task 4 badge fix)", () => {
+describe("Mesh recovery roster honesty — connecting suppressed during ANY in-flight recovery (Task 4 badge fix)", () => {
+  it("restartIce-only recovery (no rebuild yet) also suppresses 'connecting' on the roster", () => {
+    const { mesh, made, rosters } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed"); // restartIce fires immediately, no rebuild yet
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce();
+    expect(made).toHaveLength(1); // still the same link — no rebuild has happened
+
+    const emitsBefore = rosters.length;
+    made[0].events.onConnectionState("connecting"); // the SAME pc cycling through renegotiation
+    expect(rosters.length).toBe(emitsBefore); // suppressed — no emit
+    expect(rosters.at(-1)?.[0].connectionState).toBe("failed"); // still failed — badge stays honest
+
+    made[0].events.onConnectionState("connected"); // genuine recovery
+    expect(rosters.at(-1)?.[0].connectionState).toBe("connected"); // flips, flag cleared
+
+    // Recovering cleared — advancing well past every recovery window must
+    // not produce a rebuild.
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    expect(made).toHaveLength(1);
+  });
+
   it("during a rebuild, the new link's 'new'/'connecting' events leave the roster at 'failed' and emit nothing", () => {
     const { mesh, made, rosters } = harness();
     mesh.addNewcomer("p1");

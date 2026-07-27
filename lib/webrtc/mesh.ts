@@ -95,11 +95,17 @@ interface Entry {
   rebuilds: number;
   /** Set once the pending queue has dropped a signal, so the cap only warns once. */
   pendingCapWarned: boolean;
-  /** True from the moment rebuildLink tears the old link down until the new
-   *  one reports "connected" (or another rebuild replaces it). While true,
-   *  construct()'s onConnectionState callback suppresses "new"/"connecting"
-   *  writes — see construct() and rebuildLink(). */
-  rebuilding: boolean;
+  /** True while a recovery attempt is in flight — a same-pc restartIce
+   *  (armed from onLinkState's "failed" branch or the disconnected
+   *  grace-expiry escalation) or a full rebuildLink teardown/reconstruct —
+   *  until the link reports "connected" or is superseded by a further
+   *  attempt. Either path can cycle the pc through "new"/"connecting" as a
+   *  side effect (restartIce renegotiates through the same
+   *  onnegotiationneeded/connectionstatechange plumbing a fresh connection
+   *  does), and while this is true, construct()'s onConnectionState
+   *  callback suppresses those writes — see construct(), onLinkState(), and
+   *  rebuildLink(). */
+  recovering: boolean;
 }
 
 export class Mesh {
@@ -218,7 +224,7 @@ export class Mesh {
       recoveryPhase: null,
       rebuilds: 0,
       pendingCapWarned: false,
-      rebuilding: false,
+      recovering: false,
     };
     this.entries.set(peerId, entry);
     this.scheduleConstruction(peerId, entry, "evict");
@@ -281,19 +287,21 @@ export class Mesh {
         },
         onConnectionState: (state) => {
           if (this.entries.get(peerId) !== entry || entry.link !== link) return;
-          if (entry.rebuilding) {
+          if (entry.recovering) {
             if (state === "new" || state === "connecting") {
               // Suppress: the roster must keep reporting "failed" through
-              // the whole rebuild window (see rebuildLink) — the fresh pc's
-              // own "new"/"connecting" climb isn't honest news yet, and
-              // writing it here would flip the badge off while the link is
-              // genuinely still down.
+              // the whole recovery attempt (restartIce or a full rebuild —
+              // see onLinkState() and rebuildLink()) — a "new"/"connecting"
+              // climb here isn't honest news yet, whether it's a fresh pc
+              // from a rebuild or the SAME pc cycling through renegotiation
+              // mid-restartIce, and writing it would flip the badge off
+              // while the link is genuinely still down.
               return;
             }
-            if (state === "connected") entry.rebuilding = false;
+            if (state === "connected") entry.recovering = false;
             // "failed"/"disconnected" fall through unmodified: a failing
-            // rebuild is honest news, and drives the next recovery cycle
-            // normally (rebuilding stays true — still suppressing "new"/
+            // recovery attempt is honest news, and drives the next cycle
+            // normally (recovering stays true — still suppressing "new"/
             // "connecting" until this link either connects or is replaced).
           }
           entry.connectionState = state;
@@ -350,6 +358,13 @@ export class Mesh {
    * catch a *transient* disconnect no longer serves any purpose, so restart
    * ICE immediately and start the fallback clock from now instead of from
    * whenever the grace timer happens to expire.
+   *
+   * Both restartIce call sites below also set entry.recovering — restartIce
+   * renegotiates the SAME pc, cycling it through "new"/"connecting" exactly
+   * like a fresh connection would, and construct()'s onConnectionState
+   * callback suppresses those writes while recovering is set so the roster
+   * (and the badge reading it) keeps reporting the truth instead of
+   * flickering "connecting" mid-restart. See construct() and rebuildLink().
    */
   private onLinkState(peerId: string, entry: Entry, state: RTCPeerConnectionState): void {
     if (state === "connected") {
@@ -371,6 +386,7 @@ export class Mesh {
         clearTimeout(entry.recoveryTimer);
         entry.recoveryTimer = null;
       }
+      entry.recovering = true; // restartIce can cycle the pc through "new"/"connecting" too
       entry.link?.restartIce();
       entry.recoveryPhase = "fallback";
       entry.recoveryTimer = setTimeout(() => {
@@ -393,6 +409,7 @@ export class Mesh {
         // a genuine self-heal is only detectable here — by connectionState
         // having reached "connected" by the time the grace period elapses.
         if (entry.connectionState === "connected") return;
+        entry.recovering = true; // same reasoning as the failed-branch restartIce above
         entry.link?.restartIce();
         entry.recoveryPhase = "fallback";
         entry.recoveryTimer = setTimeout(() => {
@@ -425,16 +442,17 @@ export class Mesh {
     // connectionState is deliberately left alone here (typically "failed")
     // through the whole rebuild window — Task 4's badge reads this field
     // directly, and a peer with no link should read as failed, not silently
-    // revert to "new". That promise only holds because of `rebuilding`
-    // below: the replacement pc's own "new"/"connecting" climb fires
-    // through the SAME onConnectionState callback once construct() runs,
-    // and without this flag those transitions would overwrite
-    // connectionState right back to "connecting" — which the badge treats
-    // as not-yet-a-problem and hides on, even though the link is genuinely
-    // still down. construct()'s onConnectionState callback checks this flag
-    // and suppresses "new"/"connecting" writes while it's set; "connected"
-    // clears it, and "failed"/"disconnected" pass through as honest news.
-    entry.rebuilding = true;
+    // revert to "new". That promise only holds because of `recovering`
+    // below (the same flag a same-pc restartIce sets in onLinkState): the
+    // replacement pc's own "new"/"connecting" climb fires through the SAME
+    // onConnectionState callback once construct() runs, and without this
+    // flag those transitions would overwrite connectionState right back to
+    // "connecting" — which the badge treats as not-yet-a-problem and hides
+    // on, even though the link is genuinely still down. construct()'s
+    // onConnectionState callback checks this flag and suppresses
+    // "new"/"connecting" writes while it's set; "connected" clears it, and
+    // "failed"/"disconnected" pass through as honest news.
+    entry.recovering = true;
     const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
     entry.channelOpen = false; // old channel died with the old pc
     if (wasOnlyOpen) this.cb.onChannelClosed();
