@@ -1,10 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Mesh, STAGGER_MS, type LinkEvents, type MeshLink, type RemotePeer } from "@/lib/webrtc/mesh";
+import {
+  Mesh,
+  STAGGER_MS,
+  DISCONNECTED_RESTART_MS,
+  RESTART_RECOVERY_MS,
+  MAX_LINK_REBUILDS,
+  type LinkEvents,
+  type MeshLink,
+  type RemotePeer,
+} from "@/lib/webrtc/mesh";
 
 class FakeLink implements MeshLink {
   handleSignal = vi.fn(async (_payload: string) => {});
   replaceStream = vi.fn(async (_stream: MediaStream) => {});
   close = vi.fn();
+  restartIce = vi.fn();
 }
 
 interface Made {
@@ -88,7 +98,8 @@ describe("Mesh politeness", () => {
   it("addNewcomer: they are the newcomer — we are impolite", () => {
     const { mesh, made } = harness();
     mesh.addNewcomer("p9");
-    expect(made).toHaveLength(1); // incumbent side is built synchronously
+    settle();
+    expect(made).toHaveLength(1);
     expect(made[0].polite).toBe(false);
   });
 
@@ -133,9 +144,11 @@ describe("Mesh staggered bring-up", () => {
     ]);
   });
 
-  it("addNewcomer is immediate — incumbent-side construction kept synchronous by ruling", () => {
+  it("addNewcomer is deferred by STAGGER_MS like every other construction", () => {
     const { mesh, made } = harness();
     mesh.addNewcomer("p1");
+    expect(made).toHaveLength(0);
+    vi.advanceTimersByTime(STAGGER_MS);
     expect(made).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -226,6 +239,7 @@ describe("Mesh signal serialization", () => {
   it("serializes live relays into a link that already exists", async () => {
     const { mesh, links } = deferredHarness();
     mesh.addNewcomer("p1");
+    settle();
     const link = links[0];
     mesh.relay("p1", "one");
     mesh.relay("p1", "two");
@@ -264,6 +278,7 @@ describe("Mesh signal serialization", () => {
   it("a rejected payload is swallowed and does not stall the ones behind it", async () => {
     const { mesh, links } = deferredHarness();
     mesh.addNewcomer("p1");
+    settle();
     const link = links[0];
     mesh.relay("p1", "bad");
     mesh.relay("p1", "good");
@@ -346,6 +361,7 @@ describe("Mesh roster", () => {
   it("events from an already-removed link never resurrect its roster entry", () => {
     const { mesh, made, rosters } = harness();
     mesh.addNewcomer("p1");
+    settle();
     mesh.remove("p1");
     const emits = rosters.length;
     made[0].events.onRemoteStream(fakeStream);
@@ -369,6 +385,7 @@ describe("Mesh relay routing", () => {
   it("relay from an unknown peer is dropped; handleSignal rejection is swallowed", async () => {
     const { mesh, made } = harness();
     mesh.addNewcomer("p1");
+    settle();
     made[0].link.handleSignal.mockRejectedValueOnce(new Error("straggler ICE"));
     expect(() => mesh.relay("stranger", "x")).not.toThrow();
     expect(() => mesh.relay("p1", "y")).not.toThrow();
@@ -442,5 +459,95 @@ describe("Mesh device switch", () => {
     expect(made).toHaveLength(3);
     expect(made[1].link.replaceStream).not.toHaveBeenCalled();
     expect(made[2].link.replaceStream).not.toHaveBeenCalled();
+  });
+});
+
+describe("Mesh link recovery (Phase 4C)", () => {
+  it("failed → restartIce immediately", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce();
+  });
+
+  it("failed link that recovers cancels the rebuild", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    made[0].events.onConnectionState("connected");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS + 1_000);
+    expect(made).toHaveLength(1); // no second construction
+  });
+
+  it("failed with no recovery rebuilds the link off-tick, politeness preserved", () => {
+    const { mesh, made, rosters } = harness();
+    mesh.addExistingPeers(["p1"]);
+    settle();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS); // fallback fires
+    expect(made).toHaveLength(1); // rebuild is DEFERRED — not in this tick
+    vi.advanceTimersByTime(STAGGER_MS);
+    expect(made).toHaveLength(2);
+    expect(made[1].polite).toBe(true); // same role as the original
+    expect(made[0].link.close).toHaveBeenCalledOnce();
+    expect(rosters.at(-1)?.[0].stream).toBeNull(); // stream reset for the new link
+  });
+
+  it("rebuilds are capped at MAX_LINK_REBUILDS", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    for (let i = 0; i < MAX_LINK_REBUILDS + 2; i++) {
+      made.at(-1)!.events.onConnectionState("failed");
+      vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    }
+    expect(made).toHaveLength(1 + MAX_LINK_REBUILDS); // original + capped rebuilds
+  });
+
+  it("disconnected persisting past the grace restarts ICE; self-heal does not", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("disconnected");
+    vi.advanceTimersByTime(DISCONNECTED_RESTART_MS - 1_000);
+    made[0].events.onConnectionState("connected"); // healed at 2s
+    vi.advanceTimersByTime(10_000);
+    expect(made[0].link.restartIce).not.toHaveBeenCalled();
+
+    made[0].events.onConnectionState("disconnected");
+    vi.advanceTimersByTime(DISCONNECTED_RESTART_MS);
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce();
+  });
+
+  it("signals arriving during a rebuild window queue and drain into the NEW link", async () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS); // old link closed, rebuild pending
+    mesh.relay("p1", "queued-during-rebuild");
+    vi.advanceTimersByTime(STAGGER_MS);
+    await Promise.resolve(); // let the chain tick (make the test async)
+    expect(made[1].link.handleSignal).toHaveBeenCalledWith("queued-during-rebuild");
+    expect(made[0].link.handleSignal).not.toHaveBeenCalledWith("queued-during-rebuild");
+  });
+
+  it("remove and closeAll cancel recovery timers — nothing fires later", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    mesh.closeAll();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("addNewcomer is now deferred off the handler tick too (watch item closed)", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    expect(made).toHaveLength(0); // not in the calling tick
+    vi.advanceTimersByTime(STAGGER_MS);
+    expect(made).toHaveLength(1);
   });
 });

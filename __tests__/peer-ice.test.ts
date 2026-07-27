@@ -3,12 +3,15 @@ import { PeerLink, ICE_SERVERS } from "@/lib/webrtc/peer";
 
 class FakePC {
   static lastConfig: RTCConfiguration | undefined;
+  static lastInstance: FakePC | undefined;
   onnegotiationneeded: unknown = null;
   onicecandidate: unknown = null;
   ontrack: unknown = null;
   onconnectionstatechange: unknown = null;
+  restartIce = vi.fn();
   constructor(config?: RTCConfiguration) {
     FakePC.lastConfig = config;
+    FakePC.lastInstance = this;
   }
   createDataChannel() {
     return { onopen: null } as unknown as RTCDataChannel;
@@ -50,5 +53,11 @@ describe("PeerLink ICE configuration", () => {
   it("no forceRelay → no iceTransportPolicy key", () => {
     new PeerLink(base);
     expect(Object.hasOwn(FakePC.lastConfig!, "iceTransportPolicy")).toBe(false);
+  });
+
+  it("restartIce delegates to the RTCPeerConnection", () => {
+    const link = new PeerLink(base);
+    link.restartIce();
+    expect(FakePC.lastInstance?.restartIce).toHaveBeenCalledOnce();
   });
 });

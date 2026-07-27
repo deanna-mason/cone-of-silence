@@ -15,6 +15,7 @@ export interface RemotePeer {
 export interface MeshLink {
   handleSignal(payload: string): Promise<void>;
   replaceStream(stream: MediaStream): Promise<void>;
+  restartIce(): void;
   close(): void;
 }
 
@@ -55,6 +56,14 @@ export interface MeshCallbacks {
  */
 export const STAGGER_MS = 250;
 
+/** `disconnected` often self-heals in 1–3s — only restart ICE when it
+ *  persists past this grace (matches the badge's appearance delay). */
+export const DISCONNECTED_RESTART_MS = 3_000;
+/** If restartIce hasn't recovered the link by now, rebuild it outright. */
+export const RESTART_RECOVERY_MS = 10_000;
+/** Rebuild attempts per link before we stop and let the badge tell the truth. */
+export const MAX_LINK_REBUILDS = 2;
+
 interface Entry {
   /** null until this link's staggered construction turn comes up. */
   link: MeshLink | null;
@@ -72,6 +81,9 @@ interface Entry {
   stream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
   channelOpen: boolean;
+  /** Pending failed/disconnected escalation, cancelled on recovery/removal. */
+  recoveryTimer: ReturnType<typeof setTimeout> | null;
+  rebuilds: number;
 }
 
 export class Mesh {
@@ -106,14 +118,14 @@ export class Mesh {
     this.emitRoster();
   }
 
-  /** A newcomer arrived after us: we are the incumbent (impolite). */
+  /** A newcomer arrived after us: we are the incumbent (impolite). Deferred
+   *  off the peer-joined handler tick like every other construction — the
+   *  4B wedge diagnosis was "constructed inside the signaling handler tick",
+   *  and with restart+rebuild now underneath, there is no reason to keep
+   *  the one remaining in-tick construction path. */
   addNewcomer(peerId: string): void {
     if (this.entries.has(peerId)) return; // duplicate announce — ignore
-    // Kept synchronous by controller ruling, not by any claim that a single
-    // connection is inherently safe: incumbent-side construction has never
-    // been observed to wedge across ~28 instrumented runs. A watch item for
-    // the Phase 4C ICE-restart work.
-    this.add(peerId, false, 0);
+    this.add(peerId, false, STAGGER_MS);
     this.emitRoster();
   }
 
@@ -171,6 +183,8 @@ export class Mesh {
       stream: null,
       connectionState: "new",
       channelOpen: false,
+      recoveryTimer: null,
+      rebuilds: 0,
     };
     this.entries.set(peerId, entry);
     if (delayMs <= 0) {
@@ -196,6 +210,7 @@ export class Mesh {
         onConnectionState: (state) => {
           if (this.entries.get(peerId) !== entry) return;
           entry.connectionState = state;
+          this.onLinkState(peerId, entry, state);
           this.emitRoster();
         },
         onChannelOpen: () => {
@@ -222,6 +237,67 @@ export class Mesh {
     for (const payload of queued) this.feed(entry, link, payload);
   }
 
+  /** Per-link recovery: failed → restart now, rebuild if that doesn't take;
+   *  disconnected → restart only once it outlives the self-heal grace. */
+  private onLinkState(peerId: string, entry: Entry, state: RTCPeerConnectionState): void {
+    if (entry.recoveryTimer !== null) {
+      clearTimeout(entry.recoveryTimer);
+      entry.recoveryTimer = null;
+    }
+    if (state === "connected") {
+      entry.rebuilds = 0;
+      return;
+    }
+    if (state === "failed") {
+      entry.link?.restartIce();
+      entry.recoveryTimer = setTimeout(() => {
+        entry.recoveryTimer = null;
+        if (this.entries.get(peerId) !== entry) return;
+        this.rebuildLink(peerId, entry);
+      }, RESTART_RECOVERY_MS);
+      return;
+    }
+    if (state === "disconnected") {
+      entry.recoveryTimer = setTimeout(() => {
+        entry.recoveryTimer = null;
+        if (this.entries.get(peerId) !== entry) return;
+        if (entry.connectionState !== "disconnected") return; // healed meanwhile
+        entry.link?.restartIce();
+        entry.recoveryTimer = setTimeout(() => {
+          entry.recoveryTimer = null;
+          if (this.entries.get(peerId) !== entry) return;
+          this.rebuildLink(peerId, entry);
+        }, RESTART_RECOVERY_MS);
+      }, DISCONNECTED_RESTART_MS);
+    }
+  }
+
+  /** Last resort for a link restartIce couldn't save: tear down just this
+   *  pair and bring it up fresh through the normal deferred path — same
+   *  politeness, same entry, queue intact for anything that arrives
+   *  meanwhile. Bounded: after MAX_LINK_REBUILDS the state stays failed and
+   *  the tile badge carries the truth. Both sides usually observe failure
+   *  and rebuild together; an asymmetric rebuild renegotiates against the
+   *  remote's existing pc via perfect negotiation.
+   */
+  private rebuildLink(peerId: string, entry: Entry): void {
+    if (entry.rebuilds >= MAX_LINK_REBUILDS) return;
+    entry.rebuilds += 1;
+    entry.link?.close();
+    entry.link = null;
+    entry.stream = null;
+    entry.chain = Promise.resolve();
+    const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
+    entry.channelOpen = false; // old channel died with the old pc
+    if (wasOnlyOpen) this.cb.onChannelClosed();
+    this.emitRoster();
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      if (this.entries.get(peerId) !== entry) return;
+      this.construct(peerId, entry);
+    }, STAGGER_MS); // never construct in the current tick (4B rule)
+  }
+
   /**
    * Apply one payload, strictly after the peer's previous payload settled.
    * handleSignal is async and is NOT internally serialized: overlapping calls
@@ -243,6 +319,10 @@ export class Mesh {
     if (entry.timer !== null) {
       clearTimeout(entry.timer);
       entry.timer = null;
+    }
+    if (entry.recoveryTimer !== null) {
+      clearTimeout(entry.recoveryTimer);
+      entry.recoveryTimer = null;
     }
     entry.pending = [];
   }

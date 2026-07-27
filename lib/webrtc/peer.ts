@@ -107,6 +107,12 @@ export class PeerLink {
     }
   }
 
+  /** ICE restart (Phase 4C): flows through the existing perfect-negotiation
+   *  offer path — negotiationneeded fires with fresh ICE credentials. */
+  restartIce(): void {
+    this.pc.restartIce();
+  }
+
   close(): void {
     this.pc.close();
   }
