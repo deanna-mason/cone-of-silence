@@ -279,7 +279,10 @@ export default function RoomPage() {
   // No-scroll rule (Deanna, 2026-07-25): every face visible at once on a
   // phone. Height = 100dvh minus the fixed chrome above this block — sticky
   // NavBar (py-4 + 1.5rem logo row ≈ 3.5rem) + main's top padding (py-12 =
-  // 3rem) = 6.5rem. The footer intentionally falls below the fold in-call.
+  // 3rem) ≈ 6.5rem, corrected to 7rem: the e2e geometry assertion measured the
+  // wrapper landing 8px below the fold at 390×844, the border + line-height
+  // slack the 6.5rem estimate misses. The footer intentionally falls below the
+  // fold in-call.
   const tileCount = 1 + Math.max(call.peers.length, 1);
   const gridClass =
     tileCount <= 2
@@ -287,7 +290,7 @@ export default function RoomPage() {
       : "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]";
 
   return (
-    <div className="flex h-[calc(100dvh-6.5rem)] min-h-[20rem] flex-col gap-3">
+    <div className="flex h-[calc(100dvh-7rem)] min-h-[20rem] flex-col gap-3">
       <header className="flex items-center justify-between">
         <p className="kicker text-sienna">◈ Secure Channel</p>
         <p className="kicker text-ink-soft" aria-live="polite">
