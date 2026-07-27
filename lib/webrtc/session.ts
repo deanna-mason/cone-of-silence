@@ -21,7 +21,8 @@ export type CallStatus =
   | "room-not-found"
   | "room-full"
   | "create-refused"
-  | "signal-lost";
+  | "signal-lost"
+  | "recovery-failed";
 
 export type CallEventMap = {
   status: [CallStatus];
@@ -90,8 +91,15 @@ export class CallSession {
     // Socket lost: keep local media, tear all links down, rebuild fresh after
     // rejoin (no ICE restart until Phase 4C).
     ev.on("reconnecting", () => this.dropAll("reconnecting"));
-    ev.on("refused", (reason) => {
-      this.dropAll(reason === "bad-message" ? "signal-lost" : reason);
+    ev.on("refused", (reason, afterEntry) => {
+      if (reason === "bad-message") {
+        this.dropAll("signal-lost");
+        return;
+      }
+      // Post-entry refusals only go terminal after the ~90s recovery window
+      // is exhausted — that patience deserves its own copy, not the cold
+      // "channel was struck" card (spec §4C UX).
+      this.dropAll(afterEntry ? "recovery-failed" : reason);
     });
   }
 

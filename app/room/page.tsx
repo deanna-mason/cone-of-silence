@@ -39,7 +39,10 @@ const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
   },
 };
 
-type CallFailure = Extract<CallStatus, "room-not-found" | "room-full" | "create-refused" | "signal-lost">;
+type CallFailure = Extract<
+  CallStatus,
+  "room-not-found" | "room-full" | "create-refused" | "signal-lost" | "recovery-failed"
+>;
 
 const CALL_FAILURE_COPY: Record<CallFailure, { kicker: string; title: string; hint: string }> = {
   "room-not-found": {
@@ -61,6 +64,11 @@ const CALL_FAILURE_COPY: Record<CallFailure, { kicker: string; title: string; hi
     kicker: "◈ Signal Lost",
     title: "The Line Went Dead",
     hint: "The switchboard could not be reached. Return to the lobby and open the channel again.",
+  },
+  "recovery-failed": {
+    kicker: "◈ Line Not Restored",
+    title: "The Channel Could Not Be Re-Established",
+    hint: "The line went down mid-call and patient redialing could not bring it back. Return to the lobby and open a fresh channel — your counterparts will need a new invite.",
   },
 };
 

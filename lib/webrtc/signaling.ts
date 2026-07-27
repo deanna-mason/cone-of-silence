@@ -1,9 +1,17 @@
 // lib/webrtc/signaling.ts
 // Reconnecting signaling client (React-free). Entry is join-first,
 // create-on-miss: always try `join`; on room-not-found present the creation
-// token if we hold one. Exponential-backoff reconnect (the server's 30s
-// empty-room grace makes a quick blip rejoin the same room) until stop() or
-// a terminal refusal.
+// token if we hold one. Exponential-backoff reconnect until stop() or a
+// terminal refusal.
+//
+// Phase 4C recovery: once a session has entered a room (`everEntered`),
+// refusals during an outage retry on a WALL-CLOCK deadline from the moment
+// the socket was lost — not an attempt budget. A ~90s server reboot burns
+// any attempt counter on connection failures alone before the server can
+// even answer (the shipped Phase-2 bug this replaces). room-full during the
+// window is usually our own ghost awaiting the heartbeat sweep;
+// room-not-found is the server rebooting out from under the room (the
+// creator's create-on-miss resurrects it). Cold visitors still fail fast.
 
 import { Emitter } from "./emitter";
 import {
@@ -27,12 +35,16 @@ export type SignalingEventMap = {
   peerLeft: [peerId: string];
   relay: [from: string, payload: string];
   reconnecting: [];
-  refused: [reason: ErrorReason];
+  /** afterEntry: this client had entered the room before the refusal —
+   *  lets the UI distinguish "recovery exhausted" from a cold failure. */
+  refused: [reason: ErrorReason, afterEntry: boolean];
 };
 
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 10_000;
-const MAX_REFUSAL_RETRIES = 8; // ~60s of backoff — covers the server's ghost-reaping heartbeat
+/** Recovery window measured from socket loss — sized to ride out a full box
+ *  reboot (~90s observed in the 3A reboot drill) plus the ghost sweep. */
+export const RETRY_DEADLINE_MS = 90_000;
 
 export class SignalingClient {
   readonly events = new Emitter<SignalingEventMap>();
@@ -40,6 +52,9 @@ export class SignalingClient {
   private attempt = 0;
   private stopped = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private everEntered = false;
+  /** Wall-clock start of the current outage; null while connected-and-entered. */
+  private outageSince: number | null = null;
 
   constructor(
     private readonly url: string,
@@ -68,8 +83,15 @@ export class SignalingClient {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  private withinRecoveryWindow(): boolean {
+    return (
+      this.everEntered &&
+      this.outageSince !== null &&
+      Date.now() - this.outageSince <= RETRY_DEADLINE_MS
+    );
+  }
+
   private connect(): void {
-    const isReconnect = this.attempt > 0;
     const ws = new WebSocket(this.url);
     this.ws = ws;
     let triedCreate = false;
@@ -82,10 +104,14 @@ export class SignalingClient {
       switch (msg.t) {
         case "created":
           this.attempt = 0;
+          this.everEntered = true;
+          this.outageSince = null;
           this.events.emit("entered", { selfId: msg.selfId, peers: [], ice: msg.ice });
           return;
         case "joined":
           this.attempt = 0;
+          this.everEntered = true;
+          this.outageSince = null;
           this.events.emit("entered", { selfId: msg.selfId, peers: msg.peers, ice: msg.ice });
           return;
         case "peer-joined":
@@ -106,17 +132,16 @@ export class SignalingClient {
               return;
             }
           }
-          // room-full on a reconnect is usually our own ghost still holding
-          // the slot (silent socket death) — the heartbeat reaps it within a
-          // minute. Keep retrying for a bounded window instead of going
-          // terminal on someone who was IN the call seconds ago.
-          if (msg.reason === "room-full" && isReconnect && this.attempt <= MAX_REFUSAL_RETRIES) {
+          if (
+            (msg.reason === "room-full" || msg.reason === "room-not-found") &&
+            this.withinRecoveryWindow()
+          ) {
             ws.close(); // onclose path schedules the next backoff attempt
             return;
           }
-          this.stopped = true; // terminal — reconnecting can't fix a refusal
+          this.stopped = true; // terminal — reconnecting can't fix this refusal
           ws.close();
-          this.events.emit("refused", msg.reason);
+          this.events.emit("refused", msg.reason, this.everEntered);
           return;
         }
       }
@@ -124,6 +149,7 @@ export class SignalingClient {
 
     ws.onclose = () => {
       if (this.stopped || this.ws !== ws) return;
+      if (this.outageSince === null) this.outageSince = Date.now();
       this.events.emit("reconnecting");
       this.scheduleReconnect();
     };
