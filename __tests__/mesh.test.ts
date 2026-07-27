@@ -655,7 +655,7 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
     logged.mockRestore();
   });
 
-  it("caps the pending-signal queue at MAX_PENDING_SIGNALS, dropping oldest", async () => {
+  it("caps the pending-signal queue at MAX_PENDING_SIGNALS, dropping newest", async () => {
     const { mesh, made } = harness();
     mesh.addExistingPeers(["p1"]);
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -670,8 +670,10 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
     }
     const applied = made[0].link.handleSignal.mock.calls.map((c) => c[0]);
     expect(applied).toHaveLength(MAX_PENDING_SIGNALS);
-    expect(applied[0]).toBe("sig-5"); // the oldest 5 were dropped
-    expect(applied.at(-1)).toBe(`sig-${total - 1}`);
+    // The head of the queue is the offer everything behind it depends on —
+    // it must survive. The trailing (newest) candidates are the ones shed.
+    expect(applied[0]).toBe("sig-0");
+    expect(applied.at(-1)).toBe(`sig-${MAX_PENDING_SIGNALS - 1}`); // the newest 5 were dropped
     expect(warned).toHaveBeenCalledOnce(); // single warn despite multiple drops
     warned.mockRestore();
   });
@@ -685,5 +687,38 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
     made[0].events.onConnectionState("failed");
     vi.advanceTimersByTime(RESTART_RECOVERY_MS);
     expect(cb.onChannelClosed).toHaveBeenCalledOnce();
+  });
+
+  it("failed preempts an armed disconnected grace timer — restarts now, not at grace expiry", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("disconnected"); // arms a 3s grace timer
+    vi.advanceTimersByTime(500);
+    made[0].events.onConnectionState("failed"); // preempts the grace — restart now
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce();
+
+    // The original grace deadline (t=3s) is well inside this window — if it
+    // had survived the preemption it would have fired a second, stray
+    // restart here. It must not: the fallback armed by "failed" replaces it
+    // outright, with a fresh RESTART_RECOVERY_MS window starting from t=0.5s.
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS - 1); // 1ms short of the new fallback's deadline (t=10.5s)
+    expect(made[0].link.restartIce).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(1); // exactly RESTART_RECOVERY_MS after the preemption (t=10.5s)
+    expect(made).toHaveLength(1); // rebuildLink fired, but construction is itself deferred
+    vi.advanceTimersByTime(STAGGER_MS);
+    expect(made).toHaveLength(2); // rebuild landed
+  });
+
+  it("two newcomers announcing in the same tick are spaced a stagger apart (unified cursor)", () => {
+    const { mesh, made } = harness();
+    mesh.addNewcomer("p1");
+    mesh.addNewcomer("p2");
+    expect(made).toHaveLength(0);
+    vi.advanceTimersByTime(STAGGER_MS);
+    expect(made.map((m) => m.peerId)).toEqual(["p1"]);
+    vi.advanceTimersByTime(STAGGER_MS);
+    expect(made.map((m) => m.peerId)).toEqual(["p1", "p2"]);
   });
 });

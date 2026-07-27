@@ -63,9 +63,10 @@ export const DISCONNECTED_RESTART_MS = 3_000;
 export const RESTART_RECOVERY_MS = 10_000;
 /** Rebuild attempts per link before we stop and let the badge tell the truth. */
 export const MAX_LINK_REBUILDS = 2;
-/** Bound on a peer's queued-but-not-yet-applied signals (drop oldest past
- *  this) — a peer that never gets a link back (rebuild capped, or the
- *  rebuild's own construction throws) must not grow this without bound. */
+/** Bound on a peer's queued-but-not-yet-applied signals (drop newest past
+ *  this — see relay()) — a peer that never gets a link back (rebuild
+ *  capped, or the rebuild's own construction throws) must not grow this
+ *  without bound. */
 export const MAX_PENDING_SIGNALS = 64;
 
 interface Entry {
@@ -87,6 +88,10 @@ interface Entry {
   channelOpen: boolean;
   /** Pending failed/disconnected escalation, cancelled on recovery/removal. */
   recoveryTimer: ReturnType<typeof setTimeout> | null;
+  /** What recoveryTimer is currently waiting on — null when none is armed.
+   *  "grace": the disconnected self-heal window (cancellable by "failed").
+   *  "fallback": the restart-recovery rebuild deadline (never preempted). */
+  recoveryPhase: "grace" | "fallback" | null;
   rebuilds: number;
   /** Set once the pending queue has dropped a signal, so the cap only warns once. */
   pendingCapWarned: boolean;
@@ -154,16 +159,20 @@ export class Mesh {
     // flight). Queue rather than drop: losing an initial offer deadlocks the
     // pair — nothing re-triggers negotiation. Capped so a peer whose link
     // never comes back (rebuild exhausted, or its construction throws)
-    // doesn't grow this without bound.
+    // doesn't grow this without bound — and capped by dropping the NEWEST
+    // arrival, not the oldest: the head of the queue is the offer everything
+    // behind it depends on, so evicting it would deadlock the pair with a
+    // full-looking queue of orphaned candidates. Shedding trailing
+    // candidates instead is survivable ICE loss.
     if (!entry.link) {
-      entry.pending.push(payload);
-      if (entry.pending.length > MAX_PENDING_SIGNALS) {
-        entry.pending.shift(); // drop oldest
+      if (entry.pending.length >= MAX_PENDING_SIGNALS) {
         if (!entry.pendingCapWarned) {
           entry.pendingCapWarned = true;
-          console.warn(`[mesh] pending signal queue capped at ${MAX_PENDING_SIGNALS} for ${from}; dropping oldest`);
+          console.warn(`[mesh] pending signal queue capped at ${MAX_PENDING_SIGNALS} for ${from}; dropping newest`);
         }
+        return;
       }
+      entry.pending.push(payload);
       return;
     }
     this.feed(entry, entry.link, payload);
@@ -189,16 +198,6 @@ export class Mesh {
     this.emitRoster();
   }
 
-  /**
-   * Unified stagger cursor: this entry lands one STAGGER_MS slot after
-   * however many other entries are already waiting on their own
-   * construction timer — reproducing addExistingPeers' old (i + 1) index
-   * math for a whole batch, while also spacing out two newcomers who
-   * announce in the same tick. There is deliberately no path left that
-   * constructs inside the caller's own tick (see STAGGER_MS) — the last one
-   * (addNewcomer's synchronous incumbent build) closed in the recovery
-   * work above.
-   */
   private add(peerId: string, polite: boolean): void {
     if (this.entries.has(peerId)) return;
     const entry: Entry = {
@@ -211,17 +210,47 @@ export class Mesh {
       connectionState: "new",
       channelOpen: false,
       recoveryTimer: null,
+      recoveryPhase: null,
       rebuilds: 0,
       pendingCapWarned: false,
     };
     this.entries.set(peerId, entry);
+    this.scheduleConstruction(peerId, entry, "evict");
+  }
+
+  /**
+   * Unified stagger cursor, shared by initial bring-up (add()) and a
+   * rebuild's reconstruction (rebuildLink()): this entry lands one
+   * STAGGER_MS slot after however many OTHER entries are already waiting on
+   * their own construction timer — reproducing addExistingPeers' old
+   * (i + 1) index math for a whole batch, while also spacing out two
+   * newcomers (or a newcomer and an in-flight rebuild) that land in the
+   * same tick. There is deliberately no path left that constructs inside
+   * the caller's own tick (see STAGGER_MS) — the last one (addNewcomer's
+   * synchronous incumbent build) closed in the recovery work above.
+   *
+   * This is count-based rather than a true monotonic deadline (each call
+   * computes "how many others are pending right now" rather than tracking
+   * an absolute next-free-slot cursor). The two agree whenever adds land in
+   * the same tick (the common case: a signaling batch, or two peers
+   * announcing back to back) — for adds arriving in different ticks that
+   * are still within a stagger of each other, count-based errs toward
+   * *more* spacing, not less, so it never collapses two constructions into
+   * the same tick; it just occasionally waits a slot longer than the bare
+   * minimum. That trade avoids threading a Date-free "now" source through
+   * the mesh for a benefit that's cosmetic, not correctness-bearing.
+   */
+  private scheduleConstruction(peerId: string, entry: Entry, onThrow: "evict" | "keep-failed"): void {
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer); // defensive: never stack two construction timers
+    }
     let pendingSlots = 0;
     for (const e of this.entries.values()) if (e !== entry && e.timer !== null) pendingSlots += 1;
     const delay = STAGGER_MS * (pendingSlots + 1);
     entry.timer = setTimeout(() => {
       entry.timer = null;
       if (this.entries.get(peerId) !== entry) return; // removed while waiting
-      this.construct(peerId, entry);
+      this.construct(peerId, entry, onThrow);
     }, delay);
   }
 
@@ -292,6 +321,14 @@ export class Mesh {
    * disarm the fallback before it could ever fire — the fallback was dead
    * code against real browsers, and repeated failures could restart ICE
    * indefinitely with no bound.
+   *
+   * One exception: "failed" preempts an armed "grace" timer (the
+   * disconnected self-heal window) but never an armed "fallback" timer (the
+   * post-restart rebuild deadline). A disconnected link that then reports
+   * failed is definitively bad — waiting out a grace period designed to
+   * catch a *transient* disconnect no longer serves any purpose, so restart
+   * ICE immediately and start the fallback clock from now instead of from
+   * whenever the grace timer happens to expire.
    */
   private onLinkState(peerId: string, entry: Entry, state: RTCPeerConnectionState): void {
     if (state === "connected") {
@@ -299,14 +336,25 @@ export class Mesh {
         clearTimeout(entry.recoveryTimer);
         entry.recoveryTimer = null;
       }
+      entry.recoveryPhase = null;
       entry.rebuilds = 0;
       return;
     }
     if (state === "failed") {
-      if (entry.recoveryTimer !== null) return; // fallback already pending — one restart per armed cycle
+      if (entry.recoveryTimer !== null) {
+        if (entry.recoveryPhase === "fallback") return; // already pending — one restart per armed cycle
+        // phase === "grace": failed preempts the disconnected self-heal
+        // window — we already know the link is bad, no reason to wait out a
+        // grace period meant for a state we've since moved past. Fall
+        // through to arm the fallback fresh, from now.
+        clearTimeout(entry.recoveryTimer);
+        entry.recoveryTimer = null;
+      }
       entry.link?.restartIce();
+      entry.recoveryPhase = "fallback";
       entry.recoveryTimer = setTimeout(() => {
         entry.recoveryTimer = null;
+        entry.recoveryPhase = null;
         if (this.entries.get(peerId) !== entry) return;
         this.rebuildLink(peerId, entry);
       }, RESTART_RECOVERY_MS);
@@ -314,8 +362,10 @@ export class Mesh {
     }
     if (state === "disconnected") {
       if (entry.recoveryTimer !== null) return; // grace or fallback already pending
+      entry.recoveryPhase = "grace";
       entry.recoveryTimer = setTimeout(() => {
         entry.recoveryTimer = null;
+        entry.recoveryPhase = null;
         if (this.entries.get(peerId) !== entry) return;
         // Load-bearing under the "leave armed timers alone" rule above: an
         // intermediate state can no longer cancel this timer on its own, so
@@ -323,8 +373,10 @@ export class Mesh {
         // having reached "connected" by the time the grace period elapses.
         if (entry.connectionState === "connected") return;
         entry.link?.restartIce();
+        entry.recoveryPhase = "fallback";
         entry.recoveryTimer = setTimeout(() => {
           entry.recoveryTimer = null;
+          entry.recoveryPhase = null;
           if (this.entries.get(peerId) !== entry) return;
           this.rebuildLink(peerId, entry);
         }, RESTART_RECOVERY_MS);
@@ -357,18 +409,13 @@ export class Mesh {
     entry.channelOpen = false; // old channel died with the old pc
     if (wasOnlyOpen) this.cb.onChannelClosed();
     this.emitRoster();
-    if (entry.timer !== null) {
-      // Defensive: nothing should already have a construction timer pending
-      // on a live entry, but never stack two.
-      clearTimeout(entry.timer);
-    }
-    entry.timer = setTimeout(() => {
-      entry.timer = null;
-      if (this.entries.get(peerId) !== entry) return;
-      // "keep-failed": a rebuild's own construction throwing must not evict
-      // a peer that was live a moment ago (see construct()'s onThrow doc).
-      this.construct(peerId, entry, "keep-failed");
-    }, STAGGER_MS); // never construct in the current tick (4B rule)
+    // Routed through the same stagger cursor as initial bring-up (never
+    // construct in the current tick — 4B rule — and space out against any
+    // other pending construction rather than always landing flat
+    // STAGGER_MS later regardless of what else is queued). "keep-failed": a
+    // rebuild's own construction throwing must not evict a peer that was
+    // live a moment ago (see construct()'s onThrow doc).
+    this.scheduleConstruction(peerId, entry, "keep-failed");
   }
 
   /**
