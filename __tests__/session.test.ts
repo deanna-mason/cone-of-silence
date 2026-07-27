@@ -33,6 +33,9 @@ class FakeWS {
   }
 }
 
+// connectionState is not modeled here — onconnectionstatechange is stored but
+// never invoked, so PeerLink's onConnectionState never fires; a future slice
+// exercising connection-state transitions must add that.
 class FakePC {
   static instances: FakePC[] = [];
   config: RTCConfiguration | undefined;
@@ -84,6 +87,7 @@ function startAndOpen(): FakeWS {
 }
 
 beforeEach(() => {
+  localStorage.clear(); // isolate cos-create-token across tests — don't let declaration order matter
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   vi.spyOn(Math, "random").mockReturnValue(0.5); // deterministic backoff
   FakeWS.instances = [];
