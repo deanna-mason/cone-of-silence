@@ -95,6 +95,11 @@ interface Entry {
   rebuilds: number;
   /** Set once the pending queue has dropped a signal, so the cap only warns once. */
   pendingCapWarned: boolean;
+  /** True from the moment rebuildLink tears the old link down until the new
+   *  one reports "connected" (or another rebuild replaces it). While true,
+   *  construct()'s onConnectionState callback suppresses "new"/"connecting"
+   *  writes — see construct() and rebuildLink(). */
+  rebuilding: boolean;
 }
 
 export class Mesh {
@@ -213,6 +218,7 @@ export class Mesh {
       recoveryPhase: null,
       rebuilds: 0,
       pendingCapWarned: false,
+      rebuilding: false,
     };
     this.entries.set(peerId, entry);
     this.scheduleConstruction(peerId, entry, "evict");
@@ -275,6 +281,21 @@ export class Mesh {
         },
         onConnectionState: (state) => {
           if (this.entries.get(peerId) !== entry || entry.link !== link) return;
+          if (entry.rebuilding) {
+            if (state === "new" || state === "connecting") {
+              // Suppress: the roster must keep reporting "failed" through
+              // the whole rebuild window (see rebuildLink) — the fresh pc's
+              // own "new"/"connecting" climb isn't honest news yet, and
+              // writing it here would flip the badge off while the link is
+              // genuinely still down.
+              return;
+            }
+            if (state === "connected") entry.rebuilding = false;
+            // "failed"/"disconnected" fall through unmodified: a failing
+            // rebuild is honest news, and drives the next recovery cycle
+            // normally (rebuilding stays true — still suppressing "new"/
+            // "connecting" until this link either connects or is replaced).
+          }
           entry.connectionState = state;
           this.onLinkState(peerId, entry, state);
           this.emitRoster();
@@ -404,7 +425,16 @@ export class Mesh {
     // connectionState is deliberately left alone here (typically "failed")
     // through the whole rebuild window — Task 4's badge reads this field
     // directly, and a peer with no link should read as failed, not silently
-    // revert to "new".
+    // revert to "new". That promise only holds because of `rebuilding`
+    // below: the replacement pc's own "new"/"connecting" climb fires
+    // through the SAME onConnectionState callback once construct() runs,
+    // and without this flag those transitions would overwrite
+    // connectionState right back to "connecting" — which the badge treats
+    // as not-yet-a-problem and hides on, even though the link is genuinely
+    // still down. construct()'s onConnectionState callback checks this flag
+    // and suppresses "new"/"connecting" writes while it's set; "connected"
+    // clears it, and "failed"/"disconnected" pass through as honest news.
+    entry.rebuilding = true;
     const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
     entry.channelOpen = false; // old channel died with the old pc
     if (wasOnlyOpen) this.cb.onChannelClosed();

@@ -722,3 +722,63 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
     expect(made.map((m) => m.peerId)).toEqual(["p1", "p2"]);
   });
 });
+
+describe("Mesh rebuild roster honesty (Task 4 badge fix)", () => {
+  it("during a rebuild, the new link's 'new'/'connecting' events leave the roster at 'failed' and emit nothing", () => {
+    const { mesh, made, rosters } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS); // fallback fires -> rebuildLink
+    vi.advanceTimersByTime(STAGGER_MS); // new link constructed
+    expect(made).toHaveLength(2);
+    expect(rosters.at(-1)?.[0].connectionState).toBe("failed"); // still failed right after construction
+
+    const emitsBefore = rosters.length;
+    made[1].events.onConnectionState("new");
+    made[1].events.onConnectionState("connecting");
+    expect(rosters.length).toBe(emitsBefore); // neither transition emitted a roster
+    expect(rosters.at(-1)?.[0].connectionState).toBe("failed"); // still failed — badge stays honest
+    // No interaction with the recovery machine either — connecting was
+    // already a no-op there, and suppression short-circuits before it's reached.
+    expect(made[1].link.restartIce).not.toHaveBeenCalled();
+  });
+
+  it("during a rebuild, the new link's 'connected' event flips the roster to connected and re-arms nothing", () => {
+    const { mesh, made, rosters } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed");
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    expect(made).toHaveLength(2);
+
+    made[1].events.onConnectionState("connecting"); // suppressed, still "failed"
+    expect(rosters.at(-1)?.[0].connectionState).toBe("failed");
+    made[1].events.onConnectionState("connected"); // real recovery — written normally
+    expect(rosters.at(-1)?.[0].connectionState).toBe("connected");
+
+    // Recovered — nothing should be armed; advancing well past every
+    // recovery window must not produce a third link.
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS + DISCONNECTED_RESTART_MS);
+    expect(made).toHaveLength(2);
+  });
+
+  it("a rebuilt link that fails again reports 'failed' honestly and burns the next rebuild per the cap", () => {
+    const { mesh, made, rosters } = harness();
+    mesh.addNewcomer("p1");
+    settle();
+    made[0].events.onConnectionState("failed"); // rebuild #1 armed
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    expect(made).toHaveLength(2); // rebuild #1 landed
+
+    made[1].events.onConnectionState("connecting"); // suppressed
+    expect(rosters.at(-1)?.[0].connectionState).toBe("failed");
+
+    made[1].events.onConnectionState("failed"); // the rebuilt link fails too — honest news
+    expect(rosters.at(-1)?.[0].connectionState).toBe("failed");
+    expect(made[1].link.restartIce).toHaveBeenCalledOnce(); // drives the next recovery cycle
+
+    vi.advanceTimersByTime(RESTART_RECOVERY_MS + STAGGER_MS);
+    expect(made).toHaveLength(3); // rebuild #2 landed — within MAX_LINK_REBUILDS
+  });
+});
