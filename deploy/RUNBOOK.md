@@ -106,6 +106,8 @@ Negative check (stale/bogus creds must be REJECTED):
 Expected: 401/allocation failure. From a browser: open a room with
 `?forceTurn=1` — the call must still connect (relay-only), and
 `chrome://webrtc-internals` shows the selected candidate pair type `relay`.
+Note: `?forceTurn=1` does not survive a page refresh (fragment re-entry
+drops the query string) — re-append it to the URL after any refresh.
 Health: `systemctl is-active coturn` alongside the existing checks.
 
 ## Supabase keepalive
