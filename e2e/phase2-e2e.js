@@ -7,12 +7,16 @@
 //
 // Run (macOS): `npm i --no-save playwright-core` once, have `next dev` on :3000
 // and NOTHING on :8787, then `node e2e/phase2-e2e.js`. Reads the newest
-// chromium_headless_shell from the local Playwright cache. (A same-tick
-// two-new-RTCPeerConnection ICE-gathering wedge was diagnosed on this
-// machine across chrome-headless-shell, a full Chromium 1223 build, AND
-// the system-installed Google Chrome — all three executables reproduce it,
-// pointing at a machine-level cause rather than this specific binary. See
-// .superpowers/sdd/task-5-report.md for the full diagnostic trail.)
+// chromium_headless_shell from the local Playwright cache.
+//
+// The ICE-gathering wedge this script chased was app-side, not machine-level:
+// an RTCPeerConnection constructed inside the signaling handler's own tick
+// never gathered a single local candidate, so that pair never connected.
+// Three binaries reproduced it (chrome-headless-shell, a full Chromium 1223
+// build, system Google Chrome) — one app-side trigger, not a bad binary. It is
+// fixed in lib/webrtc/mesh.ts, which defers link construction off that tick;
+// the join retries below are now only a backstop. See
+// .superpowers/sdd/task-5-report.md for the full diagnostic trail.
 const { chromium } = require("playwright-core");
 const path = require("path");
 const os = require("os");
@@ -121,13 +125,15 @@ async function waitRemoteVideosFlowing(page, count, timeoutMs) {
   );
 }
 
-// Known headless-Chromium flake (diagnosed during Phase 2 script
-// development, not an app bug): after a perfect-negotiation rollback,
-// Chromium's ICE agent on the rolled-back side sometimes never fires a
-// single local icecandidate, so that one pair never connects. A fresh
-// RTCPeerConnection clears it — so the NEWCOMER (whose pairs are the only
-// unproven ones) leaves & rejoins, bounded retries. Mesh growth multiplies
-// the exposure: every join creates N new pairs, any one can wedge.
+// Bounded join retries, kept as a backstop only. What originally motivated
+// them was an app bug — an RTCPeerConnection constructed inside the signaling
+// handler's own tick never gathered local candidates, so that pair never
+// connected — and lib/webrtc/mesh.ts now defers construction off that tick.
+// The retries stay because a join is cheap to redo and a lost pair is
+// otherwise unrecoverable (nothing re-triggers negotiation): a fresh
+// RTCPeerConnection clears any such state, so the NEWCOMER — whose pairs are
+// the only unproven ones — leaves & rejoins. Mesh growth multiplies the
+// exposure: every join creates N new pairs.
 const MAX_CONNECT_ATTEMPTS = 3;
 async function joinUntilFlowing(page, url, expectFlowing) {
   await enterGreenRoomAndProceed(page, url);
@@ -306,18 +312,20 @@ async function mintToken() {
     await pageD.setViewportSize({ width: 390, height: 844 });
     const fits = await pageD.evaluate(() => {
       const vh = window.innerHeight;
-      const rects = [
-        ...[...document.querySelectorAll("figure")].map((f) => f.getBoundingClientRect()),
-        ...[...document.querySelectorAll("button")]
-          .filter((b) => (b.textContent || "").includes("Burn & Leave"))
-          .map((b) => b.getBoundingClientRect()),
-      ];
+      const inView = (r) => r.top >= 0 && r.bottom <= vh + 1;
+      const tiles = [...document.querySelectorAll("figure")].map((f) => f.getBoundingClientRect());
+      const buttons = [...document.querySelectorAll("button")];
+      // Every control-bar button, matched on its rendered label (each toggle
+      // has two states) — not just the leave button.
+      const labels = [/Mic (Live|Cut)/, /Lens (Open|Capped)/, /Copy Invite|Link Secured/, /Burn & Leave/];
+      const controls = labels.map((re) => buttons.find((b) => re.test(b.textContent || "")));
+      if (tiles.length !== 4 || controls.some((b) => !b)) return false;
       return (
-        rects.length === 5 && // 4 tiles + the leave button
-        rects.every((r) => r.top >= 0 && r.bottom <= vh + 1 && r.height > 40)
+        tiles.every((r) => inView(r) && r.height > 40) &&
+        controls.map((b) => b.getBoundingClientRect()).every((r) => inView(r) && r.height > 20)
       );
     });
-    check(fits, "D at 390x844: all four tiles + controls fully inside the visible viewport (no scroll)");
+    check(fits, "D at 390x844: all four tiles + all four control buttons fully inside the visible viewport (no scroll)");
     await pageD.setViewportSize({ width: 1280, height: 720 });
 
     // ---- Check 8: a fifth agent is refused ----
@@ -339,11 +347,19 @@ async function mintToken() {
     for (const p of [pageA, pageB, pageC, pageD]) await p.getByText("Agents present: 4").waitFor();
     check(true, "A rejoins via the same invite — full 4-way mesh restored");
 
-    // ---- Check 11: mid-roster leave ----
+    // ---- Check 11: mid-roster leave, then drain down to the last survivor ----
     await pageB.getByRole("button", { name: "Burn & Leave" }).click();
     await pageB.waitForURL((u) => new URL(u).pathname === "/");
     for (const p of [pageA, pageC, pageD]) await p.getByText("Agents present: 3").waitFor();
-    check(true, "B leaves — remaining three agents intact");
+    // Everyone else leaves: the last agent standing must fall back to the
+    // waiting state, not keep a stale remote tile.
+    for (const p of [pageA, pageC]) {
+      await p.getByRole("button", { name: "Burn & Leave" }).click();
+      await p.waitForURL((u) => new URL(u).pathname === "/");
+    }
+    await pageD.getByText("Agents present: 1").waitFor();
+    await figcaption(pageD, "Awaiting agent").waitFor();
+    check(true, "B leaves — three intact; A and C leave too — D alone: Agents present: 1, Awaiting agent");
 
     // ---- Check 12: a fresh context on a different, never-created invite ----
     await enterGreenRoomAndProceed(pageF, inviteUrl(otherKeys));
