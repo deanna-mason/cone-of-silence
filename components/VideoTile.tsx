@@ -11,6 +11,7 @@ interface VideoTileProps {
   camOff?: boolean;
   fill?: boolean; // Phase 4B: size from the parent grid cell instead of aspect-video
   signalLost?: boolean;
+  speaking?: boolean;
 }
 
 export default function VideoTile({
@@ -21,6 +22,7 @@ export default function VideoTile({
   camOff = false,
   fill = false,
   signalLost = false,
+  speaking = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
@@ -72,7 +74,7 @@ export default function VideoTile({
     <figure
       className={`hairline relative overflow-hidden border bg-inset ${
         fill ? "h-full min-h-0 w-full" : "aspect-video"
-      }`}
+      } ${speaking ? "ring-2 ring-brass/70" : ""}`}
     >
       {stream && (
         <video

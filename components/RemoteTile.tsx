@@ -6,6 +6,7 @@
 
 import VideoTile from "@/components/VideoTile";
 import { useSignalLostBadge } from "@/hooks/useSignalLostBadge";
+import { useSpeaking } from "@/hooks/useSpeaking";
 import type { RemotePeer } from "@/lib/webrtc/session";
 
 interface RemoteTileProps {
@@ -15,5 +16,8 @@ interface RemoteTileProps {
 
 export default function RemoteTile({ peer, label }: RemoteTileProps) {
   const signalLost = useSignalLostBadge(peer.connectionState);
-  return <VideoTile fill stream={peer.stream} label={label} signalLost={signalLost} />;
+  const speaking = useSpeaking(peer.stream);
+  return (
+    <VideoTile fill stream={peer.stream} label={label} signalLost={signalLost} speaking={speaking} />
+  );
 }
