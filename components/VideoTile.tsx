@@ -10,6 +10,7 @@ interface VideoTileProps {
   isSelf?: boolean;
   camOff?: boolean;
   fill?: boolean; // Phase 4B: size from the parent grid cell instead of aspect-video
+  signalLost?: boolean;
 }
 
 export default function VideoTile({
@@ -19,6 +20,7 @@ export default function VideoTile({
   isSelf = false,
   camOff = false,
   fill = false,
+  signalLost = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
@@ -94,6 +96,11 @@ export default function VideoTile({
             {stream ? (camOff ? "Lens capped" : "Audio only") : "Awaiting agent"}
           </p>
         </div>
+      )}
+      {signalLost && (
+        <p className="kicker absolute left-2 top-2 border border-vermilion/60 bg-field/80 px-2 py-1 text-vermilion">
+          ◈ Signal Lost
+        </p>
       )}
       {!isSelf && stream && !audioOn && (
         <button

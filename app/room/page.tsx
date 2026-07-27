@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import VideoTile from "@/components/VideoTile";
+import RemoteTile from "@/components/RemoteTile";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
 import { LensIcon, MicIcon } from "@/components/icons";
@@ -310,7 +311,7 @@ export default function RoomPage() {
       <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>
         <VideoTile fill stream={media.stream} label="You" mirrored isSelf camOff={!media.camOn} />
         {call.peers.map((p, i) => (
-          <VideoTile key={p.peerId} fill stream={p.stream} label={`Agent ${i + 2}`} />
+          <RemoteTile key={p.peerId} peer={p} label={`Agent ${i + 2}`} />
         ))}
         {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}
       </div>
