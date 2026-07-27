@@ -61,6 +61,12 @@ interface Entry {
   polite: boolean;
   /** Signals relayed before the link existed, replayed in arrival order. */
   pending: string[];
+  /**
+   * Serializes signal application for this peer: every payload — drained or
+   * live — is appended here, so each reaches handleSignal only after the
+   * previous one has settled (see feed()).
+   */
+  chain: Promise<void>;
   /** Pending construction, cancelled on remove()/closeAll(). */
   timer: ReturnType<typeof setTimeout> | null;
   stream: MediaStream | null;
@@ -103,7 +109,11 @@ export class Mesh {
   /** A newcomer arrived after us: we are the incumbent (impolite). */
   addNewcomer(peerId: string): void {
     if (this.entries.has(peerId)) return; // duplicate announce — ignore
-    this.add(peerId, false, 0); // a lone new connection never needs staggering
+    // Kept synchronous by controller ruling, not by any claim that a single
+    // connection is inherently safe: incumbent-side construction has never
+    // been observed to wedge across ~28 instrumented runs. A watch item for
+    // the Phase 4C ICE-restart work.
+    this.add(peerId, false, 0);
     this.emitRoster();
   }
 
@@ -127,7 +137,7 @@ export class Mesh {
       entry.pending.push(payload);
       return;
     }
-    this.feed(entry.link, payload);
+    this.feed(entry, entry.link, payload);
   }
 
   /** Device switch: swap tracks on every live link — no renegotiation. */
@@ -156,6 +166,7 @@ export class Mesh {
       link: null,
       polite,
       pending: [],
+      chain: Promise.resolve(),
       timer: null,
       stream: null,
       connectionState: "new",
@@ -174,33 +185,58 @@ export class Mesh {
   }
 
   private construct(peerId: string, entry: Entry): void {
-    entry.link = this.createLink(peerId, entry.polite, {
-      onRemoteStream: (stream) => {
-        if (this.entries.get(peerId) !== entry) return; // stale link — dropped already
-        entry.stream = stream;
-        this.emitRoster();
-      },
-      onConnectionState: (state) => {
-        if (this.entries.get(peerId) !== entry) return;
-        entry.connectionState = state;
-        this.emitRoster();
-      },
-      onChannelOpen: () => {
-        if (this.entries.get(peerId) !== entry) return;
-        const wasOpen = this.openChannels() > 0;
-        entry.channelOpen = true;
-        if (!wasOpen) this.cb.onChannelOpen();
-      },
-    });
+    let link: MeshLink;
+    try {
+      link = this.createLink(peerId, entry.polite, {
+        onRemoteStream: (stream) => {
+          if (this.entries.get(peerId) !== entry) return; // stale link — dropped already
+          entry.stream = stream;
+          this.emitRoster();
+        },
+        onConnectionState: (state) => {
+          if (this.entries.get(peerId) !== entry) return;
+          entry.connectionState = state;
+          this.emitRoster();
+        },
+        onChannelOpen: () => {
+          if (this.entries.get(peerId) !== entry) return;
+          const wasOpen = this.openChannels() > 0;
+          entry.channelOpen = true;
+          if (!wasOpen) this.cb.onChannelOpen();
+        },
+      });
+    } catch (err) {
+      // Construction usually runs on a timer tick, where a throwing factory
+      // would surface as an uncaught error and strand a half-initialized
+      // entry (roster row that can never connect, queue that never drains).
+      // Drop the peer instead; the roster shows the truth.
+      this.entries.delete(peerId);
+      this.cancelPending(entry);
+      console.error(`[mesh] link construction failed for ${peerId}`, err);
+      this.emitRoster();
+      return;
+    }
+    entry.link = link;
     const queued = entry.pending;
     entry.pending = [];
-    for (const payload of queued) this.feed(entry.link, payload);
+    for (const payload of queued) this.feed(entry, link, payload);
   }
 
-  private feed(link: MeshLink, payload: string): void {
-    // handleSignal can reject on straggler ICE after an ignored offer —
-    // expected negotiation noise, never fatal (Phase 2 carry).
-    link.handleSignal(payload).catch(() => {});
+  /**
+   * Apply one payload, strictly after the peer's previous payload settled.
+   * handleSignal is async and is NOT internally serialized: overlapping calls
+   * interleave at their awaits, so an ICE candidate can reach addIceCandidate
+   * while the offer ahead of it is still suspended in setRemoteDescription —
+   * remoteDescription is null, the call rejects InvalidStateError, and the
+   * candidate is silently lost. Chaining keeps arrival order and gives each
+   * payload the state the sender assumed.
+   *
+   * A rejection is swallowed per payload (straggler ICE after an ignored
+   * offer is expected negotiation noise, never fatal — Phase 2 carry) and
+   * never breaks the chain for the payloads behind it.
+   */
+  private feed(entry: Entry, link: MeshLink, payload: string): void {
+    entry.chain = entry.chain.then(() => link.handleSignal(payload)).catch(() => {});
   }
 
   private cancelPending(entry: Entry): void {

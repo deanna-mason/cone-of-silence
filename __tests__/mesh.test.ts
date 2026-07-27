@@ -30,9 +30,36 @@ function harness() {
   return { mesh, made, cb, rosters };
 }
 
-/** Links after the first are constructed on a stagger — let them all land. */
+/** A link whose handleSignal stays in flight until the test releases it. */
+class DeferredLink implements MeshLink {
+  /** Payloads in the order handleSignal was actually invoked with them. */
+  readonly started: string[] = [];
+  private readonly settlers: Array<(reject?: boolean) => void> = [];
+  handleSignal = vi.fn((payload: string) => {
+    this.started.push(payload);
+    return new Promise<void>((resolve, reject) => {
+      this.settlers.push((rejectIt) => (rejectIt ? reject(new Error("straggler ICE")) : resolve()));
+    });
+  });
+  replaceStream = vi.fn(async (_stream: MediaStream) => {});
+  close = vi.fn();
+  /** Settle the oldest in-flight handleSignal. */
+  release(reject = false) {
+    this.settlers.shift()?.(reject);
+  }
+}
+
+/** Every link is deferred ((i + 1) * STAGGER_MS) — run the timers so they all land. */
 function settle() {
   vi.runAllTimers();
+}
+
+/**
+ * Signal application is chained on promises, so a payload reaches handleSignal
+ * a microtask (or several) after the call that enqueued it.
+ */
+async function flush() {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
 const fakeStream = {} as MediaStream;
@@ -61,7 +88,7 @@ describe("Mesh politeness", () => {
   it("addNewcomer: they are the newcomer — we are impolite", () => {
     const { mesh, made } = harness();
     mesh.addNewcomer("p9");
-    expect(made).toHaveLength(1); // single link — never deferred
+    expect(made).toHaveLength(1); // incumbent side is built synchronously
     expect(made[0].polite).toBe(false);
   });
 
@@ -106,7 +133,7 @@ describe("Mesh staggered bring-up", () => {
     ]);
   });
 
-  it("addNewcomer is immediate — one new pc per tick already", () => {
+  it("addNewcomer is immediate — incumbent-side construction kept synchronous by ruling", () => {
     const { mesh, made } = harness();
     mesh.addNewcomer("p1");
     expect(made).toHaveLength(1);
@@ -115,7 +142,7 @@ describe("Mesh staggered bring-up", () => {
 });
 
 describe("Mesh pending-signal buffering", () => {
-  it("queues signals for a peer whose link is not built yet, draining in arrival order", () => {
+  it("queues signals for a peer whose link is not built yet, draining in arrival order", async () => {
     const { mesh, made } = harness();
     mesh.addExistingPeers(["p1", "p2"]);
     mesh.relay("p2", "sig-1");
@@ -123,20 +150,22 @@ describe("Mesh pending-signal buffering", () => {
     expect(made).toHaveLength(0); // p2's link still pending
 
     settle();
+    await flush();
     expect(made[1].peerId).toBe("p2");
     expect(made[1].link.handleSignal.mock.calls.map((c) => c[0])).toEqual(["sig-1", "sig-2"]);
   });
 
-  it("routes straight through once the link exists", () => {
+  it("routes straight through once the link exists", async () => {
     const { mesh, made } = harness();
     mesh.addExistingPeers(["p1", "p2"]);
     settle();
     mesh.relay("p2", "payload-x");
+    await flush();
     expect(made[1].link.handleSignal).toHaveBeenCalledWith("payload-x");
     expect(made[0].link.handleSignal).not.toHaveBeenCalled();
   });
 
-  it("swallows rejections raised while draining the queue", () => {
+  it("swallows rejections raised while draining the queue", async () => {
     const rejecting = new Mesh(
       () => ({
         handleSignal: vi.fn(async () => {
@@ -150,6 +179,7 @@ describe("Mesh pending-signal buffering", () => {
     rejecting.addExistingPeers(["p1", "p2"]);
     rejecting.relay("p2", "straggler");
     expect(() => settle()).not.toThrow();
+    await expect(flush()).resolves.toBeUndefined();
   });
 
   it("discards queued signals if the peer is removed before its link is built", () => {
@@ -160,6 +190,113 @@ describe("Mesh pending-signal buffering", () => {
     settle();
     expect(made.map((m) => m.peerId)).toEqual(["p1"]); // p2's link never constructed
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("Mesh signal serialization", () => {
+  function deferredHarness() {
+    const links: DeferredLink[] = [];
+    const cb = { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn() };
+    const mesh = new Mesh(() => {
+      const link = new DeferredLink();
+      links.push(link);
+      return link;
+    }, cb);
+    return { mesh, links };
+  }
+
+  it("does not start a queued signal until the previous one has settled", async () => {
+    const { mesh, links } = deferredHarness();
+    mesh.addExistingPeers(["p1"]);
+    mesh.relay("p1", "offer");
+    mesh.relay("p1", "candidate");
+
+    settle();
+    await flush();
+    const link = links[0];
+    // handleSignal(offer) is still suspended — the candidate must NOT be
+    // applied concurrently (it would hit a null remoteDescription).
+    expect(link.started).toEqual(["offer"]);
+
+    link.release();
+    await flush();
+    expect(link.started).toEqual(["offer", "candidate"]);
+  });
+
+  it("serializes live relays into a link that already exists", async () => {
+    const { mesh, links } = deferredHarness();
+    mesh.addNewcomer("p1");
+    const link = links[0];
+    mesh.relay("p1", "one");
+    mesh.relay("p1", "two");
+    await flush();
+    expect(link.started).toEqual(["one"]);
+
+    link.release();
+    await flush();
+    expect(link.started).toEqual(["one", "two"]);
+  });
+
+  it("a live relay arriving mid-drain lands after the drained payloads", async () => {
+    const { mesh, links } = deferredHarness();
+    mesh.addExistingPeers(["p1"]);
+    mesh.relay("p1", "queued-1");
+    mesh.relay("p1", "queued-2");
+
+    settle();
+    await flush();
+    const link = links[0];
+    expect(link.started).toEqual(["queued-1"]); // drain in flight
+
+    mesh.relay("p1", "live"); // arrives while queued-1 is still suspended
+    await flush();
+    expect(link.started).toEqual(["queued-1"]);
+
+    link.release();
+    await flush();
+    expect(link.started).toEqual(["queued-1", "queued-2"]);
+
+    link.release();
+    await flush();
+    expect(link.started).toEqual(["queued-1", "queued-2", "live"]);
+  });
+
+  it("a rejected payload is swallowed and does not stall the ones behind it", async () => {
+    const { mesh, links } = deferredHarness();
+    mesh.addNewcomer("p1");
+    const link = links[0];
+    mesh.relay("p1", "bad");
+    mesh.relay("p1", "good");
+    await flush();
+
+    link.release(true); // "bad" rejects
+    await flush();
+    expect(link.started).toEqual(["bad", "good"]);
+  });
+});
+
+describe("Mesh construction failure", () => {
+  it("a throwing link factory drops the entry, emits the roster, and leaks no timer", () => {
+    const rosters: RemotePeer[][] = [];
+    const cb = {
+      onRoster: vi.fn((r: RemotePeer[]) => rosters.push(r)),
+      onChannelOpen: vi.fn(),
+      onChannelClosed: vi.fn(),
+    };
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mesh = new Mesh(() => {
+      throw new Error("factory blew up");
+    }, cb);
+
+    mesh.addExistingPeers(["p1"]);
+    mesh.relay("p1", "sig");
+    expect(() => settle()).not.toThrow(); // construction runs on a timer tick
+
+    expect(mesh.size).toBe(0);
+    expect(rosters.at(-1)).toEqual([]);
+    expect(logged).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    logged.mockRestore();
   });
 });
 
@@ -219,21 +356,23 @@ describe("Mesh roster", () => {
 });
 
 describe("Mesh relay routing", () => {
-  it("routes payloads to the addressed link only", () => {
+  it("routes payloads to the addressed link only", async () => {
     const { mesh, made } = harness();
     mesh.addExistingPeers(["p1", "p2"]);
     settle();
     mesh.relay("p2", "payload-x");
+    await flush();
     expect(made[1].link.handleSignal).toHaveBeenCalledWith("payload-x");
     expect(made[0].link.handleSignal).not.toHaveBeenCalled();
   });
 
-  it("relay from an unknown peer is dropped; handleSignal rejection is swallowed", () => {
+  it("relay from an unknown peer is dropped; handleSignal rejection is swallowed", async () => {
     const { mesh, made } = harness();
     mesh.addNewcomer("p1");
     made[0].link.handleSignal.mockRejectedValueOnce(new Error("straggler ICE"));
     expect(() => mesh.relay("stranger", "x")).not.toThrow();
     expect(() => mesh.relay("p1", "y")).not.toThrow();
+    await expect(flush()).resolves.toBeUndefined();
   });
 });
 
