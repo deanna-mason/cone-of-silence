@@ -96,10 +96,13 @@ export class CallSession {
         this.dropAll("signal-lost");
         return;
       }
-      // Post-entry refusals only go terminal after the ~90s recovery window
-      // is exhausted — that patience deserves its own copy, not the cold
-      // "channel was struck" card (spec §4C UX).
-      this.dropAll(afterEntry ? "recovery-failed" : reason);
+      // Post-entry room-full/room-not-found refusals only go terminal after
+      // the ~90s recovery window is exhausted — that patience deserves its
+      // own copy, not the cold "channel was struck" card (spec §4C UX).
+      // create-refused is excluded: a revoked token isn't a patience story,
+      // and the clearance-specific copy is the actionable one.
+      const recoverable = reason === "room-full" || reason === "room-not-found";
+      this.dropAll(afterEntry && recoverable ? "recovery-failed" : reason);
     });
   }
 

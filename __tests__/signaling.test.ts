@@ -60,13 +60,20 @@ function enterRoom(): FakeWS {
   return ws;
 }
 
+/** Advance fake timers until a new socket appears, bounded so a
+ *  terminal-latch regression fails the test instead of spinning the
+ *  runner forever (vitest's testTimeout can't fire through a sync loop). */
+function advanceUntilNextSocket(count: number): void {
+  for (let i = 0; i < 200 && FakeWS.instances.length === count; i++) vi.advanceTimersByTime(1_000);
+  if (FakeWS.instances.length === count) throw new Error("no reconnect socket — client went terminal");
+}
+
 /** Advance through backoff to the client's next socket, then open+join it.
  *  A prior advanceTimersByTime may already have fired the reconnect timer,
  *  leaving an unopened socket waiting — use it instead of spinning forever. */
 function nextAttempt(): FakeWS {
   if (lastWS().readyState === 0) return openAndJoin();
-  const count = FakeWS.instances.length;
-  while (FakeWS.instances.length === count) vi.advanceTimersByTime(1_000);
+  advanceUntilNextSocket(FakeWS.instances.length);
   return openAndJoin();
 }
 
@@ -159,6 +166,27 @@ describe("wall-clock deadline (replaces the attempt budget)", () => {
     const ws3 = nextAttempt();
     ws3.serverSays({ v: 1, t: "error", reason: "room-full", message: "" });
     expect(refusals).toEqual([]); // still inside the fresh window
+  });
+
+  it("pure connect failures never consume the recovery window's patience", () => {
+    // This is the shipped Phase-2 bug, pinned: with jitter fixed at its
+    // midpoint (factor 1.0), the 10 unopened-drop rounds below fire at
+    // attempts 0-9 — delays 500,1000,2000,4000,8000,then capped at 10000 for
+    // the remaining 5 — polled in 1s ticks (the 500ms round rounds up to a
+    // 1000ms tick). Summed: 1000+1000+2000+4000+8000+10000*5 = 66000ms. The
+    // final successful attempt (attempt 10, also capped) adds another
+    // 10000ms = 76000ms total — comfortably inside RETRY_DEADLINE_MS
+    // (90000ms), with >10s of headroom to spare.
+    enterRoom().drop();
+    for (let i = 0; i < 10; i++) {
+      // socket comes up but the server is still down — it dies unopened
+      const count = FakeWS.instances.length;
+      advanceUntilNextSocket(count);
+      lastWS().drop();
+    }
+    const ws = nextAttempt(); // server finally back
+    ws.serverSays({ v: 1, t: "error", reason: "room-full", message: "" });
+    expect(refusals).toEqual([]); // old attempt-budget code would be terminal by now
   });
 });
 
