@@ -434,9 +434,12 @@ describe("simultaneous propose", () => {
     b.hello();
     vi.runAllTimers();
 
-    // Both sides propose before either pod/roll has crossed the wire.
-    const takeIdA = a.propose();
-    const takeIdB = b.propose();
+    // Both sides propose before either pod/roll has crossed the wire — each
+    // one claims its own free slot, so neither proposal is refused.
+    const takeIdA = a.propose()!;
+    const takeIdB = b.propose()!;
+    expect(takeIdA).not.toBeNull();
+    expect(takeIdB).not.toBeNull();
     const winner = takeIdA < takeIdB ? takeIdA : takeIdB;
 
     vi.advanceTimersByTime(COUNTDOWN_MS + 200);
@@ -527,6 +530,99 @@ describe("dispose", () => {
       expect(cb.onStopMark).not.toHaveBeenCalled();
       expect(cb.onStopRecorders).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("an unacked proposal aborts rather than wedging", () => {
+  /** A bus whose sends all go on the floor — exactly what mesh.sendAll does
+   *  while the channel is closed (it skips rather than queues). */
+  function deadBus(sent: string[]): CallBus {
+    return {
+      sendAll: (text: string) => {
+        sent.push(text);
+      },
+      sendTo: (_peerId: string, text: string) => {
+        sent.push(text);
+        return false;
+      },
+      onMessage: () => () => {},
+    };
+  }
+
+  it("no roll-ack by startAtMs → onAborted, no onStartRecorders/onMark, and the slot is free again", () => {
+    const sent: string[] = [];
+    const { cb, log } = makeCb();
+    const a = new TakeCoordinator(deadBus(sent), "Alpha", cb);
+
+    const takeId = a.propose();
+    expect(takeId).not.toBeNull();
+
+    // Just short of the start instant: still counting down, nothing aborted.
+    vi.advanceTimersByTime(COUNTDOWN_MS - 1);
+    expect(cb.onAborted).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(cb.onAborted).toHaveBeenCalledTimes(1);
+    expect(cb.onAborted).toHaveBeenCalledWith(takeId);
+
+    // The roll-phase timers went with it — nothing fires late.
+    vi.advanceTimersByTime(COUNTDOWN_MS + MARK_TOTAL_MS + 5_000);
+    expect(cb.onStartRecorders).not.toHaveBeenCalled();
+    expect(cb.onMark).not.toHaveBeenCalled();
+    expect(cb.onStopMark).not.toHaveBeenCalled();
+    expect(cb.onStopRecorders).not.toHaveBeenCalled();
+    expect(cb.onAborted).toHaveBeenCalledTimes(1);
+
+    // Slot freed: a fresh propose() is accepted and runs normally once acked.
+    const newTakeId = a.propose();
+    expect(newTakeId).not.toBeNull();
+    expect(newTakeId).not.toBe(takeId);
+    a.dispose();
+    expect(log.filter((e) => e.name === "onStartRecorders")).toHaveLength(0);
+  });
+
+  it("an ack that DOES land disarms the abort — the take rolls and stops normally", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose();
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+
+    expect(cbA.onStartRecorders).toHaveBeenCalledWith(takeId);
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+    expect(cbA.onAborted).not.toHaveBeenCalled();
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("propose() returns null and sends nothing while a take still holds the slot", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    a.propose();
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // rolling
+    const rollsSoFar = pair.countSent(0, "pod/roll");
+
+    expect(a.propose()).toBeNull();
+    expect(pair.countSent(0, "pod/roll")).toBe(rollsSoFar);
+
+    a.dispose();
+    b.dispose();
   });
 });
 

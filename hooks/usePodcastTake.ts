@@ -549,6 +549,12 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     if (vaultPerm !== "granted") {
       return { kind: "vault-needed", permission: vaultPerm === "prompt" ? "prompt" : "unset" };
     }
+    // The roster is not enough: during a channel rebuild the peer stays listed
+    // while the bus underneath is dropping every send. Rolling in that window
+    // would put a pod/roll on the floor and strand us in a countdown nobody
+    // acked. (Ordered last so the actionable vault step is still offered while
+    // the line comes back on its own.)
+    if (!dcOpen) return { kind: "link-down" };
     return { kind: "armed" };
   }
 
@@ -577,11 +583,17 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       // ROLL TAPE is only ever offered from "armed" — the guard makes that a
       // rule rather than a fact about which button the panel happens to show.
       roll: () => {
-        if (panel.kind !== "armed" || !coordinatorRef.current) return;
+        const coordinator = coordinatorRef.current;
+        if (panel.kind !== "armed" || !coordinator) return;
+        // A take still draining its stop (the ~1.25 s tail after a Stand Down
+        // from a failed start, say) holds the coordinator's slot: propose()
+        // sends nothing and returns null. Entering a countdown on that would
+        // be a phantom one — no roll on the wire, no ack, no start.
+        const takeId = coordinator.propose();
+        if (takeId === null) return;
         beginTake();
         setCountdownS(Math.floor(COUNTDOWN_MS / 1000));
         goPhase("countdown");
-        coordinatorRef.current.propose();
       },
       stop: () => {
         if (phaseRef.current === "failed") {

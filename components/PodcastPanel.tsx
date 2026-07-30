@@ -10,6 +10,9 @@ export type PodcastPanelState =
   | { kind: "unsupported" }
   | { kind: "not-two"; count: number }
   | { kind: "vault-needed"; permission: "unset" | "prompt" }
+  /** Two chairs and a vault, but the data channel to the other chair is down —
+   *  a proposal sent now would be dropped, never acked, and never rolled. */
+  | { kind: "link-down" }
   | { kind: "armed" }
   | { kind: "countdown"; secondsLeft: number }
   | {
@@ -105,6 +108,16 @@ export default function PodcastPanel({
           >
             {state.permission === "unset" ? "Choose Tape Vault" : "Open Tape Vault"}
           </button>
+        </div>
+      );
+
+    case "link-down":
+      return (
+        <div className={ROW}>
+          <p className="kicker shrink-0 text-sienna">◈ Line Down</p>
+          <p className="truncate font-body text-sm text-ink-soft">
+            The tape rolls on both machines or neither. Waiting for the line to the other chair.
+          </p>
         </div>
       );
 

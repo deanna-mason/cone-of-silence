@@ -362,14 +362,38 @@ export class TakeCoordinator {
     this.announce();
   }
 
-  /** ROLL TAPE — proposes a new take. No-op (returns the current id) if one's already active. */
-  propose(): string {
-    if (this.activeTakeId !== null) return this.activeTakeId;
+  /**
+   * ROLL TAPE — proposes a new take. Returns the new takeId, or null when a
+   * take already holds the slot (including one still draining its stop): no
+   * message is sent in that case, and the caller must NOT enter a countdown
+   * for a take that was never proposed.
+   *
+   * The proposal is fire-and-forget over a best-effort bus that drops rather
+   * than queues on a closed channel, so an unanswerable proposal is possible
+   * (a Phase-4C channel rebuild, a partner who left mid-handshake). Left
+   * alone it wedges: scheduleRoll only runs on the ack, so the take would sit
+   * in a countdown that never starts and never ends. A proposal still unacked
+   * at its own startAtMs is therefore treated as an abort — the same clean
+   * teardown a stop-before-start gets, which frees the slot and lets the
+   * consumer re-arm.
+   */
+  propose(): string | null {
+    if (this.activeTakeId !== null) return null;
     const startAtMs = this.now() + COUNTDOWN_MS;
     const takeId = takeIdFor(this.now());
     this.claimTakeSlot(takeId);
     this.pendingProposal = { takeId, startAtMs };
     this.send({ t: "pod/roll", takeId, startAtMs });
+    this.schedule(
+      startAtMs - this.now(),
+      () => {
+        // Still OUR unacked proposal? An ack, or conceding a tie-break, clears
+        // pendingProposal and makes this a no-op.
+        if (this.pendingProposal?.takeId !== takeId) return;
+        this.abortTake(takeId);
+      },
+      this.rollTimers,
+    );
     return takeId;
   }
 

@@ -57,6 +57,12 @@ describe("PodcastPanel", () => {
     expect(cb.onChooseVault).not.toHaveBeenCalled();
   });
 
+  test("link-down — explains the wait and offers no Roll Tape", () => {
+    renderState({ kind: "link-down" });
+    expect(screen.getByText("◈ Line Down")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Roll Tape" })).toBeNull();
+  });
+
   test("armed — Roll Tape fires onRoll", () => {
     const cb = renderState({ kind: "armed" });
     fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));

@@ -293,6 +293,43 @@ describe("usePodcastTake", () => {
     expect(view.result.current.panel).toEqual({ kind: "not-two", count: 3 });
   });
 
+  // -------------------------------------------------------------------
+  // The roster is not the whole gate. During a channel rebuild the peer is
+  // still listed while the bus underneath drops every send — a proposal made
+  // then is unackable, and the countdown it opens has no button to leave by.
+  // -------------------------------------------------------------------
+  it("(b3) two agents but a closed channel is NOT armed, and roll() cannot propose", async () => {
+    const { pair, view } = await setup({ dcOpen: false });
+    expect(view.result.current.panel).toEqual({ kind: "link-down" });
+
+    act(() => view.result.current.actions.roll());
+    await tick(5_000);
+
+    expect(pair.countSent(0, "pod/roll")).toBe(0);
+    expect(view.result.current.panel).toEqual({ kind: "link-down" });
+  });
+
+  it("(b4) the line coming back re-arms Roll Tape", async () => {
+    const { view, props } = await setup({ dcOpen: false });
+    expect(view.result.current.panel).toEqual({ kind: "link-down" });
+
+    view.rerender({ ...props, dcOpen: true });
+    await tick(50);
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+  });
+
+  it("(b5) a channel dropping mid-take never swaps the Cut button for a line-down notice", async () => {
+    const { view, props, partner } = await setup();
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+
+    view.rerender({ ...props, dcOpen: false });
+    await tick(10);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    stopHeartbeat();
+  });
+
   it("(c) an unchosen vault blocks the roll until chooseVault grants it", async () => {
     H.state.vaultPerm = "unset";
     const { view } = await setup();
