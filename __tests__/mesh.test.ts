@@ -16,6 +16,7 @@ class FakeLink implements MeshLink {
   replaceStream = vi.fn(async (_stream: MediaStream) => {});
   close = vi.fn();
   restartIce = vi.fn();
+  send = vi.fn(() => true);
 }
 
 interface Made {
@@ -32,6 +33,7 @@ function harness() {
     onRoster: vi.fn((r: RemotePeer[]) => rosters.push(r)),
     onChannelOpen: vi.fn(),
     onChannelClosed: vi.fn(),
+    onMessage: vi.fn(),
   };
   const mesh = new Mesh((peerId, polite, events) => {
     const link = new FakeLink();
@@ -54,6 +56,8 @@ class DeferredLink implements MeshLink {
   });
   replaceStream = vi.fn(async (_stream: MediaStream) => {});
   close = vi.fn();
+  restartIce = vi.fn();
+  send = vi.fn(() => true);
   /** Settle the oldest in-flight handleSignal. */
   release(reject = false) {
     this.settlers.shift()?.(reject);
@@ -187,8 +191,10 @@ describe("Mesh pending-signal buffering", () => {
         }),
         replaceStream: vi.fn(async () => {}),
         close: vi.fn(),
+        restartIce: vi.fn(),
+        send: vi.fn(() => true),
       }),
-      { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn() },
+      { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn(), onMessage: vi.fn() },
     );
     rejecting.addExistingPeers(["p1", "p2"]);
     rejecting.relay("p2", "straggler");
@@ -210,7 +216,7 @@ describe("Mesh pending-signal buffering", () => {
 describe("Mesh signal serialization", () => {
   function deferredHarness() {
     const links: DeferredLink[] = [];
-    const cb = { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn() };
+    const cb = { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn(), onMessage: vi.fn() };
     const mesh = new Mesh(() => {
       const link = new DeferredLink();
       links.push(link);
@@ -298,6 +304,7 @@ describe("Mesh construction failure", () => {
       onRoster: vi.fn((r: RemotePeer[]) => rosters.push(r)),
       onChannelOpen: vi.fn(),
       onChannelClosed: vi.fn(),
+      onMessage: vi.fn(),
     };
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const mesh = new Mesh(() => {
@@ -629,6 +636,7 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
       onRoster: vi.fn((r: RemotePeer[]) => rosters.push(r)),
       onChannelOpen: vi.fn(),
       onChannelClosed: vi.fn(),
+      onMessage: vi.fn(),
     };
     const madeLocal: Array<{ events: LinkEvents; link: FakeLink }> = [];
     let attempts = 0;

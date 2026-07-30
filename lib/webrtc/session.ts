@@ -29,6 +29,7 @@ export type CallEventMap = {
   roster: [RemotePeer[]];
   channelOpen: [];
   channelClosed: [];
+  message: [string, string];
 };
 
 export class CallSession {
@@ -60,6 +61,7 @@ export class CallSession {
           onRemoteStream: ev.onRemoteStream,
           onConnectionState: ev.onConnectionState,
           onChannelOpen: ev.onChannelOpen,
+          onMessage: ev.onMessage,
         }),
       {
         onRoster: (roster) => {
@@ -69,6 +71,7 @@ export class CallSession {
         },
         onChannelOpen: () => this.events.emit("channelOpen"),
         onChannelClosed: () => this.events.emit("channelClosed"),
+        onMessage: (peerId, text) => this.events.emit("message", peerId, text),
       },
     );
     const ev = this.signaling.events;
@@ -124,6 +127,16 @@ export class CallSession {
   async setLocalStream(stream: MediaStream): Promise<void> {
     this.localStream = stream;
     await this.mesh.replaceStreamAll(stream);
+  }
+
+  /** App-message send to one peer. False if unknown, linkless, or channel-closed. */
+  sendTo(peerId: string, text: string): boolean {
+    return this.mesh.sendTo(peerId, text);
+  }
+
+  /** App-message broadcast: linkless/closed peers are skipped, not queued. */
+  sendAll(text: string): void {
+    this.mesh.sendAll(text);
   }
 
   private dropAll(status: CallStatus): void {

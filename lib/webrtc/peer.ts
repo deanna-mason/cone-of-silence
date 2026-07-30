@@ -23,6 +23,7 @@ export interface PeerLinkOptions {
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState?: (state: RTCPeerConnectionState) => void;
   onChannelOpen?: () => void;
+  onMessage?: (text: string) => void;
 }
 
 export class PeerLink {
@@ -40,6 +41,9 @@ export class PeerLink {
 
     this.channel = pc.createDataChannel("cos", { negotiated: true, id: 0 });
     this.channel.onopen = () => opts.onChannelOpen?.();
+    this.channel.onmessage = (ev) => {
+      if (typeof ev.data === "string") opts.onMessage?.(ev.data);
+    };
 
     for (const track of opts.localStream.getTracks()) {
       pc.addTrack(track, opts.localStream);
@@ -115,5 +119,12 @@ export class PeerLink {
 
   close(): void {
     this.pc.close();
+  }
+
+  /** App-message send over the cos channel. False (not queued) unless open. */
+  send(text: string): boolean {
+    if (this.channel.readyState !== "open") return false;
+    this.channel.send(text);
+    return true;
   }
 }

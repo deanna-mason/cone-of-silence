@@ -6,10 +6,17 @@
 import { useEffect, useRef, useState } from "react";
 import { CallSession, type CallStatus, type RemotePeer } from "@/lib/webrtc/session";
 
+export interface CallBus {
+  sendAll(text: string): void;
+  sendTo(peerId: string, text: string): boolean;
+  onMessage(fn: (peerId: string, text: string) => void): () => void;
+}
+
 export interface CallState {
   status: CallStatus;
   peers: RemotePeer[];
   dcOpen: boolean;
+  bus: CallBus;
 }
 
 export function useCallSession(
@@ -25,6 +32,24 @@ export function useCallSession(
   const streamRef = useRef<MediaStream | null>(stream);
   streamRef.current = stream;
 
+  // Message listeners registered against the bus, independent of whether a
+  // session currently exists — the session-effect below fans its "message"
+  // event out to whatever is in this set at the time, and a listener
+  // registered before the session (re)builds still gets wired up once it
+  // does.
+  const listenersRef = useRef<Set<(peerId: string, text: string) => void>>(new Set());
+  const busRef = useRef<CallBus | undefined>(undefined);
+  if (!busRef.current) {
+    busRef.current = {
+      sendAll: (text) => sessionRef.current?.sendAll(text),
+      sendTo: (peerId, text) => sessionRef.current?.sendTo(peerId, text) ?? false,
+      onMessage: (fn) => {
+        listenersRef.current.add(fn);
+        return () => listenersRef.current.delete(fn);
+      },
+    };
+  }
+
   useEffect(() => {
     const local = streamRef.current;
     if (!active || !roomId || !local) return;
@@ -35,6 +60,9 @@ export function useCallSession(
       session.events.on("roster", setPeers),
       session.events.on("channelOpen", () => setDcOpen(true)),
       session.events.on("channelClosed", () => setDcOpen(false)),
+      session.events.on("message", (peerId, text) => {
+        for (const fn of listenersRef.current) fn(peerId, text);
+      }),
     ];
     session.start();
     return () => {
@@ -55,5 +83,5 @@ export function useCallSession(
     if (stream) sessionRef.current?.setLocalStream(stream).catch(() => {});
   }, [stream]);
 
-  return { status, peers, dcOpen };
+  return { status, peers, dcOpen, bus: busRef.current };
 }

@@ -17,6 +17,7 @@ export interface MeshLink {
   replaceStream(stream: MediaStream): Promise<void>;
   restartIce(): void;
   close(): void;
+  send(text: string): boolean;
 }
 
 /** Per-link callbacks the factory must wire into the real PeerLink. */
@@ -24,6 +25,7 @@ export interface LinkEvents {
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onChannelOpen: () => void;
+  onMessage: (text: string) => void;
 }
 
 export type LinkFactory = (peerId: string, polite: boolean, events: LinkEvents) => MeshLink;
@@ -32,6 +34,7 @@ export interface MeshCallbacks {
   onRoster: (roster: RemotePeer[]) => void;
   onChannelOpen: () => void; // open-channel count went 0 → 1
   onChannelClosed: () => void; // open-channel count returned to 0
+  onMessage: (peerId: string, text: string) => void;
 }
 
 /**
@@ -197,6 +200,16 @@ export class Mesh {
     await Promise.all(links.map((l) => l.replaceStream(stream)));
   }
 
+  /** Send to one peer. False if the peer is unknown, linkless, or channel-closed. */
+  sendTo(peerId: string, text: string): boolean {
+    return this.entries.get(peerId)?.link?.send(text) ?? false;
+  }
+
+  /** Best-effort broadcast: linkless/closed entries are skipped, not queued. */
+  sendAll(text: string): void {
+    for (const entry of this.entries.values()) entry.link?.send(text);
+  }
+
   closeAll(): void {
     const hadOpen = this.openChannels() > 0;
     const entries = [...this.entries.values()];
@@ -313,6 +326,12 @@ export class Mesh {
           const wasOpen = this.openChannels() > 0;
           entry.channelOpen = true;
           if (!wasOpen) this.cb.onChannelOpen();
+        },
+        onMessage: (text) => {
+          // Same identity guard as the other link events: a superseded
+          // (rebuilt-away) link can still fire a trailing message.
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
+          this.cb.onMessage(peerId, text);
         },
       });
     } catch (err) {
