@@ -23,6 +23,7 @@ export interface TakeCallbacks {
   onMark(): void; // schedule the tone NOW (T)
   onStopMark(): void; // end-of-take tone NOW
   onStopRecorders(takeId: string): void; // after end mark completes
+  onAborted(takeId: string): void; // stop arrived before start ever fired — nothing to keep
   onBeacon(b: Beacon): void; // partner's 1 Hz state
 }
 
@@ -100,9 +101,16 @@ export class TakeCoordinator {
   private peerGuesses: number[] = [];
   private offsetMs = 0;
 
-  // Take state.
+  // Take state. `startFired` tracks whether THIS side's onStartRecorders has
+  // fired for the active take — it gates whether a stop aborts the take
+  // (nothing recorded yet, safe to cancel) or runs the normal stop path.
+  // `rollTimers` is the subset of `timers` scheduled by scheduleRoll(), so a
+  // stop-before-start can cancel just the roll-phase timers (countdown
+  // ticks, start, mark) without touching anything else.
   private activeTakeId: string | null = null;
   private pendingProposal: { takeId: string; startAtMs: number } | null = null;
+  private startFired = false;
+  private rollTimers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(bus: CallBus, codename: string, cb: TakeCallbacks, deps: TakeProtocolDeps = {}) {
     this.bus = bus;
@@ -120,13 +128,24 @@ export class TakeCoordinator {
     this.bus.sendAll(JSON.stringify(msg));
   }
 
-  private schedule(delayMs: number, fn: () => void): void {
+  private schedule(delayMs: number, fn: () => void, bucket?: Set<ReturnType<typeof setTimeout>>): void {
     const id = setTimeout(() => {
       this.timers.delete(id);
+      bucket?.delete(id);
       if (this.disposed) return;
       fn();
     }, Math.max(0, delayMs));
     this.timers.add(id);
+    bucket?.add(id);
+  }
+
+  /** Cancels only the roll-phase timers (countdown ticks, start, mark) — used by a stop-before-start abort. */
+  private cancelRollTimers(): void {
+    for (const id of this.rollTimers) {
+      clearTimeout(id);
+      this.timers.delete(id);
+    }
+    this.rollTimers.clear();
   }
 
   /** Converts a timestamp from the partner's clock into this side's clock. */
@@ -216,15 +235,23 @@ export class TakeCoordinator {
   }
 
   private scheduleRoll(takeId: string, startLocalMs: number): void {
+    this.startFired = false;
     const scheduledAt = this.now();
     let ticksLeft = Math.floor((startLocalMs - scheduledAt) / 1000);
     while (ticksLeft > 0) {
       const msLeft = ticksLeft * 1000;
-      this.schedule(startLocalMs - msLeft - scheduledAt, () => this.cb.onCountdown(msLeft));
+      this.schedule(startLocalMs - msLeft - scheduledAt, () => this.cb.onCountdown(msLeft), this.rollTimers);
       ticksLeft -= 1;
     }
-    this.schedule(startLocalMs - ROLL_LEAD_MS - scheduledAt, () => this.cb.onStartRecorders(takeId));
-    this.schedule(startLocalMs - scheduledAt, () => this.cb.onMark());
+    this.schedule(
+      startLocalMs - ROLL_LEAD_MS - scheduledAt,
+      () => {
+        this.startFired = true;
+        this.cb.onStartRecorders(takeId);
+      },
+      this.rollTimers,
+    );
+    this.schedule(startLocalMs - scheduledAt, () => this.cb.onMark(), this.rollTimers);
   }
 
   private onRoll(msg: RollMsg): void {
@@ -261,8 +288,31 @@ export class TakeCoordinator {
     });
   }
 
+  /**
+   * Stop-before-start: cancels the still-pending roll-phase timers so a
+   * stale onStartRecorders/onMark can never fire, frees the take slot, and
+   * fires onAborted once instead of the normal stop path. This is decided
+   * independently by each side against its OWN startFired flag — clock
+   * skew means one side can already be past its local start instant while
+   * the other isn't, so one side may abort while the other runs the normal
+   * stop path for the very same take. That asymmetry is accepted: a take
+   * stopped within its first second (ROLL_LEAD_MS) was never a keepable
+   * take, and the consumer tears the UI down on either path regardless.
+   */
+  private abortTake(takeId: string): void {
+    this.cancelRollTimers();
+    this.activeTakeId = null;
+    this.pendingProposal = null;
+    this.startFired = false;
+    this.cb.onAborted(takeId);
+  }
+
   private onStop(msg: StopMsg): void {
     if (msg.takeId !== this.activeTakeId) return;
+    if (!this.startFired) {
+      this.abortTake(msg.takeId);
+      return;
+    }
     this.scheduleStop(msg.takeId, this.toLocal(msg.markAtMs));
   }
 
@@ -288,7 +338,12 @@ export class TakeCoordinator {
     if (this.activeTakeId === null) return;
     const takeId = this.activeTakeId;
     const markAtMs = this.now() + STOP_LEAD_MS;
+    // Always send, even mid-countdown — the partner needs to abort/stop too.
     this.send({ t: "pod/stop", takeId, markAtMs });
+    if (!this.startFired) {
+      this.abortTake(takeId);
+      return;
+    }
     this.scheduleStop(takeId, markAtMs); // own clock — no conversion
   }
 

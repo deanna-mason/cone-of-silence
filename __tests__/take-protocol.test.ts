@@ -71,6 +71,7 @@ function makeCb(): { cb: TakeCallbacks; log: LogEntry[] } {
     onMark: vi.fn(() => log.push({ name: "onMark", at: Date.now() })),
     onStopMark: vi.fn(() => log.push({ name: "onStopMark", at: Date.now() })),
     onStopRecorders: vi.fn((takeId: string) => log.push({ name: "onStopRecorders", at: Date.now(), arg: takeId })),
+    onAborted: vi.fn((takeId: string) => log.push({ name: "onAborted", at: Date.now(), arg: takeId })),
     onBeacon: vi.fn((b: Beacon) => log.push({ name: "onBeacon", at: Date.now(), arg: b })),
   };
   return { cb, log };
@@ -166,9 +167,22 @@ describe("propose -> ack -> scheduled roll", () => {
 });
 
 describe("clock-offset handling", () => {
-  it("partner's onMark lands within 100ms of the proposer's true instant despite +200ms skew / 100ms RTT", () => {
+  // RTT is 200ms and the tolerance below is 50ms — deliberately a quarter of
+  // the RTT, not equal to it (an earlier version used a 100ms RTT with a
+  // 100ms tolerance, so a sign-flipped correction landed exactly ON the
+  // boundary instead of failing). With these numbers: the correct formula
+  // (offset = guess − rtt/2) converges to the true skew with ~0 error
+  // regardless of RTT, since the ±RTT/2 term cancels out under symmetric
+  // latency — so it comfortably clears 50ms. A flipped sign
+  // (offset = guess + rtt/2) misses by a full RTT (~200ms, 4x over
+  // tolerance); omitting the RTT/2 correction entirely (offset = guess)
+  // misses by RTT/2 (~100ms, exactly 2x over tolerance); a fully inverted
+  // offset misses by ~400ms; and a sign-flipped toLocal() (subtracting
+  // instead of adding the offset) misses by ~400ms too. All of these fail
+  // loudly against a 50ms bound.
+  it("partner's onMark lands within 50ms of the proposer's true instant despite +200ms skew / 200ms RTT", () => {
     const pair = new FakeBusPair();
-    pair.latency = [50, 50]; // symmetric 50ms each way => 100ms RTT
+    pair.latency = [100, 100]; // symmetric 100ms each way => 200ms RTT
     const { cb: cbA } = makeCb();
     const { cb: cbB, log: logB } = makeCb();
     const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
@@ -182,13 +196,13 @@ describe("clock-offset handling", () => {
     const takeId = a.propose();
     const trueMarkInstant = trueInstantAtPropose + COUNTDOWN_MS;
 
-    vi.advanceTimersByTime(COUNTDOWN_MS + 200);
+    vi.advanceTimersByTime(COUNTDOWN_MS + 300);
 
     expect(cbA.onMark).toHaveBeenCalledTimes(1);
     expect(cbB.onStartRecorders).toHaveBeenCalledWith(takeId);
     const markEvent = logB.find((e) => e.name === "onMark");
     expect(markEvent).toBeDefined();
-    expect(Math.abs(markEvent!.at - trueMarkInstant)).toBeLessThanOrEqual(100);
+    expect(Math.abs(markEvent!.at - trueMarkInstant)).toBeLessThanOrEqual(50);
 
     a.dispose();
     b.dispose();
@@ -263,6 +277,98 @@ describe("stop handshake", () => {
   });
 });
 
+describe("stop-before-start aborts the take", () => {
+  it("requestStop() mid-countdown aborts on both sides — no onStartRecorders/onMark ever fire, slot freed for a fresh propose()", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA, log: logA } = makeCb();
+    const { cb: cbB, log: logB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose();
+    vi.advanceTimersByTime(500); // well inside the countdown — onStartRecorders would fire around 3000ms
+
+    a.requestStop(); // the proposer aborts its own in-flight take; pod/stop still goes out
+    // Advance well past where onStartRecorders/onMark WOULD have fired, on both sides.
+    vi.advanceTimersByTime(COUNTDOWN_MS);
+
+    expect(cbA.onStartRecorders).not.toHaveBeenCalled();
+    expect(cbA.onMark).not.toHaveBeenCalled();
+    expect(cbB.onStartRecorders).not.toHaveBeenCalled();
+    expect(cbB.onMark).not.toHaveBeenCalled();
+    expect(cbA.onStopMark).not.toHaveBeenCalled();
+    expect(cbA.onStopRecorders).not.toHaveBeenCalled();
+    expect(cbB.onStopMark).not.toHaveBeenCalled();
+    expect(cbB.onStopRecorders).not.toHaveBeenCalled();
+
+    expect(cbA.onAborted).toHaveBeenCalledTimes(1);
+    expect(cbA.onAborted).toHaveBeenCalledWith(takeId);
+    expect(cbB.onAborted).toHaveBeenCalledTimes(1);
+    expect(cbB.onAborted).toHaveBeenCalledWith(takeId);
+
+    // Slot freed on both sides — a fresh propose() works normally afterward.
+    const newTakeId = a.propose();
+    expect(newTakeId).not.toBe(takeId);
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onMark).toHaveBeenCalledTimes(1);
+    expect(logA.find((e) => e.name === "onStartRecorders")!.arg).toBe(newTakeId);
+    expect(logB.find((e) => e.name === "onStartRecorders")!.arg).toBe(newTakeId);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("a received pod/stop mid-countdown aborts the take too (non-proposer requests stop, proposer receives it)", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA, log: logA } = makeCb();
+    const { cb: cbB, log: logB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose();
+    vi.advanceTimersByTime(500); // mid-countdown, well before onStartRecorders would fire
+
+    b.requestStop(); // the NON-proposer aborts; A receives pod/stop and must abort too
+    vi.advanceTimersByTime(COUNTDOWN_MS);
+
+    expect(cbA.onStartRecorders).not.toHaveBeenCalled();
+    expect(cbA.onMark).not.toHaveBeenCalled();
+    expect(cbB.onStartRecorders).not.toHaveBeenCalled();
+    expect(cbB.onMark).not.toHaveBeenCalled();
+    expect(cbA.onStopMark).not.toHaveBeenCalled();
+    expect(cbA.onStopRecorders).not.toHaveBeenCalled();
+    expect(cbB.onStopMark).not.toHaveBeenCalled();
+    expect(cbB.onStopRecorders).not.toHaveBeenCalled();
+
+    expect(cbA.onAborted).toHaveBeenCalledTimes(1);
+    expect(cbA.onAborted).toHaveBeenCalledWith(takeId);
+    expect(cbB.onAborted).toHaveBeenCalledTimes(1);
+    expect(cbB.onAborted).toHaveBeenCalledWith(takeId);
+
+    // Slot freed on both sides — a fresh propose() from the OTHER side works normally too.
+    const newTakeId = b.propose();
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onMark).toHaveBeenCalledTimes(1);
+    expect(logA.find((e) => e.name === "onStartRecorders")!.arg).toBe(newTakeId);
+    expect(logB.find((e) => e.name === "onStartRecorders")!.arg).toBe(newTakeId);
+
+    a.dispose();
+    b.dispose();
+  });
+});
+
 describe("simultaneous propose", () => {
   it("resolves a mutual propose race via a deterministic takeId tie-break — no permanent deadlock", () => {
     const pair = new FakeBusPair();
@@ -317,7 +423,7 @@ describe("beacons", () => {
 });
 
 describe("dispose", () => {
-  it("cancels every pending timer — no callback fires after dispose, even advancing past every deadline", () => {
+  it("cancels pending roll-phase timers — no onCountdown/onStartRecorders/onMark fire after dispose", () => {
     const pair = new FakeBusPair();
     pair.latency = [10, 10];
     const { cb: cbA } = makeCb();
@@ -330,17 +436,41 @@ describe("dispose", () => {
 
     a.propose();
     vi.advanceTimersByTime(20); // roll + roll-ack land; both sides schedule, nothing fires yet
-    b.requestStop(); // schedules stop timers too, before disposal
 
     a.dispose();
     b.dispose();
 
-    vi.advanceTimersByTime(COUNTDOWN_MS + 1_000 + MARK_TOTAL_MS + 5_000);
+    vi.advanceTimersByTime(COUNTDOWN_MS + 1_000);
 
     for (const cb of [cbA, cbB]) {
       expect(cb.onCountdown).not.toHaveBeenCalled();
       expect(cb.onStartRecorders).not.toHaveBeenCalled();
       expect(cb.onMark).not.toHaveBeenCalled();
+    }
+  });
+
+  it("cancels pending stop-phase timers — no onStopMark/onStopRecorders fire after dispose", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    a.propose();
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // past start AND mark on both sides — genuinely rolling
+    b.requestStop(); // start already fired locally on B — normal stop path, schedules stop timers
+    vi.advanceTimersByTime(20); // pod/stop lands on A too, which also schedules its stop timers
+
+    a.dispose();
+    b.dispose();
+
+    vi.advanceTimersByTime(1_000 + MARK_TOTAL_MS + 5_000);
+
+    for (const cb of [cbA, cbB]) {
       expect(cb.onStopMark).not.toHaveBeenCalled();
       expect(cb.onStopRecorders).not.toHaveBeenCalled();
     }
