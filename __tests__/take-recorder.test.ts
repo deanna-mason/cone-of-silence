@@ -12,9 +12,12 @@ import type { PartWriter, SidecarEntry } from "@/lib/podcast/vault";
 // ---------------------------------------------------------------------------
 // Fake MediaRecorder: captures constructor args (stream + options), and lets
 // a test drive ondataavailable/onstop/onerror by hand. Real MediaRecorder
-// flushes a final dataavailable BEFORE onstop when stop() is called — the
-// fake's stop() mirrors that ordering so stop()'s "final blob still lands"
-// guarantee is actually exercised.
+// flushes a final dataavailable BEFORE onstop when stop() is called, and
+// BOTH fire asynchronously (never in the same tick as the stop() call) —
+// stop() here mirrors that with two chained queueMicrotask hops, deliberately
+// NOT inline, so a recorder implementation that fails to actually await
+// onstop before calling finish() shows up as a real test failure instead of
+// passing by synchronous accident.
 // ---------------------------------------------------------------------------
 class FakeMediaRecorder {
   static instances: FakeMediaRecorder[] = [];
@@ -43,8 +46,20 @@ class FakeMediaRecorder {
 
   stop(): void {
     this.stopCalled = true;
-    if (this.finalBlob) this.ondataavailable?.({ data: this.finalBlob });
-    this.onstop?.();
+    const finalBlob = this.finalBlob;
+    // Two separate MACROtask hops (setTimeout, not queueMicrotask): a plain
+    // microtask hop turned out to still race ahead of a writer.finish() call
+    // chained only through microtasks (an all-microtask "no await" mutant of
+    // TakeRecorder.stop() still passed). setTimeout-0 guarantees dataavailable
+    // and onstop each land strictly after every pending microtask (including
+    // any Promise.all/finish() chain a buggy stop() fires immediately) has
+    // fully drained — so failing to actually await onstop is unmistakable.
+    setTimeout(() => {
+      if (finalBlob) this.ondataavailable?.({ data: finalBlob });
+      setTimeout(() => {
+        this.onstop?.();
+      }, 0);
+    }, 0);
   }
 
   emitData(blob: Blob): void {
