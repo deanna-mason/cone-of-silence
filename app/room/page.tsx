@@ -112,15 +112,20 @@ export default function RoomPage() {
     podcast.panel.kind === "fault" ||
     podcast.panel.kind === "stopping";
 
-  // Debug mirror for e2e/phase2-e2e.js — harmless in production.
+  // Debug mirror for e2e/phase2-e2e.js and e2e/phase5a-e2e.js — harmless in
+  // production. podBytes is this side's recorder byte counts, video and
+  // audio counted SEPARATELY (hooks/usePodcastTake.ts's `bytes`) — an
+  // aggregate total can't distinguish "both streams growing" from "one
+  // stalled while the other grows".
   useEffect(() => {
     (window as unknown as Record<string, unknown>).__cosCall = {
       status: call.status,
       dcOpen: call.dcOpen,
       peers: call.peers.length,
       pod: podcast.panel.kind,
+      podBytes: podcast.bytes,
     };
-  }, [call.status, call.dcOpen, call.peers, podcast.panel.kind]);
+  }, [call.status, call.dcOpen, call.peers, podcast.panel.kind, podcast.bytes]);
 
   // A terminal call failure ends the operation — release the camera/mic so
   // the tally light matches what the user believes. (media.stop reads refs,

@@ -64,13 +64,18 @@
 //    script) that dir.getFileHandle(...).getFile().size reads 0 for an OPEN
 //    part on THIS platform too (OPFS is no exception), all the way up to
 //    PART_TARGET_MS (60s) rollover or take-end. A 5-10s take never sees that,
-//    so a literal per-file size read cannot show growth. What genuinely does
-//    grow in real time, confirmed by the same smoke script, is
-//    `navigator.storage.estimate().usage` — the origin's OPFS quota
-//    accounting reflects the writable stream's backing bytes as they're
-//    written, before the atomic swap. That is still honest OPFS
-//    introspection (Storage API, this origin, this take), just measured as
-//    total usage delta rather than a single exposed file's `.size`.
+//    so a literal per-file size read cannot show growth. Check 4's PRIMARY
+//    growth signal is now window.__cosCall.podBytes — a debug-mirror
+//    extension (hooks/usePodcastTake.ts's `bytes`, app/room/page.tsx) of the
+//    recorder's own bytes() counter, video and audio counted separately, on
+//    BOTH contexts — because an aggregate byte total can't tell "both
+//    streams growing" apart from "one stream stalled while the other
+//    grows". navigator.storage.estimate().usage is kept alongside it as a
+//    secondary, aggregate disk-truth signal (confirmed via the same smoke
+//    script to reflect the writable stream's backing bytes as they're
+//    written, before the atomic swap) — it's still honest OPFS introspection
+//    (Storage API, this origin, this take), just not one that can localize a
+//    stall to a single stream.
 const { chromium } = require("playwright-core");
 const path = require("path");
 const os = require("os");
@@ -342,6 +347,15 @@ function waitPod(page, value, timeoutMs) {
   return page.waitForFunction((v) => window.__cosCall && window.__cosCall.pod === v, value, { timeout: timeoutMs });
 }
 
+/** window.__cosCall.podBytes — this side's recorder byte counts, video and
+ *  audio counted SEPARATELY (hooks/usePodcastTake.ts's `bytes`, mirrored by
+ *  app/room/page.tsx). Used instead of an aggregate total because an
+ *  aggregate can't distinguish "both streams growing" from "one stream
+ *  stalled while the other grows". */
+async function podBytes(page) {
+  return page.evaluate(() => window.__cosCall && window.__cosCall.podBytes);
+}
+
 // ---------------------------------------------------------------------
 // OPFS introspection — each host's Vault lives at
 // navigator.storage.getDirectory()/cos-vault/<takeId>/...
@@ -520,20 +534,35 @@ async function stopSelfVideoTrack(page) {
     const elapsed3 = Date.now() - t3;
     check(elapsed3 <= 6000, `both reach countdown then rolling within 6s of Roll Tape (${elapsed3}ms)`);
 
-    // ---- Check 4: OPFS introspection — A's part000 files exist; usage grows ----
-    // (see header deviation note 3 for why "growing" is measured via
+    // ---- Check 4: OPFS introspection — A's part000 files exist; BOTH streams growing on BOTH contexts ----
+    // (see header deviation note 3 for why disk-truth is measured via
     // navigator.storage.estimate() rather than a per-file .size read)
     const u1 = await opfsUsage(pageA);
-    await new Promise((r) => setTimeout(r, 5000));
+    const bytesA1 = await podBytes(pageA);
+    const bytesB1 = await podBytes(pageB);
+    await new Promise((r) => setTimeout(r, 3000));
     const takeDirA = await opfsTakeDirName(pageA);
     const videoExists = (await opfsFileSize(pageA, takeDirA, "video.part000")) !== null;
     const audioExists = (await opfsFileSize(pageA, takeDirA, "audio.part000")) !== null;
     const u2 = await opfsUsage(pageA);
+    const bytesA2 = await podBytes(pageA);
+    const bytesB2 = await podBytes(pageB);
     check(
       !!takeDirA && videoExists && audioExists,
       `A's take dir "${takeDirA}": video.part000 and audio.part000 both exist`,
     );
+    // Disk-truth signal (aggregate — kept alongside the per-stream check
+    // below, not a replacement for it: an aggregate total can't tell "both
+    // streams growing" apart from "one stream stalled while the other grows").
     check(u2 > u1, `A's OPFS storage usage growing while the take rolls: ${u1} -> ${u2} bytes`);
+    check(
+      bytesA2.video > bytesA1.video && bytesA2.audio > bytesA1.audio,
+      `A: __cosCall.podBytes — BOTH streams strictly increasing (video ${bytesA1.video}->${bytesA2.video}, audio ${bytesA1.audio}->${bytesA2.audio})`,
+    );
+    check(
+      bytesB2.video > bytesB1.video && bytesB2.audio > bytesB1.audio,
+      `B: __cosCall.podBytes — BOTH streams strictly increasing (video ${bytesB1.video}->${bytesB2.video}, audio ${bytesB1.audio}->${bytesB2.audio})`,
+    );
 
     // ---- Check 5: A's video track dies — both alarm within 3.5s; recorder survives ----
     const t5 = Date.now();

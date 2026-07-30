@@ -345,6 +345,16 @@ describe("usePodcastTake", () => {
     const panel = view.result.current.panel;
     if (panel.kind !== "rolling") throw new Error("expected rolling");
     expect(panel.partnerCodename).toBe("Falcon");
+
+    // The hook's public `bytes` (video/audio counted separately, mirrored by
+    // the room page into window.__cosCall.podBytes for e2e/phase5a-e2e.js)
+    // tracks the recorder's own bytes() per tick — an aggregate total can't
+    // tell "both streams growing" apart from "one stalled".
+    const videoAtRollStart = view.result.current.bytes.video;
+    expect(videoAtRollStart).toBeGreaterThan(0);
+    expect(view.result.current.bytes.audio).toBe(0); // the fake recorder never produces audio bytes
+    await tick(1_000);
+    expect(view.result.current.bytes.video).toBeGreaterThan(videoAtRollStart);
   });
 
   it("(e) a muted camera raises a fault within a tick, sounds the klaxon once, and beacons camOk:false", async () => {

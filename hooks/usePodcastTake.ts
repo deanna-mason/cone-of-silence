@@ -64,6 +64,11 @@ type Phase = "idle" | "countdown" | "rolling" | "stopping" | "failed";
 export interface PodcastTake {
   panel: PodcastPanelState;
   partnerCodename: string | null;
+  /** This side's recorder byte counts, video and audio counted separately —
+   *  an aggregate total can't tell "both streams growing" apart from "one
+   *  stalled while the other grows"; this is the room page's debug mirror's
+   *  source for exactly that per-stream signal (e2e/phase5a-e2e.js). */
+  bytes: { video: number; audio: number };
   actions: {
     chooseVault(): Promise<void>;
     grantVault(): Promise<void>;
@@ -129,6 +134,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [startFault, setStartFault] = useState<Fault | null>(null);
   const [dismissedKey, setDismissedKey] = useState("");
   const [meter, setMeter] = useState({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
+  const [streamBytes, setStreamBytes] = useState({ video: 0, audio: 0 });
   const [coordinatorGen, setCoordinatorGen] = useState(0);
 
   // Anything the coordinator callbacks or the 1 Hz tick need to read lives in
@@ -215,6 +221,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     setStartFault(null);
     setDismissedKey("");
     setMeter({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
+    setStreamBytes({ video: 0, audio: 0 });
   }
 
   function alarm(): void {
@@ -321,6 +328,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     }
     setFaults([]);
     setMeter({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
+    setStreamBytes({ video: 0, audio: 0 });
     goPhase("idle");
   }
 
@@ -337,6 +345,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     const counted = recorder ? recorder.bytes() : null;
     const total = counted ? counted.video + counted.audio : bytesRef.current.total;
     if (total !== bytesRef.current.total) bytesRef.current = { total, lastChangeAt: now };
+    if (counted) setStreamBytes(counted);
 
     const camera = latest.current.videoTrack;
     const mic = graphRef.current?.rawTrack ?? null;
@@ -446,6 +455,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         if (phaseRef.current === "failed") return;
         setFaults([]);
         setMeter({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
+        setStreamBytes({ video: 0, audio: 0 });
         goPhase("idle");
       },
       onBeacon: (b) => {
@@ -557,6 +567,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   return {
     panel,
     partnerCodename,
+    bytes: streamBytes,
     actions: {
       chooseVault: () => refreshVault(chooseVaultFolder),
       grantVault: () => refreshVault(requestVaultAccess),
