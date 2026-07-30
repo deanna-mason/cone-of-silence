@@ -99,6 +99,18 @@ export class PartWriter {
   private appendsInPart = 0;
   private writable: FileSystemWritableFileStream | null = null;
 
+  // Serializes every append()/finish() call. MediaRecorder's ondataavailable
+  // fires ~1/s regardless of how long the previous disk write took, so two
+  // append() calls (or a finish() racing a pending append()) CAN overlap —
+  // without this, both would see `writable` unset and each open their own
+  // writable on the SAME part file, and the loser's bytes vanish silently.
+  // Same per-entry `chain` idiom as lib/webrtc/mesh.ts's feed(), adapted so
+  // each caller still gets ITS OWN rejection: `run` (returned to the caller)
+  // carries the real outcome, while `this.chain` — what the NEXT call links
+  // onto — is folded back to always-resolved, so one busted operation can't
+  // permanently wedge the ones queued behind it.
+  private chain: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly dir: FileSystemDirectoryHandle,
     private readonly base: "video" | "audio",
@@ -109,6 +121,24 @@ export class PartWriter {
 
   /** Write into the open part; rolls over once this part has PART_TARGET_MS of appends. */
   async append(blob: Blob): Promise<void> {
+    return this.enqueue(() => this.appendLocked(blob));
+  }
+
+  /** Closes the final part (if open), hashes every part, and writes the sidecar JSON. */
+  async finish(): Promise<SidecarEntry[]> {
+    return this.enqueue(() => this.finishLocked());
+  }
+
+  private enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(op, op); // run regardless of the prior op's outcome
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    ); // never rejects — the chain itself must not wedge
+    return run; // this call's own settlement, rejection included
+  }
+
+  private async appendLocked(blob: Blob): Promise<void> {
     if (!this.writable) {
       const fh = await this.dir.getFileHandle(partName(this.base, this.partIndex), { create: true });
       this.writable = await fh.createWritable(); // never keepExistingData — parts commit only via close()
@@ -121,8 +151,7 @@ export class PartWriter {
     }
   }
 
-  /** Closes the final part (if open), hashes every part, and writes the sidecar JSON. */
-  async finish(): Promise<SidecarEntry[]> {
+  private async finishLocked(): Promise<SidecarEntry[]> {
     if (this.writable) await this.closeCurrentPart();
     const sidecar = await this.dir.getFileHandle(`${this.base}.sidecar.json`, { create: true });
     const writable = await sidecar.createWritable();
