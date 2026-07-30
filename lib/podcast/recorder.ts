@@ -32,11 +32,25 @@ function faultDetail(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Resolves once, the first time the wrapped MediaRecorder's onstop fires. */
-function onStopPromise(recorder: MediaRecorder): Promise<void> {
-  return new Promise((resolve) => {
-    recorder.onstop = () => resolve();
+/**
+ * A recorder's stop latch. Resolves the first time its onstop fires — or the
+ * moment `settle()` is called, for a recorder that is already inactive (a
+ * fatal encoder error leaves it stopped, and its onstop will never fire
+ * again). Without that escape hatch, stop() would await an event that can
+ * never arrive and neither writer would ever be finished.
+ */
+interface StopLatch {
+  done: Promise<void>;
+  settle(): void;
+}
+
+function stopLatch(recorder: MediaRecorder): StopLatch {
+  let settle!: () => void;
+  const done = new Promise<void>((resolve) => {
+    settle = resolve;
   });
+  recorder.onstop = () => settle();
+  return { done, settle };
 }
 
 export class TakeRecorder {
@@ -45,8 +59,8 @@ export class TakeRecorder {
   private readonly firedFaults = new Set<RecorderFault>();
   private readonly videoRecorder: MediaRecorder;
   private readonly audioRecorder: MediaRecorder;
-  private readonly videoStopped: Promise<void>;
-  private readonly audioStopped: Promise<void>;
+  private readonly videoLatch: StopLatch;
+  private readonly audioLatch: StopLatch;
 
   state: "idle" | "rolling" | "stopped" = "idle";
 
@@ -85,8 +99,8 @@ export class TakeRecorder {
 
     // Installed up front (not inside stop()) so a dataavailable/onstop pair
     // that fires between construction and stop() is never missed.
-    this.videoStopped = onStopPromise(this.videoRecorder);
-    this.audioStopped = onStopPromise(this.audioRecorder);
+    this.videoLatch = stopLatch(this.videoRecorder);
+    this.audioLatch = stopLatch(this.audioRecorder);
   }
 
   private fault(kind: RecorderFault, detail: string): void {
@@ -124,23 +138,52 @@ export class TakeRecorder {
     this.audioRecorder.start(TIMESLICE_MS);
   }
 
+  /**
+   * Stops one recorder without letting it take the rest of the take down with
+   * it. Only a recorder that is actually "recording" is stopped: calling
+   * .stop() on one already killed by a fatal error is at best a no-op and, on
+   * Chrome historically, an InvalidStateError throw — which, unguarded, would
+   * abandon the other recorder AND both finish() calls, losing the healthy
+   * stream's final part and both sidecars. The try/catch stands regardless
+   * (browser variance is the whole point here). Either way the latch is
+   * settled, because a recorder we did not stop will never fire onstop.
+   */
+  private stopOne(recorder: MediaRecorder, latch: StopLatch): void {
+    try {
+      if (recorder.state === "recording") {
+        recorder.stop();
+        return;
+      }
+    } catch (err) {
+      this.fault("encoder-error", faultDetail(err));
+    }
+    latch.settle();
+  }
+
   async stop(): Promise<{ video: SidecarEntry[]; audio: SidecarEntry[] }> {
     if (this.state !== "rolling") throw new Error("TakeRecorder.stop() called while not rolling");
     this.state = "stopped";
 
-    this.videoRecorder.stop();
-    this.audioRecorder.stop();
+    this.stopOne(this.videoRecorder, this.videoLatch);
+    this.stopOne(this.audioRecorder, this.audioLatch);
 
     // MediaRecorder.stop() flushes a final dataavailable before onstop; by
     // waiting for onstop first, that final blob's append() is already
     // enqueued on the writer's chain by the time finish() is called below.
-    await this.videoStopped;
-    await this.audioStopped;
+    await this.videoLatch.done;
+    await this.audioLatch.done;
 
-    const [video, audio] = await Promise.all([
+    // BOTH writers are finished no matter what either recorder did — a dead
+    // video stream still has committed parts that need a sidecar, and the
+    // audio stream beside it is usually untouched. allSettled (not all) so a
+    // second failure can never surface as an unhandled rejection; the first
+    // failure is still what the caller sees.
+    const [video, audio] = await Promise.allSettled([
       this.finishWriter(this.writers.video),
       this.finishWriter(this.writers.audio),
     ]);
-    return { video, audio };
+    if (video.status === "rejected") throw video.reason;
+    if (audio.status === "rejected") throw audio.reason;
+    return { video: video.value, audio: audio.value };
   }
 }

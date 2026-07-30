@@ -26,7 +26,15 @@ class FakeMediaRecorder {
   onerror: ((ev: { error?: unknown; message?: string }) => void) | null = null;
   startCalls: number[] = [];
   stopCalled = false;
+  /** Counts stop() ENTRIES, including the ones that throw — so a test can
+   *  pin that a dead recorder is never even asked to stop, not merely that
+   *  the resulting throw was swallowed. */
+  stopAttempts = 0;
   finalBlob: Blob | null = null;
+  /** Tracked like the real thing — a fatal error and a stop() both leave it
+   *  "inactive", and stopping an inactive recorder is the throw this suite
+   *  exists to pin (see emitError/stop below). */
+  state: "inactive" | "recording" | "paused" = "inactive";
 
   constructor(
     public stream: unknown,
@@ -37,6 +45,7 @@ class FakeMediaRecorder {
 
   start(timeslice?: number): void {
     this.startCalls.push(timeslice!);
+    this.state = "recording";
   }
 
   /** Test hook: queue a blob to be flushed automatically when stop() runs. */
@@ -45,6 +54,15 @@ class FakeMediaRecorder {
   }
 
   stop(): void {
+    this.stopAttempts += 1;
+    // Chrome's historical behaviour, and the whole point of the guard in
+    // TakeRecorder.stopOne(): stopping an inactive recorder throws rather
+    // than no-opping. If the production code ever calls this unguarded on a
+    // recorder killed by onerror, the take's stop() blows up here.
+    if (this.state !== "recording") {
+      throw new DOMException("The MediaRecorder is not recording", "InvalidStateError");
+    }
+    this.state = "inactive";
     this.stopCalled = true;
     const finalBlob = this.finalBlob;
     // Two separate MACROtask hops (setTimeout, not queueMicrotask): a plain
@@ -66,7 +84,11 @@ class FakeMediaRecorder {
     this.ondataavailable?.({ data: blob });
   }
 
+  /** A MediaRecorder error is fatal: the recorder goes inactive. This fake
+   *  deliberately does NOT fire onstop afterwards — the worst case, where
+   *  anything still waiting on onstop waits forever. */
   emitError(err: unknown): void {
+    this.state = "inactive";
     this.onerror?.({ error: err });
   }
 }
@@ -310,5 +332,115 @@ describe("TakeRecorder.stop", () => {
 
     await expect(recorder.stop()).rejects.toThrow("disk full at finish");
     expect(onFault).toHaveBeenCalledWith("disk-error", expect.stringContaining("disk full at finish"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A recorder killed mid-take by a fatal encoder error is already inactive: its
+// onstop will never fire again, and stopping it can throw. Neither may be
+// allowed to cost the take its product files — the healthy stream's final part
+// and BOTH sidecars, which 5C needs to develop the take at all.
+// ---------------------------------------------------------------------------
+describe("TakeRecorder.stop after a fatal encoder error", () => {
+  /** Fails the test if any promise rejects with nobody watching. */
+  function watchUnhandled() {
+    const seen: unknown[] = [];
+    const onUnhandled = (reason: unknown) => seen.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    return {
+      seen,
+      async assertNone(): Promise<void> {
+        // Node reports an unhandled rejection only once the microtask queue
+        // has drained and the macrotask turn ends.
+        await new Promise((r) => setTimeout(r, 10));
+        process.off("unhandledRejection", onUnhandled);
+        expect(seen).toEqual([]);
+      },
+    };
+  }
+
+  it("stop() still resolves, returns BOTH sidecars, and never calls stop() on the dead recorder", async () => {
+    const watch = watchUnhandled();
+    const onFault = vi.fn();
+    const { recorder, videoRecorder, audioRecorder, video, audio } = buildRecorder({ onFault });
+    recorder.start();
+
+    // Both streams have committed parts…
+    videoRecorder.emitData(new Blob([new Uint8Array(4)]));
+    audioRecorder.emitData(new Blob([new Uint8Array(2)]));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // …then the video encoder dies fatally, mid-take.
+    videoRecorder.emitError(new Error("encoder blew up"));
+    expect(onFault).toHaveBeenCalledWith("encoder-error", expect.stringContaining("encoder blew up"));
+    expect(recorder.state).toBe("rolling"); // a fault never stops the recording
+
+    // The audio stream keeps writing right up to the cut.
+    const audioFinal = new Blob([new Uint8Array(9)]);
+    audioRecorder.queueFinalBlob(audioFinal);
+
+    const result = await recorder.stop();
+
+    // The dead recorder was left alone — not even asked to stop, so there is
+    // no InvalidStateError to swallow in the first place.
+    expect(videoRecorder.stopAttempts).toBe(0);
+    expect(videoRecorder.stopCalled).toBe(false);
+    expect(audioRecorder.stopCalled).toBe(true);
+    // BOTH sidecars survive — the dead stream's committed parts get one too.
+    expect(result.video).toEqual(video.sidecar);
+    expect(result.audio).toEqual(audio.sidecar);
+    // The healthy stream is complete: its final flushed blob landed before finish().
+    expect(audio.appended[audio.appended.length - 1]).toBe(audioFinal);
+    expect(recorder.state).toBe("stopped");
+
+    await watch.assertNone();
+  });
+
+  it("both recorders dead still finishes both writers and resolves", async () => {
+    const watch = watchUnhandled();
+    const { recorder, videoRecorder, audioRecorder, video, audio } = buildRecorder({});
+    recorder.start();
+    videoRecorder.emitError(new Error("video encoder blew up"));
+    audioRecorder.emitError(new Error("audio encoder blew up"));
+
+    const result = await recorder.stop();
+
+    expect(videoRecorder.stopAttempts).toBe(0);
+    expect(audioRecorder.stopAttempts).toBe(0);
+    expect(result.video).toEqual(video.sidecar);
+    expect(result.audio).toEqual(audio.sidecar);
+
+    await watch.assertNone();
+  });
+
+  it("a dead video recorder does not stop the healthy audio writer from being finished, even when the dead stream's finish() fails", async () => {
+    const watch = watchUnhandled();
+    const onFault = vi.fn();
+    const { recorder, videoRecorder, video, audio } = buildRecorder({ onFault });
+    recorder.start();
+    videoRecorder.emitError(new Error("encoder blew up"));
+    video.setFailFinish(new Error("disk full at finish"));
+
+    const finished = vi.spyOn(audio.writer, "finish");
+    await expect(recorder.stop()).rejects.toThrow("disk full at finish");
+    // The failure is reported, but the healthy stream was still finished —
+    // its sidecar exists on disk even though the caller sees the rejection.
+    expect(finished).toHaveBeenCalledTimes(1);
+    expect(onFault).toHaveBeenCalledWith("disk-error", expect.stringContaining("disk full at finish"));
+
+    await watch.assertNone();
+  });
+
+  it("BOTH finish() rejections surface as one rejection, with no unhandled second one", async () => {
+    const watch = watchUnhandled();
+    const { recorder, video, audio } = buildRecorder({});
+    recorder.start();
+    video.setFailFinish(new Error("video finish failed"));
+    audio.setFailFinish(new Error("audio finish failed"));
+
+    await expect(recorder.stop()).rejects.toThrow("video finish failed");
+
+    await watch.assertNone();
   });
 });
