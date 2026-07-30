@@ -14,6 +14,14 @@ export type FaultCause =
 export interface Fault {
   side: "local" | "remote";
   cause: FaultCause;
+  /**
+   * Remote faults only: the cause the partner named on their own beacon, so
+   * the banner can say WHAT failed over there rather than merely that
+   * something did (spec §5A — the banner names whose side and what failed).
+   * Absent when the partner never named a cause: a beacon that simply
+   * reports `rolling: false`, or a partner who went silent altogether.
+   */
+  detail?: FaultCause;
 }
 
 export interface Beacon {
@@ -67,10 +75,16 @@ export function evaluate(s: WatchSnapshot): Fault[] {
     faults.push({ side: "local", cause: s.recorderFault.cause });
   }
 
-  // Row 5: remote beacon fault != null OR rolling === false while we roll → partner-fault
+  // Row 5: remote beacon fault != null OR rolling === false while we roll →
+  // partner-fault, carrying the partner's OWN cause as `detail` whenever they
+  // named one. A beacon that has merely stopped rolling names nothing, so the
+  // fault stays bare and the banner falls back to the generic copy.
   // Edge: remote.lastBeacon can be null; don't throw, only check if it exists
   if (s.remote.lastBeacon !== null) {
-    if (s.remote.lastBeacon.fault !== null || s.remote.lastBeacon.rolling === false) {
+    const remoteCause = s.remote.lastBeacon.fault;
+    if (remoteCause !== null) {
+      faults.push({ side: "remote", cause: "partner-fault", detail: remoteCause });
+    } else if (s.remote.lastBeacon.rolling === false) {
       faults.push({ side: "remote", cause: "partner-fault" });
     }
   }

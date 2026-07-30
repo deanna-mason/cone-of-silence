@@ -108,9 +108,12 @@ function detectSupport(): boolean {
   );
 }
 
+// The remote cause is part of the identity: a partner whose camera dropped and
+// then whose disk failed is a NEW fault set, and a Stand Down on the first must
+// not swallow the second.
 function faultKey(faults: Fault[]): string {
   return faults
-    .map((f) => `${f.side}:${f.cause}`)
+    .map((f) => `${f.side}:${f.cause}:${f.detail ?? ""}`)
     .sort()
     .join("|");
 }

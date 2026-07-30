@@ -39,19 +39,16 @@
 // shipped, already-tested source — not bugs introduced or fixed here; see
 // task-10-report.md for the full account):
 //
-// 1. Check 5's "B's banner names A's codename + CAMERA DROPPED": the
-//    watchdog's row 5 (lib/podcast/watchdog.ts) generalizes ANY remote fault
-//    to the single cause "partner-fault" — it never threads the partner's
-//    actual cause through to the local evaluate() call, only through the
-//    beacon (which itself is displayed nowhere). CAUSE_COPY["partner-fault"]
-//    is "REPORTS A FAULT" (components/PodcastPanel.tsx). This is exercised
-//    directly in __tests__/watchdog.test.ts ("remote lastBeacon.fault != null
-//    ... -> partner-fault") and __tests__/podcast-panel.test.tsx. So B's
-//    banner correctly names A's codename, but the cause text is "REPORTS A
-//    FAULT", not "CAMERA DROPPED" — A's OWN banner is the one that literally
-//    says "YOUR CAMERA DROPPED". Checked below accordingly.
+// 1. (RETIRED — the deviation is gone.) Check 5's "B's banner names A's
+//    codename + CAMERA DROPPED" is now asserted literally. Watchdog row 5
+//    carries the partner's own beacon cause as the remote fault's `detail`
+//    (lib/podcast/watchdog.ts), and the panel renders CAUSE_COPY[detail]
+//    (components/PodcastPanel.tsx), so B's banner reads "<codename>: CAMERA
+//    DROPPED". The generic "REPORTS A FAULT" copy now applies only to a
+//    partner who stopped rolling without naming a cause — check 5 asserts B's
+//    banner does NOT show it.
 // 2. Check 6's "A dismisses (Stand Down) -> B clicks Cut": B's own fault
-//    banner (the generic partner-fault above) never self-clears, because
+//    banner (the remote partner-fault above) never self-clears, because
 //    A's camera track is permanently ended — A's beacon keeps carrying
 //    fault: "camera-lost" forever, so B's own evaluate() keeps reporting
 //    partner-fault every tick. The "fault" panel state offers ONLY Stand
@@ -579,12 +576,17 @@ async function stopSelfVideoTrack(page) {
       aBannerText.includes("YOUR") && aBannerText.includes("CAMERA DROPPED"),
       `A's own banner names its cause: YOUR CAMERA DROPPED (got: "${aBannerText}")`,
     );
-    // See header note (deviation 1): the shipped watchdog generalizes any
-    // remote fault to "partner-fault" ("REPORTS A FAULT"); it never threads
-    // the partner's exact cause through evaluate() on the OTHER side.
+    // Spec §5A: the banner names whose side AND what failed. The partner's own
+    // cause rides their beacon and is threaded through evaluate() as the
+    // remote fault's `detail` (lib/podcast/watchdog.ts), so B's banner reads
+    // "<A's codename>: CAMERA DROPPED" — not the generic "REPORTS A FAULT".
     check(
-      bBannerText.includes(CODENAME_A) && bBannerText.includes("REPORTS A FAULT"),
-      `B's banner names A's codename + REPORTS A FAULT — the shipped generalized remote cause, not the literal "CAMERA DROPPED" (got: "${bBannerText}")`,
+      bBannerText.includes(CODENAME_A) && bBannerText.includes("CAMERA DROPPED"),
+      `B's banner names A's codename + A's REAL cause, CAMERA DROPPED (got: "${bBannerText}")`,
+    );
+    check(
+      !bBannerText.includes("REPORTS A FAULT"),
+      `B's banner does NOT fall back to the generic "REPORTS A FAULT" (got: "${bBannerText}")`,
     );
 
     const postFault1 = await opfsUsage(pageA);

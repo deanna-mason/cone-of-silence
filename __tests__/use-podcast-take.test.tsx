@@ -655,7 +655,13 @@ describe("usePodcastTake", () => {
 
     const panel = view.result.current.panel;
     if (panel.kind !== "fault") throw new Error(`expected fault, got ${panel.kind}`);
-    expect(panel.faults).toContainEqual({ side: "remote", cause: "partner-fault" });
+    // Their cause reaches our banner intact — "REPORTS A FAULT" is not enough
+    // to decide re-take vs continue.
+    expect(panel.faults).toContainEqual({
+      side: "remote",
+      cause: "partner-fault",
+      detail: "disk-error",
+    });
     expect(vi.mocked(soundKlaxon)).toHaveBeenCalledTimes(1);
   });
 

@@ -21,7 +21,7 @@ this is the human half of the same acceptance.
 | 1 | Both hosts join one call, Tape Vault chosen on each | Roll Tape armed on both |
 | 2 | Either host hits ROLL TAPE | 3-2-1 countdown, both machines; tone mark audible on both at zero |
 | 3 | Let the take run ≥10 minutes | Reel Rolling on both, gauges climbing, no fault banner |
-| 4 | Unplug the Continuity Camera (or close its iPhone lid) mid-take | Both sides alarm within 3 s, banner names the dropped side |
+| 4 | Unplug the Continuity Camera (or close its iPhone lid) mid-take | Both sides alarm within 3 s. The unplugged host reads `YOUR CAMERA DROPPED`; the partner reads `<that host's codename>: CAMERA DROPPED` — side AND cause, not a generic "reports a fault" |
 | 5 | Coordinated stop | Stopping, then Roll Tape armed again on both; end tone audible on both before the cut |
 | 6 | Concatenate each host's part-files in numeric order (sidecar order) | Plays back clean start to finish; both tone marks present |
 | 7 | Mid-take, force-quit the browser on one host | At most the in-flight part is lost — concatenate that host's committed parts and confirm nothing earlier is missing |

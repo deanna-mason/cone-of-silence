@@ -136,7 +136,7 @@ describe("watchdog: evaluate() faults", () => {
     });
   });
 
-  it("remote lastBeacon.fault != null while rolling → partner-fault", () => {
+  it("remote lastBeacon.fault != null while rolling → partner-fault carrying THEIR cause as detail", () => {
     const snap = healthy(now, {
       remote: {
         lastBeaconAt: now - 100,
@@ -150,13 +150,33 @@ describe("watchdog: evaluate() faults", () => {
       },
     });
     const faults = evaluate(snap);
+    // The banner has to name WHAT failed on the other side, not just that
+    // something did — the cause rides the beacon and must survive the hop.
     expect(faults).toContainEqual({
       side: "remote",
       cause: "partner-fault",
+      detail: "camera-lost",
     });
   });
 
-  it("remote lastBeacon.rolling === false while we roll → partner-fault", () => {
+  it("every remote cause survives the hop verbatim, not just camera-lost", () => {
+    const causes: FaultCause[] = ["mic-lost", "encoder-stalled", "disk-error", "encoder-error"];
+    for (const cause of causes) {
+      const snap = healthy(now, {
+        remote: {
+          lastBeaconAt: now - 100,
+          lastBeacon: { rolling: true, bytes: 800, camOk: true, micOk: true, fault: cause },
+        },
+      });
+      expect(evaluate(snap)).toContainEqual({
+        side: "remote",
+        cause: "partner-fault",
+        detail: cause,
+      });
+    }
+  });
+
+  it("remote lastBeacon.rolling === false while we roll → bare partner-fault (they named no cause)", () => {
     const snap = healthy(now, {
       remote: {
         lastBeaconAt: now - 100,
@@ -174,6 +194,8 @@ describe("watchdog: evaluate() faults", () => {
       side: "remote",
       cause: "partner-fault",
     });
+    // No cause on the wire means no detail invented for it.
+    expect(faults.find((f) => f.cause === "partner-fault")!.detail).toBeUndefined();
   });
 
   it("remote lastBeaconAt stale (> BEACON_SILENCE_MS) while rolling → partner-silent", () => {
@@ -235,7 +257,7 @@ describe("watchdog: evaluate() faults", () => {
     expect(faults).toContainEqual({ side: "local", cause: "camera-lost" });
     expect(faults).toContainEqual({ side: "local", cause: "mic-lost" });
     expect(faults).toContainEqual({ side: "local", cause: "encoder-stalled" });
-    expect(faults).toContainEqual({ side: "remote", cause: "partner-fault" });
+    expect(faults).toContainEqual({ side: "remote", cause: "partner-fault", detail: "camera-lost" });
     expect(faults).toContainEqual({ side: "remote", cause: "partner-silent" });
   });
 

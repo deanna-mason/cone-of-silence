@@ -162,7 +162,11 @@ export default function PodcastPanel({
               <li key={i}>
                 {f.side === "local"
                   ? `YOUR ${CAUSE_COPY[f.cause]}`
-                  : `${state.partnerCodename ?? "PARTNER"}: ${CAUSE_COPY[f.cause]}`}
+                  : // A remote fault names the partner's OWN cause when their
+                    // beacon carried one; `partner-fault`'s generic copy is
+                    // the fallback for a partner who stopped rolling without
+                    // saying why.
+                    `${state.partnerCodename ?? "PARTNER"}: ${CAUSE_COPY[f.detail ?? f.cause]}`}
               </li>
             ))}
           </ul>

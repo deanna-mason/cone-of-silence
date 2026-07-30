@@ -112,6 +112,25 @@ describe("PodcastPanel", () => {
     expect(cb.onDismissFault).toHaveBeenCalledTimes(1);
   });
 
+  test("fault — a remote fault names the partner's REAL cause when the beacon carried one", () => {
+    renderState({
+      kind: "fault",
+      partnerCodename: "Falcon",
+      faults: [{ side: "remote", cause: "partner-fault", detail: "camera-lost" }],
+    });
+    // Spec §5A: the banner names whose side AND what failed.
+    expect(screen.getByText("Falcon: CAMERA DROPPED")).toBeDefined();
+  });
+
+  test("fault — a remote fault with no cause on the wire keeps the generic copy", () => {
+    renderState({
+      kind: "fault",
+      partnerCodename: "Falcon",
+      faults: [{ side: "remote", cause: "partner-fault" }],
+    });
+    expect(screen.getByText("Falcon: REPORTS A FAULT")).toBeDefined();
+  });
+
   test("fault — remote fault falls back to 'PARTNER' when no codename is known", () => {
     renderState({
       kind: "fault",
