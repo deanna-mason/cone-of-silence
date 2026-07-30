@@ -11,6 +11,9 @@ interface CallControlsProps {
   onToggleCam: () => void;
   onCopyInvite: () => void;
   onLeave: () => void;
+  /** Locks the mic/lens toggles only — a mid-take device change would poison
+   *  the tape. Copy Invite and Burn & Leave stay live. */
+  disabled?: boolean;
 }
 
 export default function CallControls({
@@ -21,19 +24,32 @@ export default function CallControls({
   onToggleCam,
   onCopyInvite,
   onLeave,
+  disabled = false,
 }: CallControlsProps) {
   const toggleClass = (on: boolean) =>
-    `kicker inline-flex items-center gap-2 border px-4 py-3 transition ${
+    `kicker inline-flex items-center gap-2 border px-4 py-3 transition disabled:cursor-not-allowed disabled:opacity-50 ${
       on ? "border-brass text-ink" : "border-vermilion/60 text-vermilion"
     }`;
 
   return (
     <div className="hairline flex flex-wrap items-center gap-3 border bg-inset p-4">
-      <button type="button" aria-pressed={micOn} onClick={onToggleMic} className={toggleClass(micOn)}>
+      <button
+        type="button"
+        aria-pressed={micOn}
+        disabled={disabled}
+        onClick={onToggleMic}
+        className={toggleClass(micOn)}
+      >
         <MicIcon on={micOn} />
         {micOn ? "Mic Live" : "Mic Cut"}
       </button>
-      <button type="button" aria-pressed={camOn} onClick={onToggleCam} className={toggleClass(camOn)}>
+      <button
+        type="button"
+        aria-pressed={camOn}
+        disabled={disabled}
+        onClick={onToggleCam}
+        className={toggleClass(camOn)}
+      >
         <LensIcon on={camOn} />
         {camOn ? "Lens Open" : "Lens Capped"}
       </button>

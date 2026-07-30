@@ -8,9 +8,12 @@ import VideoTile from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
+import PodcastPanel from "@/components/PodcastPanel";
 import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useCallSession } from "@/hooks/useCallSession";
+import { usePodcastTake } from "@/hooks/usePodcastTake";
+import { getSession } from "@/lib/authApi";
 import type { CallStatus } from "@/lib/webrtc/session";
 import {
   buildInviteLink,
@@ -86,14 +89,37 @@ export default function RoomPage() {
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys?.roomId ?? null, media.stream, stage === "in-room", forceRelay);
 
+  // Podcast mode is for logged-in hosts only; anonymous guests get the plain
+  // call. `authed` is read in an effect so the server render never touches
+  // localStorage.
+  const [authed, setAuthed] = useState(false);
+  useEffect(() => {
+    setAuthed(getSession() != null);
+  }, []);
+  const podcast = usePodcastTake({
+    enabled: authed && stage === "in-room",
+    bus: call.bus,
+    peerCount: call.peers.length,
+    videoTrack: media.stream?.getVideoTracks()[0] ?? null,
+    audioDeviceId: media.choice.audioDeviceId,
+  });
+  // While the tape rolls the recorded tracks are frozen: no device toggles,
+  // and the self tile shows the true recorded frame.
+  const podcastLocked =
+    podcast.panel.kind === "countdown" ||
+    podcast.panel.kind === "rolling" ||
+    podcast.panel.kind === "fault" ||
+    podcast.panel.kind === "stopping";
+
   // Debug mirror for e2e/phase2-e2e.js — harmless in production.
   useEffect(() => {
     (window as unknown as Record<string, unknown>).__cosCall = {
       status: call.status,
       dcOpen: call.dcOpen,
       peers: call.peers.length,
+      pod: podcast.panel.kind,
     };
-  }, [call.status, call.dcOpen, call.peers]);
+  }, [call.status, call.dcOpen, call.peers, podcast.panel.kind]);
 
   // A terminal call failure ends the operation — release the camera/mic so
   // the tally light matches what the user believes. (media.stop reads refs,
@@ -300,6 +326,16 @@ export default function RoomPage() {
 
   return (
     <div className="flex h-[calc(100dvh-7rem)] min-h-[20rem] flex-col gap-3">
+      {authed && (
+        <PodcastPanel
+          state={podcast.panel}
+          onChooseVault={() => void podcast.actions.chooseVault()}
+          onGrantVault={() => void podcast.actions.grantVault()}
+          onRoll={podcast.actions.roll}
+          onStop={podcast.actions.stop}
+          onDismissFault={podcast.actions.dismissFault}
+        />
+      )}
       <header className="flex items-center justify-between">
         <p className="kicker text-sienna">◈ Secure Channel</p>
         <p className="kicker text-ink-soft" aria-live="polite">
@@ -309,9 +345,27 @@ export default function RoomPage() {
         </p>
       </header>
       <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>
-        <VideoTile fill stream={media.stream} label="You" mirrored isSelf camOff={!media.camOn} />
+        <VideoTile
+          fill
+          stream={media.stream}
+          label="You"
+          mirrored
+          isSelf
+          camOff={!media.camOn}
+          fullFrame={podcastLocked}
+        />
         {call.peers.map((p, i) => (
-          <RemoteTile key={p.peerId} peer={p} label={`Agent ${i + 2}`} />
+          <RemoteTile
+            key={p.peerId}
+            peer={p}
+            // The codename only identifies the OTHER half of a podcast pair —
+            // with a fuller room it would label every tile the same.
+            label={
+              call.peers.length === 1
+                ? (podcast.partnerCodename ?? "Agent 2")
+                : `Agent ${i + 2}`
+            }
+          />
         ))}
         {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}
       </div>
@@ -323,6 +377,7 @@ export default function RoomPage() {
         onToggleCam={media.toggleCam}
         onCopyInvite={() => void copyInvite()}
         onLeave={leave}
+        disabled={podcastLocked}
       />
     </div>
   );

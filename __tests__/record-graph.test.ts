@@ -35,13 +35,16 @@ function fakes(settings: Partial<MediaTrackSettings> = {}) {
 
 describe("record graph", () => {
   it("requests a raw mono capture of the chosen device at 48 kHz", async () => {
-    const { deps, gum, ctxOpts, destTrack, ctx, stream } = fakes();
+    const { deps, gum, ctxOpts, destTrack, rawTrack, ctx, stream } = fakes();
     const graph = await buildRecordGraph("mic-1", deps);
     expect(gum).toHaveBeenCalledWith({
       audio: { deviceId: { exact: "mic-1" }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
     });
     expect(ctxOpts[0]).toEqual({ sampleRate: 48000 });
     expect(graph.recordedTrack).toBe(destTrack);
+    // The raw capture is exposed separately: the destination track never
+    // ends or mutes, so only this one can tell the watchdog the mic is gone.
+    expect(graph.rawTrack).toBe(rawTrack);
     // jsdom has no MediaStream constructor — the source must be built from the
     // original gUM stream, never a `new MediaStream(...)` wrapper.
     expect(ctx.createMediaStreamSource).toHaveBeenCalledWith(stream);

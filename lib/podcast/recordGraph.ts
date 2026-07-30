@@ -15,6 +15,10 @@ export interface RecordGraphDeps {           // injectable for jsdom tests
 
 export interface RecordGraph {
   recordedTrack: MediaStreamTrack;           // mic + tone, 48 kHz — feeds BOTH recorders
+  /** The raw mic capture behind the graph. The watchdog polls THIS for mic-lost:
+   *  a MediaStreamDestination track never ends or mutes, so `recordedTrack`
+   *  stays "live" even after the microphone is unplugged. */
+  rawTrack: MediaStreamTrack;
   /** Schedule the mark ~50 ms out on recorded graph AND speakers; returns Date.now() ms of mark start. */
   playMark(): number;
   close(): void;                             // stop raw track, close ctx
@@ -45,6 +49,7 @@ export async function buildRecordGraph(
   ctx.createMediaStreamSource(stream).connect(dest); // the gUM stream itself — jsdom-safe, no MediaStream ctor
   return {
     recordedTrack: dest.stream.getAudioTracks()[0],
+    rawTrack: raw,
     playMark() {
       // Into the recording AND out loud; ~50 ms lead so both land in-schedule.
       scheduleToneMark(ctx, [dest, ctx.destination], ctx.currentTime + MARK_LEAD_S);

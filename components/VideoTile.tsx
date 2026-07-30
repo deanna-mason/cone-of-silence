@@ -12,6 +12,9 @@ interface VideoTileProps {
   fill?: boolean; // Phase 4B: size from the parent grid cell instead of aspect-video
   signalLost?: boolean;
   speaking?: boolean;
+  /** Honest framing (spec §5A): letterbox instead of crop, so the monitor
+   *  shows exactly the frame the tape is recording. Self tile, while rolling. */
+  fullFrame?: boolean;
 }
 
 export default function VideoTile({
@@ -23,6 +26,7 @@ export default function VideoTile({
   fill = false,
   signalLost = false,
   speaking = false,
+  fullFrame = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
@@ -81,7 +85,9 @@ export default function VideoTile({
           ref={videoRef}
           autoPlay
           playsInline
-          className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""} ${
+          className={`h-full w-full ${fullFrame ? "object-contain" : "object-cover"} ${
+            mirrored ? "-scale-x-100" : ""
+          } ${
             covered ? "invisible" : ""
           }`}
         />
