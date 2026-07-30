@@ -238,6 +238,66 @@ describe("watchdog: evaluate() faults", () => {
     expect(faults).toContainEqual({ side: "remote", cause: "partner-fault" });
     expect(faults).toContainEqual({ side: "remote", cause: "partner-silent" });
   });
+
+  it("STALL_MS boundary: now - lastBytesChangeAt === STALL_MS exactly → NO encoder-stalled", () => {
+    const snap = healthy(now, {
+      lastBytesChangeAt: now - STALL_MS, // exactly at boundary, not over
+    });
+    const faults = evaluate(snap);
+    expect(
+      faults.some((f) => f.side === "local" && f.cause === "encoder-stalled")
+    ).toBe(false);
+  });
+
+  it("STALL_MS boundary: now - lastBytesChangeAt === STALL_MS + 1 → encoder-stalled", () => {
+    const snap = healthy(now, {
+      lastBytesChangeAt: now - STALL_MS - 1, // just over boundary
+    });
+    const faults = evaluate(snap);
+    expect(faults).toContainEqual({
+      side: "local",
+      cause: "encoder-stalled",
+    });
+  });
+
+  it("BEACON_SILENCE_MS boundary: now - remote.lastBeaconAt === BEACON_SILENCE_MS exactly → NO partner-silent", () => {
+    const snap = healthy(now, {
+      remote: {
+        lastBeaconAt: now - BEACON_SILENCE_MS, // exactly at boundary, not over
+        lastBeacon: {
+          rolling: true,
+          bytes: 800,
+          camOk: true,
+          micOk: true,
+          fault: null,
+        },
+      },
+    });
+    const faults = evaluate(snap);
+    expect(
+      faults.some((f) => f.side === "remote" && f.cause === "partner-silent")
+    ).toBe(false);
+  });
+
+  it("BEACON_SILENCE_MS boundary: now - remote.lastBeaconAt === BEACON_SILENCE_MS + 1 → partner-silent", () => {
+    const snap = healthy(now, {
+      remote: {
+        lastBeaconAt: now - BEACON_SILENCE_MS - 1, // just over boundary
+        lastBeacon: {
+          rolling: true,
+          bytes: 800,
+          camOk: true,
+          micOk: true,
+          fault: null,
+        },
+      },
+    });
+    const faults = evaluate(snap);
+    expect(faults).toContainEqual({
+      side: "remote",
+      cause: "partner-silent",
+    });
+  });
 });
 
 describe("watchdog: localBeacon()", () => {
