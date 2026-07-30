@@ -133,9 +133,13 @@ class FakeBusPair {
     new Set(),
   ];
   sentLog: { from: 0 | 1; text: string }[] = [];
+  /** Mirrors mesh.sendAll: a closed/absent link is SKIPPED, never queued. The
+   *  send is still logged — that is what makes a dropped hello observable. */
+  open = true;
 
   private deliver(from: 0 | 1, text: string): void {
     this.sentLog.push({ from, text });
+    if (!this.open) return;
     const to = from === 0 ? 1 : 0;
     setTimeout(() => {
       for (const fn of this.listeners[to]) fn("peer", text);
@@ -154,6 +158,12 @@ class FakeBusPair {
         return () => this.listeners[idx].delete(fn);
       },
     };
+  }
+
+  countSent(from: 0 | 1, t: string): number {
+    return this.sentLog.filter(
+      (e) => e.from === from && (JSON.parse(e.text) as { t: string }).t === t,
+    ).length;
   }
 
   beaconsFrom(from: 0 | 1): Beacon[] {
@@ -198,6 +208,9 @@ describe("usePodcastTake", () => {
     H.state.failBuild = null;
     H.state.failTakeDir = null;
     vi.mocked(soundKlaxon).mockClear();
+    // Testing Library sets this around its own wrappers and restores it after;
+    // the bare `act` in tick()/rerender paths needs it to stay set.
+    (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     // Chrome-only feature detect: make the environment look supported.
     (window as unknown as Record<string, unknown>).showDirectoryPicker = () => {};
     (globalThis as unknown as Record<string, unknown>).MediaRecorder = {
@@ -208,6 +221,7 @@ describe("usePodcastTake", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    delete (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
     delete (window as unknown as Record<string, unknown>).showDirectoryPicker;
     delete (globalThis as unknown as Record<string, unknown>).MediaRecorder;
   });
@@ -224,30 +238,45 @@ describe("usePodcastTake", () => {
     const videoTrack = fakeTrack();
     const partnerCb = partnerCallbacks();
     const partner = new TakeCoordinator(pair.bus(1), "Falcon", partnerCb);
+    const props: Args = {
+      enabled: true,
+      bus,
+      dcOpen: true,
+      peerIds: ["peer-1"],
+      videoTrack,
+      audioDeviceId: "mic-1",
+      ...overrides,
+    };
 
-    const view = renderHook((props: Args) => usePodcastTake(props), {
-      initialProps: {
-        enabled: true,
-        bus,
-        peerCount: 1,
-        videoTrack,
-        audioDeviceId: "mic-1",
-        ...overrides,
-      },
-    });
+    const view = renderHook((p: Args) => usePodcastTake(p), { initialProps: props });
     // Let the mount effects (vault query, hello handshake) settle.
     await tick(1);
-    return { pair, partner, partnerCb, videoTrack, view };
+    return { pair, partner, partnerCb, videoTrack, view, props };
   }
 
-  /** Drives a full proposer-side roll: armed → countdown → rolling. */
+  /**
+   * Drives a full proposer-side roll and stops just past the recorder start
+   * (T-500 ms of COUNTDOWN_MS = 3500), BEFORE the first watchdog tick that
+   * follows it. Tick phase matters: the 1 Hz interval starts at the roll, so
+   * post-roll ticks land at recorder-start +1000, +2000, … and the partner
+   * grace window covers exactly the first of them.
+   */
   async function rollToRolling(view: Awaited<ReturnType<typeof setup>>["view"]) {
     act(() => view.result.current.actions.roll());
-    await tick(4_000); // COUNTDOWN_MS (3500) + start lead + slack
+    await tick(3_600);
+  }
+
+  /** A healthy partner beaconing once a second, as a real one does. Without
+   *  it the watchdog rightly reports partner-silent after 3 s. */
+  function partnerHeartbeat(partner: TakeCoordinator): () => void {
+    const id = setInterval(() => {
+      partner.sendBeacon({ rolling: true, bytes: 8_000, camOk: true, micOk: true, fault: null });
+    }, 1_000);
+    return () => clearInterval(id);
   }
 
   it("(a) does nothing at all while disabled — no coordinator, no bus traffic", async () => {
-    const { pair, view } = await setup({ enabled: false, peerCount: 0 });
+    const { pair, view } = await setup({ enabled: false, peerIds: [] });
     await tick(2_000);
 
     expect(pair.sentLog.filter((e) => e.from === 0)).toHaveLength(0);
@@ -255,12 +284,12 @@ describe("usePodcastTake", () => {
   });
 
   it("(b) reports the head count when the room is not exactly two agents", async () => {
-    const { view } = await setup({ peerCount: 0 });
+    const { view } = await setup({ peerIds: [] });
     expect(view.result.current.panel).toEqual({ kind: "not-two", count: 1 });
   });
 
   it("(b2) three agents in the room is still not-two", async () => {
-    const { view } = await setup({ peerCount: 2 });
+    const { view } = await setup({ peerIds: ["peer-1", "peer-2"] });
     expect(view.result.current.panel).toEqual({ kind: "not-two", count: 3 });
   });
 
@@ -383,6 +412,285 @@ describe("usePodcastTake", () => {
     delete (window as unknown as Record<string, unknown>).showDirectoryPicker;
     const { view } = await setup();
     expect(view.result.current.panel).toEqual({ kind: "unsupported" });
+  });
+
+  // -------------------------------------------------------------------
+  // The hello handshake has to survive a closed channel. The bus under it
+  // (mesh.sendAll) skips a closed link instead of queueing, so announcing at
+  // coordinator construction — before any peer or channel exists — loses the
+  // hello permanently: no codename, and no clock-offset estimate either,
+  // since the ping round only starts once a hello has been RECEIVED.
+  // -------------------------------------------------------------------
+  it("(h) announces on the channel opening, not at construction — a hello sent while closed is lost", async () => {
+    const pair = new FakeBusPair();
+    pair.open = false; // channel not up yet: every send is dropped
+    const bus = pair.bus(0);
+    const partner = new TakeCoordinator(pair.bus(1), "Falcon", partnerCallbacks());
+    const props: Args = {
+      enabled: true,
+      bus,
+      dcOpen: false,
+      peerIds: ["peer-1"],
+      videoTrack: fakeTrack(),
+      audioDeviceId: "mic-1",
+    };
+    const view = renderHook((p: Args) => usePodcastTake(p), { initialProps: props });
+    await tick(50);
+
+    // Whatever was announced now would be thrown away — so nothing is.
+    expect(pair.countSent(0, "pod/hello")).toBe(0);
+    expect(view.result.current.partnerCodename).toBeNull();
+
+    // Channel opens.
+    pair.open = true;
+    view.rerender({ ...props, dcOpen: true });
+    await tick(50);
+
+    expect(pair.countSent(0, "pod/hello")).toBe(1);
+    expect(view.result.current.partnerCodename).toBe("Falcon");
+    // …and the offset estimate is reachable again: pinging only starts once a
+    // hello has been received, so this is the half that silently died before.
+    expect(pair.countSent(0, "pod/ping")).toBeGreaterThan(0);
+    view.unmount();
+    partner.dispose();
+  });
+
+  it("(h2) re-announces when the channel is rebuilt, without restarting the clock estimate", async () => {
+    const { pair, view, props } = await setup();
+    await tick(100); // let the best-of-3 ping rounds finish
+    expect(view.result.current.partnerCodename).toBe("Falcon");
+    const pingsAfterFirstOpen = pair.countSent(0, "pod/ping");
+    expect(pingsAfterFirstOpen).toBeGreaterThan(0);
+
+    view.rerender({ ...props, dcOpen: false });
+    await tick(10);
+    // A blip is not churn: the same peer is still on the line, so the claim
+    // stands rather than flickering back to a positional label.
+    expect(view.result.current.partnerCodename).toBe("Falcon");
+
+    view.rerender({ ...props, dcOpen: true });
+    await tick(50);
+    expect(view.result.current.partnerCodename).toBe("Falcon");
+    expect(pair.countSent(0, "pod/hello")).toBe(2);
+    // No second ping round: a re-announce must not disturb an offset already
+    // in hand (this can land mid-take).
+    expect(pair.countSent(0, "pod/ping")).toBe(pingsAfterFirstOpen);
+  });
+
+  it("(h3) a codename never outlives the peer that claimed it", async () => {
+    const { pair, view, props } = await setup();
+    expect(view.result.current.partnerCodename).toBe("Falcon");
+
+    // The codenamed partner leaves and somebody else takes the chair.
+    view.rerender({ ...props, peerIds: ["peer-2"] });
+    await tick(1);
+    expect(view.result.current.partnerCodename).toBeNull();
+    // …and we speak first, so a late joiner learns who we are (their own
+    // announcement will not be auto-replied to — our reply latch is spent).
+    expect(pair.countSent(0, "pod/hello")).toBe(2);
+  });
+
+  // -------------------------------------------------------------------
+  // Start-chain rejections: the take exists on the wire but nothing local is
+  // recording (the `failed` phase).
+  // -------------------------------------------------------------------
+  it("(i) a refused mic capture raises an encoder fault, klaxons once, and tells the partner", async () => {
+    H.state.failBuild = new Error("microphone capture came back with browser processing enabled");
+    const { pair, view } = await setup();
+    await rollToRolling(view);
+
+    const panel = view.result.current.panel;
+    if (panel.kind !== "fault") throw new Error(`expected fault, got ${panel.kind}`);
+    expect(panel.faults).toContainEqual({ side: "local", cause: "encoder-error" });
+    expect(vi.mocked(soundKlaxon)).toHaveBeenCalledTimes(1);
+    expect(H.log).not.toContain("recorder:start");
+
+    // The beacon carries the cause even though we never reached `rolling` —
+    // evaluate() reports nothing when not rolling, so it is back-filled.
+    await tick(1_100);
+    const beacons = pair.beaconsFrom(0);
+    expect(beacons[beacons.length - 1]!.fault).toBe("encoder-error");
+  });
+
+  it("(i2) a vault that will not open is a disk fault, and no capture is left running", async () => {
+    H.state.failTakeDir = new Error("permission revoked");
+    const { view } = await setup();
+    await rollToRolling(view);
+
+    const panel = view.result.current.panel;
+    if (panel.kind !== "fault") throw new Error(`expected fault, got ${panel.kind}`);
+    expect(panel.faults).toContainEqual({ side: "local", cause: "disk-error" });
+    // The graph was built before the directory failed — it must not survive.
+    expect(H.log).toContain("graph:build");
+    expect(H.log).toContain("graph:close");
+  });
+
+  it("(i3) standing down from a failed start ends the take and re-arms", async () => {
+    H.state.failBuild = new Error("no mic");
+    const { view } = await setup();
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("fault");
+
+    act(() => view.result.current.actions.dismissFault());
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+
+    // The wire take was released too — the next roll gets a fresh slot.
+    H.state.failBuild = null;
+    await tick(2_000);
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+  });
+
+  // -------------------------------------------------------------------
+  // Aborts and teardown.
+  // -------------------------------------------------------------------
+  it("(j) cutting during the countdown aborts the take — nothing built, slot freed", async () => {
+    const { view } = await setup();
+    act(() => view.result.current.actions.roll());
+    await tick(1_000); // mid-countdown, well before the T-500ms start
+    expect(view.result.current.panel.kind).toBe("countdown");
+
+    act(() => view.result.current.actions.stop());
+    await tick(1_000);
+    expect(H.log).not.toContain("recorder:start");
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+
+    // The abort must not have left the roll timers armed.
+    await tick(5_000);
+    expect(H.log).not.toContain("graph:build");
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+
+    // And the slot is free: a second roll runs to completion.
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+  });
+
+  it("(j2) unmounting mid-countdown leaves no capture and no live timers", async () => {
+    const { view } = await setup();
+    act(() => view.result.current.actions.roll());
+    await tick(1_000);
+
+    view.unmount();
+    await tick(10_000); // every roll-phase timer should be dead
+    expect(H.log).not.toContain("graph:build");
+    expect(H.log).not.toContain("recorder:start");
+  });
+
+  // -------------------------------------------------------------------
+  // Fault handling while the tape keeps rolling.
+  // -------------------------------------------------------------------
+  it("(k) Stand Down hides the banner without stopping the tape, and the klaxon re-arms only after a clean tick", async () => {
+    const { view, videoTrack, partner } = await setup();
+    await rollToRolling(view);
+    const stopHeartbeat = partnerHeartbeat(partner);
+
+    (videoTrack as unknown as { muted: boolean }).muted = true;
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("fault");
+    expect(vi.mocked(soundKlaxon)).toHaveBeenCalledTimes(1);
+
+    act(() => view.result.current.actions.dismissFault());
+    // Still recording — dismissing is an acknowledgement, not a cut.
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(H.log).not.toContain("recorder:stop");
+
+    // The same fault, still present, stays dismissed and stays quiet.
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(vi.mocked(soundKlaxon)).toHaveBeenCalledTimes(1);
+
+    // Camera returns: one clean tick re-arms the alarm…
+    (videoTrack as unknown as { muted: boolean }).muted = false;
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("rolling");
+
+    // …so the next drop sounds again.
+    (videoTrack as unknown as { muted: boolean }).muted = true;
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("fault");
+    expect(vi.mocked(soundKlaxon)).toHaveBeenCalledTimes(2);
+    stopHeartbeat();
+  });
+
+  // -------------------------------------------------------------------
+  // The partner grace window: quiet startup lag is forgiven, a fault is not.
+  // -------------------------------------------------------------------
+  it("(l) a partner still starting up in the first second does not alarm", async () => {
+    const { partner, view } = await setup();
+    await rollToRolling(view);
+
+    // Their start chain is behind ours — a truthful, harmless "not yet".
+    act(() => {
+      partner.sendBeacon({ rolling: false, bytes: 0, camOk: true, micOk: true, fault: null });
+    });
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(vi.mocked(soundKlaxon)).not.toHaveBeenCalled();
+  });
+
+  it("(l2) a partner reporting a real fault in that same window alarms immediately", async () => {
+    const { partner, view } = await setup();
+    await rollToRolling(view);
+
+    act(() => {
+      partner.sendBeacon({
+        rolling: false,
+        bytes: 0,
+        camOk: true,
+        micOk: false,
+        fault: "disk-error",
+      });
+    });
+    await tick(1_100);
+
+    const panel = view.result.current.panel;
+    if (panel.kind !== "fault") throw new Error(`expected fault, got ${panel.kind}`);
+    expect(panel.faults).toContainEqual({ side: "remote", cause: "partner-fault" });
+    expect(vi.mocked(soundKlaxon)).toHaveBeenCalledTimes(1);
+  });
+
+  it("(l3) a partner who never gets rolling is caught once the window shuts", async () => {
+    const { partner, view } = await setup();
+    await rollToRolling(view);
+
+    for (let i = 0; i < 3; i++) {
+      act(() => {
+        partner.sendBeacon({ rolling: false, bytes: 0, camOk: true, micOk: true, fault: null });
+      });
+      await tick(1_000);
+    }
+
+    const panel = view.result.current.panel;
+    if (panel.kind !== "fault") throw new Error(`expected fault, got ${panel.kind}`);
+    expect(panel.faults).toContainEqual({ side: "remote", cause: "partner-fault" });
+  });
+
+  // -------------------------------------------------------------------
+  // A discarded take must not haunt the next one.
+  // -------------------------------------------------------------------
+  it("(m) a late disk error from a discarded recorder never lands on the next take", async () => {
+    const { view, partner } = await setup();
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+
+    // Grab the live recorder's fault callback, then end the take.
+    const recorder = H.state.recorders[0] as unknown as {
+      opts: { onFault: (c: string, d: string) => void };
+    };
+    act(() => view.result.current.actions.stop());
+    await tick(3_500);
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+
+    // Second take, healthy…
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+
+    // …and the FIRST take's writers finally report their failure.
+    act(() => recorder.opts.onFault("disk-error", "no space left on device"));
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(vi.mocked(soundKlaxon)).not.toHaveBeenCalled();
+    stopHeartbeat();
   });
 });
 

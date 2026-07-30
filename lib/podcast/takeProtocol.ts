@@ -153,10 +153,16 @@ export class TakeCoordinator {
     return remoteMs + this.offsetMs;
   }
 
-  private ensureHelloSent(): void {
-    if (this.helloSent) return;
+  private sendHello(): void {
     this.helloSent = true;
     this.send({ t: "pod/hello", codename: this.codename });
+  }
+
+  /** The auto-reply to an incoming hello — latched, so a hello can never
+   *  bounce back and forth. announce() is the un-latched counterpart. */
+  private ensureHelloSent(): void {
+    if (this.helloSent) return;
+    this.sendHello();
   }
 
   private maybeStartPinging(): void {
@@ -330,10 +336,30 @@ export class TakeCoordinator {
     this.scheduleStop(msg.takeId, this.toLocal(msg.markAtMs));
   }
 
-  /** Announce this side's codename; replies automatically on receipt too. */
-  hello(): void {
-    this.ensureHelloSent();
+  /**
+   * Announce this side's codename; replies automatically on receipt too.
+   *
+   * NOT latched, deliberately: the bus underneath is `mesh.sendAll`, a
+   * best-effort broadcast that SKIPS a closed or absent link rather than
+   * queueing for it. An announcement made before the data channel opens is
+   * therefore dropped on the floor, and a once-only hello would leave both
+   * sides permanently nameless (and, because the ping/pong round only starts
+   * once a hello has been *received*, permanently unsynchronised). The
+   * consumer re-announces on every channel open and on roster changes.
+   *
+   * Repeats are safe: the partner's auto-reply is latched, so a re-announce
+   * cannot start a reply storm, and `maybeStartPinging` is a no-op once the
+   * first ping round has begun — a mid-take re-announce never disturbs an
+   * offset estimate that is already in hand.
+   */
+  announce(): void {
+    this.sendHello();
     this.maybeStartPinging();
+  }
+
+  /** Original spelling of announce(); kept for callers that read better this way. */
+  hello(): void {
+    this.announce();
   }
 
   /** ROLL TAPE — proposes a new take. No-op (returns the current id) if one's already active. */

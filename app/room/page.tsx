@@ -99,7 +99,8 @@ export default function RoomPage() {
   const podcast = usePodcastTake({
     enabled: authed && stage === "in-room",
     bus: call.bus,
-    peerCount: call.peers.length,
+    dcOpen: call.dcOpen,
+    peerIds: call.peers.map((p) => p.peerId),
     videoTrack: media.stream?.getVideoTracks()[0] ?? null,
     audioDeviceId: media.choice.audioDeviceId,
   });

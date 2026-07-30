@@ -41,18 +41,22 @@ import {
 const VP8 = "video/webm;codecs=vp8,opus";
 
 /**
- * How long after OUR recorders start the partner's beacon rows are ignored.
+ * How long after OUR recorders start a partner beacon of "not rolling yet" is
+ * ignored.
  *
  * Both sides start at the same scheduled instant, but each side's start is an
  * async chain (a second getUserMedia, a directory open) that can take a few
  * hundred milliseconds more on one machine than the other. During that gap
  * the slower side is still beaconing `rolling: false`, which watchdog row 5
- * reads as partner-fault. Suppressing the remote rows until the partner has
- * reported rolling once — or until this window closes, whichever comes first
- * — keeps the alarm for real faults and off the startup race. A partner who
- * genuinely never gets rolling is still caught the moment the window shuts.
+ * reads as partner-fault. The window closes at the partner's first
+ * `rolling: true` or after this long, whichever comes first, so a partner who
+ * genuinely never gets rolling is still caught — within the 3 s alarm budget.
+ *
+ * Narrowly scoped on purpose (see isStartupLag): ONLY a quiet not-yet-rolling
+ * beacon is suppressed. A partner beacon that carries a fault alarms
+ * immediately, however early in the take it arrives.
  */
-const PARTNER_GRACE_MS = 2_000;
+const PARTNER_GRACE_MS = 1_200;
 
 /** Take phases. `failed` = the wire take is alive but OUR recorders are not. */
 type Phase = "idle" | "countdown" | "rolling" | "stopping" | "failed";
@@ -73,7 +77,12 @@ export interface PodcastTakeArgs {
   /** logged-in && in-room — false means the hook holds no resources at all. */
   enabled: boolean;
   bus: CallBus;
-  peerCount: number;
+  /** Data channel availability. The hello announcement rides its rising edge:
+   *  the bus underneath drops sends on a closed link instead of queueing. */
+  dcOpen: boolean;
+  /** The remote roster. Identity, not just headcount — a codename belongs to
+   *  the peer that claimed it and must not outlive them. */
+  peerIds: string[];
   /** The CALL's video track — the same one the recorder encodes. */
   videoTrack: MediaStreamTrack | null;
   audioDeviceId: string | undefined;
@@ -106,7 +115,9 @@ function detailOf(err: unknown): string {
 }
 
 export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
-  const { enabled, bus, peerCount, videoTrack, audioDeviceId } = args;
+  const { enabled, bus, dcOpen, peerIds, videoTrack, audioDeviceId } = args;
+  const peerCount = peerIds.length;
+  const peerKey = peerIds.join("|");
 
   const [supported] = useState(detectSupport);
   const [username, setUsername] = useState<string | null>(null);
@@ -118,6 +129,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [startFault, setStartFault] = useState<Fault | null>(null);
   const [dismissedKey, setDismissedKey] = useState("");
   const [meter, setMeter] = useState({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
+  const [coordinatorGen, setCoordinatorGen] = useState(0);
 
   // Anything the coordinator callbacks or the 1 Hz tick need to read lives in
   // a ref: both run outside React's render pass and must never see a stale
@@ -265,6 +277,11 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         recordedAudioTrack: graph.recordedTrack,
         writers: { video: new PartWriter(dir, "video"), audio: new PartWriter(dir, "audio") },
         onFault: (cause, detail) => {
+          // A discarded recorder's writers keep running to completion, so a
+          // late disk error can land after the next take has already begun.
+          // Without this guard it would plant a ghost fault on a healthy tape
+          // — banner, klaxon, and an alarm sent to the partner.
+          if (stale()) return;
           recorderFaultRef.current = { cause, detail };
         },
       });
@@ -323,8 +340,16 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
 
     const camera = latest.current.videoTrack;
     const mic = graphRef.current?.rawTrack ?? null;
-    const partnerSettled =
-      partnerRolledRef.current || now - rollingSinceRef.current > PARTNER_GRACE_MS;
+
+    // The startup race, and nothing else: a quiet "not rolling yet" from a
+    // partner whose start chain is a few hundred ms behind ours. A beacon
+    // carrying a fault is never suppressed, so a real partner-side failure in
+    // the first second still alarms both hosts inside the budget.
+    const remote = remoteRef.current;
+    const withinGrace =
+      rolling && !partnerRolledRef.current && now - rollingSinceRef.current <= PARTNER_GRACE_MS;
+    const isStartupLag =
+      remote.beacon === null || (remote.beacon.rolling === false && remote.beacon.fault === null);
 
     const snapshot: WatchSnapshot = {
       now,
@@ -339,9 +364,9 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         : { readyState: "ended", muted: false },
       recorderFault: recorderFaultRef.current,
       remote:
-        rolling && !partnerSettled
+        withinGrace && isStartupLag
           ? { lastBeaconAt: now, lastBeacon: null }
-          : { lastBeaconAt: remoteRef.current.at, lastBeacon: remoteRef.current.beacon },
+          : { lastBeaconAt: remote.at, lastBeacon: remote.beacon },
     };
 
     const found = evaluate(snapshot);
@@ -429,7 +454,9 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       },
     });
     coordinatorRef.current = coordinator;
-    coordinator.hello();
+    // NOT announced here: at construction the data channel is usually still
+    // closed and the bus drops rather than queues. The effect below does it.
+    setCoordinatorGen((n) => n + 1);
     return () => {
       coordinator.dispose();
       coordinatorRef.current = null;
@@ -445,6 +472,41 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     // the handshake on the floor.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, supported, username, bus]);
+
+  // ---------------------------------------------------------------------
+  // The hello announcement. It rides the data channel opening rather than
+  // coordinator construction: the bus is a best-effort broadcast that skips
+  // a closed or absent link instead of queueing for it, so a hello sent when
+  // the coordinator is built (the instant the user enters the room, before
+  // any peer exists) is simply lost — leaving both sides nameless and the
+  // clock-offset estimate, which only starts once a hello has been RECEIVED,
+  // permanently unreachable.
+  //
+  // Re-announced on every open transition (reconnect, channel rebuild) and on
+  // every roster change (a late joiner's own announcement will not be
+  // auto-replied to, since our reply latch fired long ago — so we speak
+  // first instead).
+  // ---------------------------------------------------------------------
+  const announcedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!dcOpen) {
+      announcedKeyRef.current = null; // the next open re-announces
+      return;
+    }
+    const key = `${coordinatorGen}|${peerKey}`;
+    if (announcedKeyRef.current === key) return;
+    announcedKeyRef.current = key;
+    coordinatorRef.current?.announce();
+  }, [dcOpen, peerKey, coordinatorGen]);
+
+  // A codename identifies a peer, not a seat: when the roster changes it is
+  // retired until a live hello renews it. Mislabelling a new arrival with the
+  // departed agent's codename is worse than falling back to the positional
+  // label. A channel blip is NOT churn — the same peer is still on the line,
+  // so the claim stands.
+  useEffect(() => {
+    setPartnerCodename(null);
+  }, [peerKey]);
 
   // ---------------------------------------------------------------------
   // Panel derivation. Take-in-progress states outrank the readiness gates:

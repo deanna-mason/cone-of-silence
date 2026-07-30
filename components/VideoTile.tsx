@@ -87,9 +87,7 @@ export default function VideoTile({
           playsInline
           className={`h-full w-full ${fullFrame ? "object-contain" : "object-cover"} ${
             mirrored ? "-scale-x-100" : ""
-          } ${
-            covered ? "invisible" : ""
-          }`}
+          } ${covered ? "invisible" : ""}`}
         />
       )}
       {covered && (
