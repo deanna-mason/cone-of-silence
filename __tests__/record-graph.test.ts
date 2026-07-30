@@ -8,13 +8,20 @@ function fakes(settings: Partial<MediaTrackSettings> = {}) {
   };
   const destTrack = { id: "dest" };
   const ctxOpts: AudioContextOptions[] = [];
+  // Every gain node scheduleToneMark() creates is captured here so a test can
+  // inspect exactly which nodes each beep's gain was connected to.
+  const gains: { gain: { setValueAtTime: ReturnType<typeof vi.fn>; linearRampToValueAtTime: ReturnType<typeof vi.fn> }; connect: ReturnType<typeof vi.fn> }[] = [];
   const ctx = {
     close: vi.fn(),
     currentTime: 1,
     destination: {},
     createMediaStreamSource: vi.fn(() => ({ connect: vi.fn() })),
     createMediaStreamDestination: vi.fn(() => ({ stream: { getAudioTracks: () => [destTrack] } })),
-    createGain: vi.fn(() => ({ gain: { setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn() }, connect: vi.fn() })),
+    createGain: vi.fn(() => {
+      const g = { gain: { setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn() }, connect: vi.fn() };
+      gains.push(g);
+      return g;
+    }),
     createOscillator: vi.fn(() => ({ frequency: {}, connect: vi.fn(), start: vi.fn(), stop: vi.fn() })),
   };
   const stream = { getAudioTracks: () => [rawTrack] } as unknown as MediaStream;
@@ -23,7 +30,7 @@ function fakes(settings: Partial<MediaTrackSettings> = {}) {
     getUserMedia: gum,
     AudioContextCtor: vi.fn(function (this: unknown, o?: AudioContextOptions) { ctxOpts.push(o!); return ctx; }) as never,
   };
-  return { deps, gum, rawTrack, destTrack, ctx, ctxOpts, stream };
+  return { deps, gum, rawTrack, destTrack, ctx, ctxOpts, stream, gains };
 }
 
 describe("record graph", () => {
@@ -52,5 +59,32 @@ describe("record graph", () => {
     graph.close();
     expect(rawTrack.stop).toHaveBeenCalled();
     expect(ctx.close).toHaveBeenCalled();
+  });
+
+  it("playMark() routes the tone into BOTH the recorded destination and speakers, ~50ms out", async () => {
+    const { deps, ctx, gains } = fakes();
+    const graph = await buildRecordGraph(undefined, deps);
+    const destNode = ctx.createMediaStreamDestination.mock.results[0]!.value;
+
+    const before = Date.now();
+    const startedAt = graph.playMark();
+    const after = Date.now();
+
+    // Regression guard: every tone-beep gain must fan out to the recorded
+    // destination AND ctx.destination — dropping either connect() call would
+    // silently pass every other test in this file.
+    expect(gains.length).toBeGreaterThan(0);
+    for (const gain of gains) {
+      expect(gain.connect).toHaveBeenCalledWith(destNode);
+      expect(gain.connect).toHaveBeenCalledWith(ctx.destination);
+    }
+
+    // Scheduled ~50ms (MARK_LEAD_S) out from ctx.currentTime, on the ctx clock.
+    const scheduledStart = gains[0]!.gain.setValueAtTime.mock.calls[0]![1];
+    expect(scheduledStart).toBeCloseTo(ctx.currentTime + 0.05, 5);
+
+    // Returned wall-clock ms is Date.now() + ~50ms, within a small tolerance.
+    expect(startedAt).toBeGreaterThanOrEqual(before + 45);
+    expect(startedAt).toBeLessThanOrEqual(after + 60);
   });
 });
