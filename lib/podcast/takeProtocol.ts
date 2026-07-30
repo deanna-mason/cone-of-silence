@@ -234,8 +234,22 @@ export class TakeCoordinator {
     }
   }
 
-  private scheduleRoll(takeId: string, startLocalMs: number): void {
+  /**
+   * The one place a take slot is claimed — invariant: claiming a slot
+   * always resets `startFired`. propose() and onRoll() both claim a slot
+   * (a fresh takeId becomes `activeTakeId`) synchronously, before any wire
+   * round trip completes; if `startFired` were left stale from a
+   * just-finished previous take, a requestStop() landing in that pre-ack
+   * window would read the OLD take's "already started" state and run the
+   * normal stop path (onStopMark/onStopRecorders) for a take whose
+   * recorders never actually started.
+   */
+  private claimTakeSlot(takeId: string): void {
+    this.activeTakeId = takeId;
     this.startFired = false;
+  }
+
+  private scheduleRoll(takeId: string, startLocalMs: number): void {
     const scheduledAt = this.now();
     let ticksLeft = Math.floor((startLocalMs - scheduledAt) / 1000);
     while (ticksLeft > 0) {
@@ -267,7 +281,7 @@ export class TakeCoordinator {
       if (!this.pendingProposal || msg.takeId >= this.pendingProposal.takeId) return;
       this.pendingProposal = null;
     }
-    this.activeTakeId = msg.takeId;
+    this.claimTakeSlot(msg.takeId);
     this.send({ t: "pod/roll-ack", takeId: msg.takeId });
     this.scheduleRoll(msg.takeId, this.toLocal(msg.startAtMs));
   }
@@ -327,7 +341,7 @@ export class TakeCoordinator {
     if (this.activeTakeId !== null) return this.activeTakeId;
     const startAtMs = this.now() + COUNTDOWN_MS;
     const takeId = takeIdFor(this.now());
-    this.activeTakeId = takeId;
+    this.claimTakeSlot(takeId);
     this.pendingProposal = { takeId, startAtMs };
     this.send({ t: "pod/roll", takeId, startAtMs });
     return takeId;

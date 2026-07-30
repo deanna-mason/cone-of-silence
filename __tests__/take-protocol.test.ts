@@ -369,6 +369,59 @@ describe("stop-before-start aborts the take", () => {
   });
 });
 
+describe("stale startFired does not leak across takes", () => {
+  it("propose() resets startFired at slot-claim, so a requestStop() before the next take's ack aborts instead of re-running the stop path", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA, log: logA } = makeCb();
+    const { cb: cbB, log: logB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    // Take 1 completes normally, all the way through onStopRecorders — this
+    // is what leaves startFired === true on both sides afterward.
+    const takeId1 = a.propose();
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // past start and mark
+    a.requestStop();
+    vi.advanceTimersByTime(1_000 + MARK_TOTAL_MS + 250 + 100);
+
+    expect(cbA.onStopRecorders).toHaveBeenCalledWith(takeId1);
+    expect(cbB.onStopRecorders).toHaveBeenCalledWith(takeId1);
+
+    // Take 2: propose over a slow ack round trip, then stop BEFORE the ack
+    // can possibly land (called synchronously, zero time advanced).
+    pair.latency = [300, 300];
+    const takeId2 = a.propose();
+    expect(takeId2).not.toBe(takeId1);
+    a.requestStop();
+
+    // Advance well past every deadline take 2's roll phase would have used,
+    // and past the slow 300ms-each-way delivery too.
+    vi.advanceTimersByTime(COUNTDOWN_MS + 1_000 + MARK_TOTAL_MS + 1_000);
+
+    // Aborted, not stopped — take 2's recorders never started.
+    expect(cbA.onAborted).toHaveBeenCalledWith(takeId2);
+    expect(cbB.onAborted).toHaveBeenCalledWith(takeId2);
+    // Only take 1's single stop fired — no second onStopMark/onStopRecorders
+    // for take 2 (the stale-flag bug would have re-run the stop path here).
+    expect(cbA.onStopMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onStopMark).toHaveBeenCalledTimes(1);
+    expect(cbA.onStopRecorders).toHaveBeenCalledTimes(1);
+    expect(cbB.onStopRecorders).toHaveBeenCalledTimes(1);
+    // No roll timers for take 2 fired on either side.
+    expect(logA.filter((e) => e.name === "onStartRecorders").map((e) => e.arg)).toEqual([takeId1]);
+    expect(logB.filter((e) => e.name === "onStartRecorders").map((e) => e.arg)).toEqual([takeId1]);
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onMark).toHaveBeenCalledTimes(1);
+
+    a.dispose();
+    b.dispose();
+  });
+});
+
 describe("simultaneous propose", () => {
   it("resolves a mutual propose race via a deterministic takeId tie-break — no permanent deadlock", () => {
     const pair = new FakeBusPair();
