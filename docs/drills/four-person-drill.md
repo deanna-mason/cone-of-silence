@@ -4,6 +4,13 @@ Re-run before the final demo. Needs 4 people / 4 devices / 4 networks, at
 least one phone on cellular. One person is the operator (has ssh to the
 droplet).
 
+**The operator must be one of the four, in the browser holding creation
+clearance** (`cos-create-token` in localStorage — the browser that opened the
+`#create=` link). Step 4's recovery works by that browser re-creating the
+room; with the creator outside the call, restart strands everyone (learned
+2026-07-30, see `2026-07-30-drill-report.md`). A fifth volunteer is the
+at-capacity test, not a seat.
+
 | # | Step | Expect |
 |---|------|--------|
 | 1 | All four join one invite | Everyone sees/hears everyone (2×2 grid, no scrolling on phones) |
