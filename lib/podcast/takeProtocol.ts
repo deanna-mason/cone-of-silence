@@ -27,9 +27,32 @@ export interface TakeCallbacks {
   onBeacon(b: Beacon): void; // partner's 1 Hz state
 }
 
+// TakeProtocolDeps gains:
+//   canAcceptRoll?: () => boolean;   // default () => true — the hook wires "no transfer in flight" (decision 8)
+// TakeCoordinator internals gain:
+//   private partnerId: string | null = null;
+// Pinning rule (comment this in the code):
+//   - pod/hello: latest hello WINS while no take/proposal is active (re-pin +
+//     codename update — heals a partner swap); while a take or unacked
+//     proposal is active the partner is PINNED and a hello from any other
+//     peerId is IGNORED (the ledgered third-host codename-clobber rider).
+//   - pod/roll with partnerId === null pins the proposer (roll can only come
+//     from a host who heard our hello).
+//   - ping/pong/roll/roll-ack/stop/beacon from a peerId !== partnerId are dropped.
+//   - Sends: hello stays sendAll (discovery); EVERYTHING else goes
+//     bus.sendTo(partnerId, ...) — with four seats, beacons and roll traffic
+//     must never spray the whole room.
+//   - canAcceptRoll() === false → an inbound pod/roll is ignored entirely (no
+//     ack, no slot claim); the proposer's own abort-if-unacked (5A FIX-2)
+//     unwinds their countdown.
 export interface TakeProtocolDeps {
   /** Defaults to Date.now; injectable so tests can simulate a skewed clock. */
   now?: () => number;
+  /** Gates acceptance of an inbound pod/roll — default () => true. The hook
+   *  wires this to "no transfer in flight" (decision 8): a false return is a
+   *  deliberate quiet ignore (no ack, no slot claim, no fault); the
+   *  proposer's own abort-if-unacked (5A FIX-2) unwinds their countdown. */
+  canAcceptRoll?: () => boolean;
 }
 
 type HelloMsg = { t: "pod/hello"; codename: string };
@@ -84,9 +107,14 @@ export class TakeCoordinator {
   private readonly codename: string;
   private readonly cb: TakeCallbacks;
   private readonly nowFn: () => number;
+  private readonly canAcceptRollFn: () => boolean;
   private readonly unsubscribe: () => void;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private disposed = false;
+
+  // The pinned partner's peerId — see the pinning-rule comment above
+  // TakeProtocolDeps. null until the first hello or roll is heard.
+  private partnerId: string | null = null;
 
   // Hello handshake.
   private helloSent = false;
@@ -117,7 +145,8 @@ export class TakeCoordinator {
     this.codename = codename;
     this.cb = cb;
     this.nowFn = deps.now ?? Date.now;
-    this.unsubscribe = bus.onMessage((_peerId, text) => this.onMessage(text));
+    this.canAcceptRollFn = deps.canAcceptRoll ?? (() => true);
+    this.unsubscribe = bus.onMessage((peerId, text) => this.onMessage(peerId, text));
   }
 
   private now(): number {
@@ -126,6 +155,15 @@ export class TakeCoordinator {
 
   private send(msg: WireMsg): void {
     this.bus.sendAll(JSON.stringify(msg));
+  }
+
+  /** Targeted counterpart to send() — every non-hello message goes only to
+   *  the pinned partner, never the whole room (see the pinning-rule comment
+   *  above TakeProtocolDeps). A no-op while no partner is pinned yet — there
+   *  is nothing to target. */
+  private sendToPartner(msg: WireMsg): void {
+    if (this.partnerId === null) return;
+    this.bus.sendTo(this.partnerId, JSON.stringify(msg));
   }
 
   private schedule(delayMs: number, fn: () => void, bucket?: Set<ReturnType<typeof setTimeout>>): void {
@@ -175,7 +213,7 @@ export class TakeCoordinator {
     this.pingsSent += 1;
     const sentAt = this.now();
     this.pendingPingSentAt = sentAt;
-    this.send({ t: "pod/ping", sentAt });
+    this.sendToPartner({ t: "pod/ping", sentAt });
   }
 
   /**
@@ -196,26 +234,25 @@ export class TakeCoordinator {
     this.offsetMs = latestGuess - bestRtt / 2;
   }
 
-  private onMessage(text: string): void {
+  private onMessage(peerId: string, text: string): void {
     const msg = parseWireMsg(text);
     if (!msg) return;
     switch (msg.t) {
       case "pod/hello":
-        this.helloReceived = true;
-        this.cb.onPartnerCodename(msg.codename);
-        this.ensureHelloSent();
-        this.maybeStartPinging();
+        this.onHello(peerId, msg);
         break;
       case "pod/ping":
+        if (peerId !== this.partnerId) return; // not our pinned partner — drop
         // Receiver's own receive time vs. the ping's embedded send time:
         // this is the partner's clock offset plus one-way transit delay.
         // The RTT/2 correction (once our own ping round trip is known)
         // happens in updateOffsetEstimate().
         this.peerGuesses.push(this.now() - msg.sentAt);
         this.updateOffsetEstimate();
-        this.send({ t: "pod/pong", sentAt: msg.sentAt });
+        this.sendToPartner({ t: "pod/pong", sentAt: msg.sentAt });
         break;
       case "pod/pong":
+        if (peerId !== this.partnerId) return; // not our pinned partner — drop
         if (this.pendingPingSentAt !== null) {
           this.myRtts.push(this.now() - this.pendingPingSentAt);
           this.pendingPingSentAt = null;
@@ -224,20 +261,59 @@ export class TakeCoordinator {
         this.sendPing();
         break;
       case "pod/roll":
-        this.onRoll(msg);
+        this.onRollReceived(peerId, msg);
         break;
       case "pod/roll-ack":
+        if (peerId !== this.partnerId) return; // not our pinned partner — drop
         this.onRollAck(msg);
         break;
       case "pod/stop":
+        if (peerId !== this.partnerId) return; // not our pinned partner — drop
         this.onStop(msg);
         break;
       case "pod/beacon": {
+        if (peerId !== this.partnerId) return; // not our pinned partner — drop
         const { rolling, bytes, camOk, micOk, fault } = msg;
         this.cb.onBeacon({ rolling, bytes, camOk, micOk, fault });
         break;
       }
     }
+  }
+
+  /**
+   * pod/hello pinning (see the pinning-rule comment above TakeProtocolDeps):
+   * latest hello wins while idle (re-pin + codename update, heals a partner
+   * swap); while a take or unacked proposal is active (`activeTakeId !==
+   * null` — propose() and onRoll() both claim it synchronously) the partner
+   * is PINNED and a hello from any other peerId is ignored. This is the
+   * ledgered third-host codename-clobber rider.
+   */
+  private onHello(peerId: string, msg: HelloMsg): void {
+    if (this.partnerId !== null && peerId !== this.partnerId && this.activeTakeId !== null) {
+      return; // pinned mid-take/proposal — a foreign hello cannot clobber partnerCodename
+    }
+    this.partnerId = peerId;
+    this.helloReceived = true;
+    this.cb.onPartnerCodename(msg.codename);
+    this.ensureHelloSent();
+    this.maybeStartPinging();
+  }
+
+  /**
+   * pod/roll pinning: a peerId that doesn't match an already-pinned partner
+   * is dropped outright (roll can only come from the host who heard our
+   * hello); with no partner pinned yet, the roll itself pins the proposer.
+   * canAcceptRoll() === false is a deliberate quiet ignore ahead of either
+   * check — no ack, no slot claim, no fault; the proposer's own
+   * abort-if-unacked (5A FIX-2, in propose()) unwinds their countdown. The
+   * mutation-pinned onRoll() below (mutual-propose tie-break, claimTakeSlot)
+   * is untouched past this gate.
+   */
+  private onRollReceived(peerId: string, msg: RollMsg): void {
+    if (this.partnerId !== null && peerId !== this.partnerId) return; // not our pinned partner
+    if (!this.canAcceptRollFn()) return; // e.g. a transfer in flight — quiet ignore
+    if (this.partnerId === null) this.partnerId = peerId; // roll pins the proposer
+    this.onRoll(msg);
   }
 
   /**
@@ -288,7 +364,7 @@ export class TakeCoordinator {
       this.pendingProposal = null;
     }
     this.claimTakeSlot(msg.takeId);
-    this.send({ t: "pod/roll-ack", takeId: msg.takeId });
+    this.sendToPartner({ t: "pod/roll-ack", takeId: msg.takeId });
     this.scheduleRoll(msg.takeId, this.toLocal(msg.startAtMs));
   }
 
@@ -383,7 +459,7 @@ export class TakeCoordinator {
     const takeId = takeIdFor(this.now());
     this.claimTakeSlot(takeId);
     this.pendingProposal = { takeId, startAtMs };
-    this.send({ t: "pod/roll", takeId, startAtMs });
+    this.sendToPartner({ t: "pod/roll", takeId, startAtMs });
     this.schedule(
       startAtMs - this.now(),
       () => {
@@ -403,7 +479,7 @@ export class TakeCoordinator {
     const takeId = this.activeTakeId;
     const markAtMs = this.now() + STOP_LEAD_MS;
     // Always send, even mid-countdown — the partner needs to abort/stop too.
-    this.send({ t: "pod/stop", takeId, markAtMs });
+    this.sendToPartner({ t: "pod/stop", takeId, markAtMs });
     if (!this.startFired) {
       this.abortTake(takeId);
       return;
@@ -412,7 +488,7 @@ export class TakeCoordinator {
   }
 
   sendBeacon(b: Beacon): void {
-    this.send({ t: "pod/beacon", ...b });
+    this.sendToPartner({ t: "pod/beacon", ...b });
   }
 
   dispose(): void {

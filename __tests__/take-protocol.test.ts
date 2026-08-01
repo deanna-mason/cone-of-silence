@@ -12,32 +12,68 @@ import { MARK_TOTAL_MS } from "@/lib/podcast/toneMark";
 // ---------------------------------------------------------------------------
 // Fake loopback bus pair: two CallBus instances wired to each other, with a
 // controllable one-shot delivery latency per direction (default 0, i.e. next
-// tick). Every send is logged so tests can assert on message counts/types
-// without depending on TakeCoordinator internals. injectRaw() delivers a
-// hand-built wire message straight to one side's listeners, no coordinator
-// and no delay — used to simulate a foreign/duplicate sender.
+// tick). Every send is logged (including the sendTo target peerId, if any)
+// so tests can assert on message counts/types/targeting without depending on
+// TakeCoordinator internals. Each side has a fixed peerId (Task 9: the
+// coordinator now scopes by peerId, so the fake must actually carry one per
+// side instead of a shared hardcoded "peer" string). A third peer can be
+// registered into the room (registerThirdPeer) to prove a sendTo() never
+// sprays past its target, and injectRaw() delivers a hand-built wire message
+// straight to one side's listeners — tagged with an arbitrary sender peerId
+// — no coordinator and no delay, used to simulate a foreign/third-party
+// sender.
 // ---------------------------------------------------------------------------
 class FakeBusPair {
+  readonly peerIds: [string, string];
   private listeners: [Set<(peerId: string, text: string) => void>, Set<(peerId: string, text: string) => void>] = [
     new Set(),
     new Set(),
   ];
+  private extraPeers = new Map<string, Set<(peerId: string, text: string) => void>>();
   latency: [number, number] = [0, 0]; // [side0->side1, side1->side0]
-  sentLog: { from: 0 | 1; text: string }[] = [];
+  sentLog: { from: 0 | 1; text: string; toPeerId?: string }[] = [];
 
-  private deliver(from: 0 | 1, text: string): void {
-    this.sentLog.push({ from, text });
+  constructor(peerIds: [string, string] = ["peer0", "peer1"]) {
+    this.peerIds = peerIds;
+  }
+
+  private listenersFor(peerId: string): Set<(peerId: string, text: string) => void> | undefined {
+    if (peerId === this.peerIds[0]) return this.listeners[0];
+    if (peerId === this.peerIds[1]) return this.listeners[1];
+    return this.extraPeers.get(peerId);
+  }
+
+  private deliver(from: 0 | 1, text: string, toPeerId?: string): void {
+    this.sentLog.push({ from, text, toPeerId });
+    const fromPeerId = this.peerIds[from];
+    const delayMs = this.latency[from];
+    if (toPeerId !== undefined) {
+      // sendTo: only the exact target peerId's listeners, if anyone is
+      // registered under it — never a spray.
+      const targetSet = this.listenersFor(toPeerId);
+      if (!targetSet) return;
+      setTimeout(() => {
+        for (const fn of targetSet) fn(fromPeerId, text);
+      }, delayMs);
+      return;
+    }
+    // sendAll: the other pair side plus every registered third peer.
     const to = from === 0 ? 1 : 0;
     setTimeout(() => {
-      for (const fn of this.listeners[to]) fn("peer", text);
-    }, this.latency[from]);
+      for (const fn of this.listeners[to]) fn(fromPeerId, text);
+    }, delayMs);
+    for (const set of this.extraPeers.values()) {
+      setTimeout(() => {
+        for (const fn of set) fn(fromPeerId, text);
+      }, delayMs);
+    }
   }
 
   bus(idx: 0 | 1): CallBus {
     return {
       sendAll: (text: string) => this.deliver(idx, text),
-      sendTo: (_peerId: string, text: string) => {
-        this.deliver(idx, text);
+      sendTo: (peerId: string, text: string) => {
+        this.deliver(idx, text, peerId);
         return true;
       },
       onMessage: (fn: (peerId: string, text: string) => void) => {
@@ -56,8 +92,20 @@ class FakeBusPair {
     };
   }
 
-  injectRaw(to: 0 | 1, text: string): void {
-    for (const fn of this.listeners[to]) fn("peer", text);
+  /** Registers a third listener in the room under its own peerId — lets a
+   *  test assert that a sendTo(partnerId, …) targeted send never reaches a
+   *  peer who isn't the pinned partner. Returns the received-text log. */
+  registerThirdPeer(peerId: string): string[] {
+    const received: string[] = [];
+    this.extraPeers.set(peerId, new Set([(_from: string, text: string) => received.push(text)]));
+    return received;
+  }
+
+  /** Delivers a hand-built wire message straight to one side's listeners, no
+   *  coordinator and no delay, tagged with an arbitrary sender peerId — used
+   *  to simulate a foreign/third-party sender. */
+  injectRaw(to: 0 | 1, text: string, fromPeerId = "third-party"): void {
+    for (const fn of this.listeners[to]) fn(fromPeerId, text);
   }
 
   countSent(from: 0 | 1, t: string): number {
@@ -471,6 +519,12 @@ describe("beacons", () => {
     const { cb: cbB } = makeCb();
     const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
     const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    // Task 9: beacons are sendTo(partnerId, …)-targeted, so the partner must
+    // be pinned via hello first — every other describe block in this file
+    // already does this before touching the coordinator.
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
 
     const beaconAtoB: Beacon = { rolling: true, bytes: 1234, camOk: true, micOk: false, fault: null };
     const beaconBtoA: Beacon = { rolling: false, bytes: 0, camOk: false, micOk: false, fault: "camera-lost" };
@@ -659,8 +713,14 @@ describe("one take in flight", () => {
     vi.advanceTimersByTime(20); // roll lands on B, ack lands back on A
     expect(pair.countSent(1, "pod/roll-ack")).toBe(1);
 
-    // Foreign/duplicate second roll targeting B while its take is active.
-    pair.injectRaw(1, JSON.stringify({ t: "pod/roll", takeId: "take-bogus-0000", startAtMs: Date.now() + 5_000 }));
+    // Duplicate second roll targeting B while its take is already active —
+    // from the pinned partner (A), so this exercises the pre-existing
+    // already-active guard in onRoll(), not the Task 9 peerId filter.
+    pair.injectRaw(
+      1,
+      JSON.stringify({ t: "pod/roll", takeId: "take-bogus-0000", startAtMs: Date.now() + 5_000 }),
+      pair.peerIds[0],
+    );
 
     expect(pair.countSent(1, "pod/roll-ack")).toBe(1); // no second ack
 
@@ -668,6 +728,211 @@ describe("one take in flight", () => {
 
     expect(cbB.onMark).toHaveBeenCalledTimes(1);
     expect(logB.filter((e) => e.name === "onStartRecorders").map((e) => e.arg)).toEqual([takeId]);
+
+    a.dispose();
+    b.dispose();
+  });
+});
+
+describe("peerId scoping (Task 9)", () => {
+  it("a third host joining mid-take can no longer clobber partnerCodename", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+    expect(cbA.onPartnerCodename).toHaveBeenCalledWith("MONGOOSE");
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(20); // roll lands on B, ack lands back — A's take is active
+
+    // A third host's hello arrives mid-take — must not clobber the pinned partner.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(1); // still just the one, MONGOOSE
+
+    // A beacon from the third host is dropped too.
+    pair.injectRaw(
+      0,
+      JSON.stringify({ t: "pod/beacon", rolling: true, bytes: 1, camOk: true, micOk: true, fault: null }),
+      "p3",
+    );
+    expect(cbA.onBeacon).not.toHaveBeenCalled();
+
+    // And a stop from the third host is dropped — the real take is undisturbed.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/stop", takeId, markAtMs: Date.now() + 1_000 }), "p3");
+    expect(cbA.onAborted).not.toHaveBeenCalled();
+    expect(cbA.onStopMark).not.toHaveBeenCalled();
+
+    // The real take with p2 (MONGOOSE) completes normally, undisturbed.
+    vi.advanceTimersByTime(COUNTDOWN_MS + 200);
+    expect(cbA.onStartRecorders).toHaveBeenCalledWith(takeId);
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onStartRecorders).toHaveBeenCalledWith(takeId);
+    expect(cbB.onMark).toHaveBeenCalledTimes(1);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("idle re-pin: hello p2 then hello p3 with no take — codename follows p3, and a subsequent roll from p3 works", () => {
+    const pair = new FakeBusPair();
+    const { cb: cbA } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "MONGOOSE" }), "p2");
+    expect(cbA.onPartnerCodename).toHaveBeenNthCalledWith(1, "MONGOOSE");
+
+    // No take in progress — a hello from a DIFFERENT peerId re-pins rather
+    // than being ignored (that's only for a take/unacked proposal in flight).
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenNthCalledWith(2, "JACKAL");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2);
+
+    // A subsequent roll from p3 (the now-pinned partner) is accepted normally.
+    const startAtMs = Date.now() + COUNTDOWN_MS;
+    pair.injectRaw(0, JSON.stringify({ t: "pod/roll", takeId: "take-from-p3", startAtMs }), "p3");
+    expect(
+      pair.sentLog.some(
+        (e) => e.from === 0 && e.toPeerId === "p3" && (JSON.parse(e.text) as { t: string }).t === "pod/roll-ack",
+      ),
+    ).toBe(true);
+
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+    expect(cbA.onStartRecorders).toHaveBeenCalledWith("take-from-p3");
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+
+    a.dispose();
+  });
+
+  it("post-take heal: after a completed stop, hello from a new peerId re-pins", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+    expect(cbA.onPartnerCodename).toHaveBeenCalledWith("MONGOOSE");
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // rolling
+    a.requestStop();
+    vi.advanceTimersByTime(1_000 + MARK_TOTAL_MS + 250 + 100); // through the stop
+    expect(cbA.onStopRecorders).toHaveBeenCalledWith(takeId);
+
+    // activeTakeId is back to null now — a hello from a new peerId re-pins.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledWith("JACKAL");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("non-hello sends target sendTo(partnerId, …) — never reach a third registered peer", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [5, 5];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    const thirdPeerLog = pair.registerThirdPeer("p3");
+
+    a.hello();
+    b.hello();
+    vi.runAllTimers(); // hello both ways + the best-of-3 ping/pong rounds
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // roll + roll-ack + rolling
+
+    a.sendBeacon({ rolling: true, bytes: 10, camOk: true, micOk: true, fault: null });
+    vi.advanceTimersByTime(10);
+
+    expect(takeId).not.toBeNull();
+    expect(cbB.onBeacon).toHaveBeenCalledTimes(1); // the real partner got it
+    // hello is sendAll (discovery) — the third peer legitimately hears that.
+    // Everything else (ping/pong, roll, roll-ack, beacon) must not reach it.
+    const thirdPeerTypes = thirdPeerLog.map((text) => (JSON.parse(text) as { t: string }).t);
+    expect(thirdPeerTypes.every((t) => t === "pod/hello")).toBe(true);
+
+    // Every non-hello send this take produced was sendTo-targeted at the
+    // ACTUAL partner peerId (ping, roll, roll-ack, beacon) — never sendAll.
+    const nonHello = pair.sentLog.filter((e) => (JSON.parse(e.text) as { t: string }).t !== "pod/hello");
+    expect(nonHello.length).toBeGreaterThan(0);
+    for (const e of nonHello) {
+      expect(e.toPeerId).toBe(pair.peerIds[e.from === 0 ? 1 : 0]);
+    }
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("canAcceptRoll() === false ignores an inbound roll entirely — the proposer's own abort-if-unacked still fires onAborted at startAtMs", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB, { canAcceptRoll: () => false });
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(20); // the roll would have landed on B by now
+
+    expect(pair.countSent(1, "pod/roll-ack")).toBe(0); // ignored quietly — no ack
+    expect(cbB.onStartRecorders).not.toHaveBeenCalled(); // no slot claim on B
+
+    vi.advanceTimersByTime(COUNTDOWN_MS); // through A's own startAtMs deadline
+
+    // The shipped abort machinery (5A FIX-2), exercised end-to-end: no ack
+    // ever arrived, so A's own unwind fires right on schedule.
+    expect(cbA.onAborted).toHaveBeenCalledTimes(1);
+    expect(cbA.onAborted).toHaveBeenCalledWith(takeId);
+    expect(cbA.onStartRecorders).not.toHaveBeenCalled();
+    expect(cbA.onMark).not.toHaveBeenCalled();
+    // B never entered any take state at all — no fault, no abort, nothing.
+    expect(cbB.onAborted).not.toHaveBeenCalled();
+    expect(cbB.onMark).not.toHaveBeenCalled();
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("a roll from a third peer while the pinned partner's take is active is ignored — no ack, existing take undisturbed", () => {
+    const pair = new FakeBusPair();
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = b.propose()!; // p2 (side1) proposes; A (side0) claims + acks normally
+    vi.advanceTimersByTime(20); // roll lands on A, A's ack lands back on B
+    const acksSoFar = pair.countSent(0, "pod/roll-ack");
+    expect(acksSoFar).toBe(1); // the one real ack, to B
+
+    // A foreign roll from an unpinned third peer, targeting A while A's take
+    // with B is already active.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/roll", takeId: "take-bogus-p3", startAtMs: Date.now() + 5_000 }), "p3");
+
+    expect(pair.countSent(0, "pod/roll-ack")).toBe(acksSoFar); // no ack for p3
+
+    vi.advanceTimersByTime(COUNTDOWN_MS + 200);
+
+    expect(cbA.onMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onMark).toHaveBeenCalledTimes(1);
+    expect(cbA.onStartRecorders).toHaveBeenCalledWith(takeId);
+    expect(cbB.onStartRecorders).toHaveBeenCalledWith(takeId);
 
     a.dispose();
     b.dispose();
