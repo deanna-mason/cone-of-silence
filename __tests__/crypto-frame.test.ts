@@ -136,4 +136,51 @@ describe("encryptFrame / decryptFrame", () => {
       await expect(decryptFrame(key, bad as ArrayBuffer)).resolves.toBeNull();
     }
   });
+
+  it("multi-frame single-IvState round-trip: two frames off ONE IvState decrypt independently, IVs differ at bytes 4-11", async () => {
+    const key = await testKey();
+    const iv = new IvState();
+    const p1 = new TextEncoder().encode("first frame");
+    const p2 = new TextEncoder().encode("second frame");
+    const w1 = await encryptFrame(key, iv, p1.buffer);
+    const w2 = await encryptFrame(key, iv, p2.buffer);
+    const counter1 = new Uint8Array(w1, 4, 8);
+    const counter2 = new Uint8Array(w2, 4, 8);
+    expect(Array.from(counter1)).not.toEqual(Array.from(counter2));
+    const out1 = await decryptFrame(key, w1);
+    const out2 = await decryptFrame(key, w2);
+    expect(out1).not.toBeNull();
+    expect(out2).not.toBeNull();
+    expect(Array.from(new Uint8Array(out1 as ArrayBuffer))).toEqual(Array.from(p1));
+    expect(Array.from(new Uint8Array(out2 as ArrayBuffer))).toEqual(Array.from(p2));
+  });
+
+  it("concurrency lock: 12 concurrent encryptFrame calls on one IvState produce 12 distinct IVs", async () => {
+    // Pins that IvState.next() is called synchronously at the top of
+    // encryptFrame, before the first await — a future refactor that moved
+    // it after an await could let concurrent calls race and hand out the
+    // same nonce twice.
+    const key = await testKey();
+    const iv = new IvState();
+    const wires = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        encryptFrame(key, iv, new TextEncoder().encode(`frame ${i}`).buffer),
+      ),
+    );
+    const ivKeys = wires.map((w) => Array.from(new Uint8Array(w, 0, 12)).join(","));
+    expect(new Set(ivKeys).size).toBe(12);
+  });
+
+  it("overflow bound lock: counter at 2^64-1 yields the last legal IV, then next() throws RangeError", () => {
+    // Private-field test idiom (precedent: __tests__/episode-store.test.ts:234)
+    // — reaches past IvState's public surface to pin the exact inclusive
+    // bound and bigint counter type without exposing a test-only setter on
+    // the production class.
+    const iv = new IvState();
+    const MAX_COUNTER = (BigInt(1) << BigInt(64)) - BigInt(1);
+    (iv as unknown as { counter: bigint }).counter = MAX_COUNTER;
+    const last = iv.next();
+    expect(Array.from(last.slice(4))).toEqual([255, 255, 255, 255, 255, 255, 255, 255]);
+    expect(() => iv.next()).toThrow(RangeError);
+  });
 });
