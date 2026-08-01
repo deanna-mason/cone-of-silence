@@ -24,7 +24,15 @@ export interface EpisodeManifest {
   episodeId: string;
   receivedFrom: string | null; // partner codename — zero PII
   completedAt: string; // ISO 8601
-  local: { video: SidecarEntry[]; audio: SidecarEntry[] } | null; // null: this host never recorded this take
+  /** null ONLY when NEITHER sidecar exists — this host recorded no local
+   *  stream at all for this take. Otherwise both keys are present, and an
+   *  empty array for one of them is a real, distinct outcome: that stream
+   *  produced no tape (e.g. one encoder died mid-take while the other kept
+   *  recording — 5A's Promise.allSettled finish() still lands the healthy
+   *  stream's sidecar). [] is 5C's loud signal to re-verify against; it
+   *  must never be collapsed into `local: null`, which would look like a
+   *  host that never recorded and hide real tape sitting on disk. */
+  local: { video: SidecarEntry[]; audio: SidecarEntry[] } | null;
   remote: { video: SidecarEntry[]; audio: SidecarEntry[] }; // names resolve under remote/
 }
 
@@ -152,18 +160,39 @@ export async function openIncomingPart(takeId: string, entry: SidecarEntry): Pro
   };
 }
 
+/** True only for a genuine "does not exist" failure (a real
+ *  FileSystemDirectoryHandle.getFileHandle() without create:true rejects
+ *  with a DOMException named "NotFoundError" for a missing entry). Any
+ *  other failure — permission, I/O, a malformed sidecar — must NOT be
+ *  mistaken for absence: writeManifest needs to fault loudly on those
+ *  instead of silently writing a manifest that lies about disk. */
+function isNotFound(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "NotFoundError";
+}
+
+const SIDECAR_ABSENT = Symbol("sidecar-absent");
+
+/** Reads one local sidecar's parts. Returns SIDECAR_ABSENT when the sidecar
+ *  genuinely doesn't exist. Any other failure (unparseable JSON, an I/O
+ *  error, a malformed shape) PROPAGATES — writeManifest must reject rather
+ *  than paper over it. */
 async function readLocalSidecarParts(
   dir: FileSystemDirectoryHandle,
   base: "audio" | "video",
-): Promise<SidecarEntry[] | null> {
+): Promise<SidecarEntry[] | typeof SIDECAR_ABSENT> {
+  let fh: FileSystemFileHandle;
   try {
-    const fh = await dir.getFileHandle(`${base}.sidecar.json`);
-    const text = await (await fh.getFile()).text();
-    const parsed = JSON.parse(text) as { parts: SidecarEntry[] };
-    return parsed.parts;
-  } catch {
-    return null;
+    fh = await dir.getFileHandle(`${base}.sidecar.json`);
+  } catch (err) {
+    if (isNotFound(err)) return SIDECAR_ABSENT;
+    throw err;
   }
+  const text = await (await fh.getFile()).text();
+  const parsed = JSON.parse(text) as { parts?: unknown };
+  if (!Array.isArray(parsed.parts)) {
+    throw new Error(`malformed sidecar: ${base}.sidecar.json`);
+  }
+  return parsed.parts as SidecarEntry[];
 }
 
 /** Written LAST — the 5C trigger contract. Reads the local sidecars off disk
@@ -180,11 +209,18 @@ export async function writeManifest(
   const now = deps?.now ?? Date.now;
   const dir = await openTakeDir(takeId);
 
-  // Both-or-nothing: partial local sidecars would mean a torn recording,
-  // not "this host never recorded" — the spec's stated null case.
+  // null ONLY when NEITHER sidecar exists. If at least one does, report
+  // per-stream truth — an absent stream becomes [] (real signal: that
+  // stream produced no tape), never silently folded into `local: null`.
   const audio = await readLocalSidecarParts(dir, "audio");
   const video = await readLocalSidecarParts(dir, "video");
-  const local = audio && video ? { video, audio } : null;
+  const local =
+    audio === SIDECAR_ABSENT && video === SIDECAR_ABSENT
+      ? null
+      : {
+          audio: audio === SIDECAR_ABSENT ? [] : audio,
+          video: video === SIDECAR_ABSENT ? [] : video,
+        };
 
   const manifest: EpisodeManifest = {
     version: 1,

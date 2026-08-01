@@ -125,7 +125,7 @@ class FakeDirHandle {
     if (this.failOpenFor.has(name)) throw new Error("disk full opening part");
     let fh = this.files.get(name);
     if (!fh) {
-      if (!opts?.create) throw new Error(`not found: ${name}`);
+      if (!opts?.create) throw notFoundError(name);
       this.ops.push(`create:${name}`);
       fh = new FakeFileHandle(name, () => this.failWriteFor.has(name), this.gateFor.get(name), this);
       this.files.set(name, fh);
@@ -136,7 +136,7 @@ class FakeDirHandle {
   async getDirectoryHandle(name: string, opts?: { create?: boolean }): Promise<FakeDirHandle> {
     let d = this.dirs.get(name);
     if (!d) {
-      if (!opts?.create) throw new Error(`not found: ${name}`);
+      if (!opts?.create) throw notFoundError(name);
       d = new FakeDirHandle();
       this.dirs.set(name, d);
     }
@@ -144,12 +144,20 @@ class FakeDirHandle {
   }
 
   async removeEntry(name: string): Promise<void> {
-    if (!this.files.delete(name)) throw new Error(`not found: ${name}`);
+    if (!this.files.delete(name)) throw notFoundError(name);
   }
 
   async *keys(): AsyncGenerator<string> {
     for (const name of this.files.keys()) yield name;
   }
+}
+
+// Mirrors the real File System Access API: a missing-entry lookup throws a
+// DOMException named "NotFoundError" — episodeStore.ts's absence-detection
+// (vs. any OTHER failure, which must propagate) keys off `.name`, so the
+// fake must be faithful here, not just "any Error".
+function notFoundError(name: string): DOMException {
+  return new DOMException(`not found: ${name}`, "NotFoundError");
 }
 
 function toHex(buf: ArrayBuffer): string {

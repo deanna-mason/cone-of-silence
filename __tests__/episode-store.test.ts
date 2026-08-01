@@ -117,7 +117,7 @@ class FakeDirHandle {
   async getFileHandle(name: string, opts?: { create?: boolean }): Promise<FakeFileHandle> {
     let fh = this.files.get(name);
     if (!fh) {
-      if (!opts?.create) throw new Error(`not found: ${name}`);
+      if (!opts?.create) throw notFoundError(name);
       this.ops.push(`create:${name}`);
       fh = new FakeFileHandle(name, () => this.failWriteFor.has(name), this);
       this.files.set(name, fh);
@@ -128,7 +128,7 @@ class FakeDirHandle {
   async getDirectoryHandle(name: string, opts?: { create?: boolean }): Promise<FakeDirHandle> {
     let d = this.dirs.get(name);
     if (!d) {
-      if (!opts?.create) throw new Error(`not found: ${name}`);
+      if (!opts?.create) throw notFoundError(name);
       d = new FakeDirHandle();
       this.dirs.set(name, d);
     }
@@ -136,12 +136,19 @@ class FakeDirHandle {
   }
 
   async removeEntry(name: string): Promise<void> {
-    if (!this.files.delete(name)) throw new Error(`not found: ${name}`);
+    if (!this.files.delete(name)) throw notFoundError(name);
   }
 
   async *keys(): AsyncGenerator<string> {
     for (const name of this.files.keys()) yield name;
   }
+}
+
+// Mirrors the real File System Access API: a missing-entry lookup throws a
+// DOMException named "NotFoundError" — episodeStore.ts's absence-detection
+// (vs. any OTHER failure, which must propagate) keys off `.name`.
+function notFoundError(name: string): DOMException {
+  return new DOMException(`not found: ${name}`, "NotFoundError");
 }
 
 function toHex(buf: ArrayBuffer): string {
@@ -442,6 +449,55 @@ describe("episodeStore", () => {
       `create:${INCOMING_PREFIX}${MANIFEST_NAME}`,
       `move:${INCOMING_PREFIX}${MANIFEST_NAME}->${MANIFEST_NAME}`,
     ]);
+  });
+
+  // -- (g-i) one sidecar present (crashed-take: one encoder died, the other's
+  // finishWriter() still landed — 5A's Promise.allSettled contract) ---------
+  it("(g-i) exactly one local sidecar present -> local has that stream's entries verbatim, [] for the other", async () => {
+    const { dir, takeId } = await freshTakeDir();
+    const audioParts: SidecarEntry[] = [{ name: "audio.part000", size: 3, sha256: "aa" }];
+    seedJson(dir, "audio.sidecar.json", { base: "audio", parts: audioParts });
+    // video.sidecar.json never seeded — that encoder died before finish().
+
+    const remoteVideo: SidecarEntry[] = [{ name: "video.part000", size: 5, sha256: "cc" }];
+    const remoteAudio: SidecarEntry[] = [{ name: "audio.part000", size: 3, sha256: "dd" }];
+
+    await writeManifest(takeId, { video: remoteVideo, audio: remoteAudio }, null, { now: () => 1000 });
+
+    const parsed = JSON.parse(new TextDecoder().decode(dir.files.get(MANIFEST_NAME)!.committed));
+    expect(parsed.local).toEqual({ audio: audioParts, video: [] });
+  });
+
+  it("(g-i) exactly one local sidecar present, the OTHER stream missing -> local has [] for audio", async () => {
+    const { dir, takeId } = await freshTakeDir();
+    const videoParts: SidecarEntry[] = [{ name: "video.part000", size: 5, sha256: "bb" }];
+    seedJson(dir, "video.sidecar.json", { base: "video", parts: videoParts });
+    // audio.sidecar.json never seeded.
+
+    await writeManifest(takeId, { video: [], audio: [] }, null, { now: () => 1000 });
+
+    const parsed = JSON.parse(new TextDecoder().decode(dir.files.get(MANIFEST_NAME)!.committed));
+    expect(parsed.local).toEqual({ audio: [], video: videoParts });
+  });
+
+  // -- (g-ii) a corrupt/unparseable sidecar must fault the write, not lie ---
+  it("(g-ii) unparseable local sidecar JSON -> writeManifest rejects, no episode.json under its real name", async () => {
+    const { dir, takeId } = await freshTakeDir();
+    seedFile(dir, "audio.sidecar.json", new TextEncoder().encode("{not valid json"));
+    seedJson(dir, "video.sidecar.json", { base: "video", parts: [] });
+
+    await expect(writeManifest(takeId, { video: [], audio: [] }, null, { now: () => 1000 })).rejects.toBeTruthy();
+
+    expect(dir.files.has(MANIFEST_NAME)).toBe(false);
+  });
+
+  // -- (g-iii) both absent -> null, unchanged from the pre-fix behavior -----
+  it("(g-iii) neither local sidecar present -> local: null (unchanged)", async () => {
+    const { dir, takeId } = await freshTakeDir();
+    await writeManifest(takeId, { video: [], audio: [] }, null, { now: () => 1000 });
+
+    const parsed = JSON.parse(new TextDecoder().decode(dir.files.get(MANIFEST_NAME)!.committed));
+    expect(parsed.local).toBeNull();
   });
 
   // -- (h) stale temp overwrite ---------------------------------------------
