@@ -1,7 +1,7 @@
 // app/room/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import VideoTile from "@/components/VideoTile";
@@ -13,6 +13,7 @@ import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useCallSession } from "@/hooks/useCallSession";
 import { usePodcastTake } from "@/hooks/usePodcastTake";
+import { mergePanel, useEpisodeExchange } from "@/hooks/useEpisodeExchange";
 import { getSession } from "@/lib/authApi";
 import type { CallStatus } from "@/lib/webrtc/session";
 import {
@@ -96,6 +97,14 @@ export default function RoomPage() {
   useEffect(() => {
     setAuthed(getSession() != null);
   }, []);
+  // usePodcastTake's holdRolls and useEpisodeExchange's takeActive each want
+  // the OTHER hook's live output in the same render — a genuine two-hook
+  // cycle. Bridged with one render's lag via a ref (same idiom as the
+  // `latest`/`holdRollsRef` refs inside usePodcastTake itself): exchange.busy
+  // is only ever read later, from refs, in response to user actions or wire
+  // events — never during this render's own output — so a value that is at
+  // most one commit stale is harmless.
+  const exchangeBusyRef = useRef(false);
   const podcast = usePodcastTake({
     enabled: authed && stage === "in-room",
     bus: call.bus,
@@ -103,9 +112,7 @@ export default function RoomPage() {
     peerIds: call.peers.map((p) => p.peerId),
     videoTrack: media.stream?.getVideoTracks()[0] ?? null,
     audioDeviceId: media.choice.audioDeviceId,
-    // Temporary: no transfer flow wired yet — Task 11 replaces this with the
-    // real "a transfer is in flight" signal.
-    holdRolls: false,
+    holdRolls: exchangeBusyRef.current,
   });
   // While the tape rolls the recorded tracks are frozen: no device toggles,
   // and the self tile shows the true recorded frame.
@@ -114,6 +121,19 @@ export default function RoomPage() {
     podcast.panel.kind === "rolling" ||
     podcast.panel.kind === "fault" ||
     podcast.panel.kind === "stopping";
+  const exchange = useEpisodeExchange({
+    // "supported" isn't in usePodcastTake's public surface — panel.kind
+    // stays "unsupported" forever on an unsupported browser (derivePanel's
+    // very first check), so it doubles as that signal here.
+    enabled: authed && stage === "in-room" && podcast.panel.kind !== "unsupported",
+    xfer: call.bus.xfer,
+    peerIds: call.peers.map((p) => p.peerId),
+    partnerCodename: podcast.partnerCodename,
+    lastTakeId: podcast.lastTakeId,
+    takeActive: podcastLocked,
+  });
+  // Available for usePodcastTake on the NEXT render — see the comment above.
+  exchangeBusyRef.current = exchange.busy;
 
   // Debug mirror for e2e/phase2-e2e.js and e2e/phase5a-e2e.js — harmless in
   // production. podBytes is this side's recorder byte counts, video and
@@ -127,8 +147,9 @@ export default function RoomPage() {
       peers: call.peers.length,
       pod: podcast.panel.kind,
       podBytes: podcast.bytes,
+      xfer: exchange.debug,
     };
-  }, [call.status, call.dcOpen, call.peers, podcast.panel.kind, podcast.bytes]);
+  }, [call.status, call.dcOpen, call.peers, podcast.panel.kind, podcast.bytes, exchange.debug]);
 
   // A terminal call failure ends the operation — release the camera/mic so
   // the tally light matches what the user believes. (media.stop reads refs,
@@ -337,12 +358,15 @@ export default function RoomPage() {
     <div className="flex h-[calc(100dvh-7rem)] min-h-[20rem] flex-col gap-3">
       {authed && (
         <PodcastPanel
-          state={podcast.panel}
+          state={mergePanel(podcast.panel, exchange)}
           onChooseVault={() => void podcast.actions.chooseVault()}
           onGrantVault={() => void podcast.actions.grantVault()}
           onRoll={podcast.actions.roll}
           onStop={podcast.actions.stop}
           onDismissFault={podcast.actions.dismissFault}
+          onSendEpisode={exchange.actions.send}
+          onResendEpisode={exchange.actions.resend}
+          onDismissXfer={exchange.actions.dismiss}
         />
       )}
       <header className="flex items-center justify-between">

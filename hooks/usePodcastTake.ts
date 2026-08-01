@@ -647,7 +647,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     // acked. (Ordered last so the actionable vault step is still offered while
     // the line comes back on its own.)
     if (!dcOpen) return { kind: "link-down" };
-    return { kind: "armed" };
+    // canSend is a placeholder here — this hook knows nothing about the
+    // episode exchange. Task 11's mergePanel (hooks/useEpisodeExchange.ts)
+    // always overwrites it with the real value before the panel renders.
+    return { kind: "armed", canSend: false };
   }
 
   const panel = derivePanel();

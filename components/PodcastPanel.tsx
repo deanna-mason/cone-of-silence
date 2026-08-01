@@ -13,7 +13,7 @@ export type PodcastPanelState =
   /** Two chairs and a vault, but the data channel to the other chair is down —
    *  a proposal sent now would be dropped, never acked, and never rolled. */
   | { kind: "link-down" }
-  | { kind: "armed" }
+  | { kind: "armed"; canSend: boolean }
   | { kind: "countdown"; secondsLeft: number }
   | {
       kind: "rolling";
@@ -23,7 +23,24 @@ export type PodcastPanelState =
       partnerCodename: string | null;
     }
   | { kind: "fault"; faults: Fault[]; partnerCodename: string | null }
-  | { kind: "stopping" };
+  | { kind: "stopping" }
+  // Phase 5B (Task 11): episode-exchange states. Shapes are structurally
+  // identical to hooks/useEpisodeExchange.ts's ExchangePanelState — mergePanel
+  // there hands one of these straight through, unmodified, when a transfer
+  // is in flight.
+  | { kind: "xfer-sending"; file: string; sentBytes: number; totalBytes: number; mbps: number; etaS: number | null }
+  | {
+      kind: "xfer-receiving";
+      file: string;
+      committedBytes: number;
+      totalBytes: number;
+      mbps: number;
+      etaS: number | null;
+      fromCodename: string | null;
+    }
+  | { kind: "xfer-interrupted"; direction: "send" | "receive"; canResend: boolean }
+  | { kind: "xfer-done"; direction: "send" | "receive"; totalBytes: number }
+  | { kind: "xfer-fault"; reason: string };
 
 export interface PodcastPanelProps {
   state: PodcastPanelState;
@@ -32,6 +49,9 @@ export interface PodcastPanelProps {
   onRoll(): void;
   onStop(): void;
   onDismissFault(): void;
+  onSendEpisode(): void;
+  onResendEpisode(): void;
+  onDismissXfer(): void;
 }
 
 const CAUSE_COPY: Record<FaultCause, string> = {
@@ -57,10 +77,30 @@ function formatMB(bytes: number): string {
   return `${(bytes / 1_000_000).toFixed(1)}MB`;
 }
 
+/** Bare number, one decimal, no unit — the xfer copy spells "MB" once after
+ *  a sent/total pair (`12.3/45.6 MB`), not per-number like formatMB above. */
+function mbNum(bytes: number): string {
+  return (bytes / 1_000_000).toFixed(1);
+}
+
 const ROW = "hairline flex h-12 items-center gap-3 border bg-inset px-4";
+const ROW_BAR = "hairline flex flex-col gap-1.5 border bg-inset px-4 py-2";
 const GHOST_BUTTON =
   "kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal";
 const CTA_BUTTON = "kicker bg-vermilion px-5 py-2 text-cream transition hover:bg-vermilion-bright";
+
+/** Thin progress bar: inset track + vermilion fill at width: pct%. */
+function ProgressBar({ pct }: { pct: number }) {
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink-faint/20">
+      <div className="h-full bg-vermilion transition-[width]" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function pctOf(current: number, total: number): number {
+  return total > 0 ? Math.min(100, (current / total) * 100) : 0;
+}
 
 export default function PodcastPanel({
   state,
@@ -69,6 +109,9 @@ export default function PodcastPanel({
   onRoll,
   onStop,
   onDismissFault,
+  onSendEpisode,
+  onResendEpisode,
+  onDismissXfer,
 }: PodcastPanelProps) {
   switch (state.kind) {
     case "unsupported":
@@ -125,6 +168,11 @@ export default function PodcastPanel({
       return (
         <div className={ROW}>
           <p className="kicker flex-1 text-sienna">◈ Ready to Roll</p>
+          {state.canSend && (
+            <button type="button" onClick={onSendEpisode} className={GHOST_BUTTON}>
+              Send Episode
+            </button>
+          )}
           <button type="button" onClick={onRoll} className={CTA_BUTTON}>
             Roll Tape
           </button>
@@ -200,5 +248,88 @@ export default function PodcastPanel({
           <p className="truncate font-body text-sm text-ink-soft">Cutting the tape…</p>
         </div>
       );
+
+    case "xfer-sending": {
+      const eta = state.etaS !== null ? mmss(state.etaS) : "—";
+      return (
+        <div className={ROW_BAR}>
+          <div className="flex items-center gap-3">
+            <p className="kicker shrink-0 text-sienna">◈ Transmitting</p>
+            <p className="flex-1 truncate font-body text-sm text-ink-soft">
+              {`${state.file} · ${mbNum(state.sentBytes)}/${mbNum(state.totalBytes)} MB · ${state.mbps.toFixed(1)} MB/s · ETA ${eta}`}
+            </p>
+          </div>
+          <ProgressBar pct={pctOf(state.sentBytes, state.totalBytes)} />
+        </div>
+      );
+    }
+
+    case "xfer-receiving": {
+      const eta = state.etaS !== null ? mmss(state.etaS) : "—";
+      return (
+        <div className={ROW_BAR}>
+          <div className="flex items-center gap-3">
+            <p className="kicker shrink-0 text-sienna">◈ Incoming Reel</p>
+            <p className="flex-1 truncate font-body text-sm text-ink-soft">
+              {`${state.fromCodename ?? "Partner"} transmits ${state.file} · ${mbNum(state.committedBytes)}/${mbNum(state.totalBytes)} MB · ETA ${eta}`}
+            </p>
+          </div>
+          <ProgressBar pct={pctOf(state.committedBytes, state.totalBytes)} />
+        </div>
+      );
+    }
+
+    case "xfer-interrupted":
+      return (
+        <div className={ROW}>
+          <p className="kicker shrink-0 text-sienna">◈ Transmission Interrupted</p>
+          <p className="flex-1 truncate font-body text-sm text-ink-soft">
+            The line dropped mid-reel. Committed parts are safe in the vault.
+          </p>
+          {state.direction === "send" && state.canResend && (
+            <button type="button" onClick={onResendEpisode} className={CTA_BUTTON}>
+              Resume Transmission
+            </button>
+          )}
+          <button type="button" onClick={onDismissXfer} className={GHOST_BUTTON}>
+            Stand Down
+          </button>
+        </div>
+      );
+
+    case "xfer-done":
+      return (
+        <div className={ROW}>
+          <p className="kicker shrink-0 text-sienna">
+            {state.direction === "send" ? "◈ Episode Delivered" : "◈ Episode Received"}
+          </p>
+          <p className="flex-1 truncate font-body text-sm text-ink-soft">{`${mbNum(state.totalBytes)} MB filed.`}</p>
+          <button type="button" onClick={onDismissXfer} className={GHOST_BUTTON}>
+            File Away
+          </button>
+        </div>
+      );
+
+    case "xfer-fault": {
+      const body = state.reason.startsWith("hash-mismatch:")
+        ? "A reel arrived damaged and was burned. Resume to send it again."
+        : `The transmission broke down: ${state.reason}.`;
+      return (
+        <div
+          role="alert"
+          className="hairline flex flex-wrap items-center gap-3 border bg-vermilion px-4 py-3 text-cream"
+        >
+          <p className="kicker shrink-0 text-cream">◈ Transmission Fault</p>
+          <p className="flex-1 font-body text-sm text-cream">{body}</p>
+          <button
+            type="button"
+            onClick={onDismissXfer}
+            className="kicker shrink-0 border border-cream/50 px-4 py-2 text-cream transition hover:bg-cream/10"
+          >
+            Stand Down
+          </button>
+        </div>
+      );
+    }
   }
 }

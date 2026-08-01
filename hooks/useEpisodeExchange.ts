@@ -1,0 +1,486 @@
+// hooks/useEpisodeExchange.ts
+// Phase 5B Task 11: React glue over the shipped episode-exchange engines
+// (lib/podcast/transfer.ts's EpisodeSender/EpisodeReceiver) and the xfer
+// port on the call bus (hooks/useCallSession.ts). This hook composes —
+// it never re-implements engine logic; every state transition it surfaces
+// comes straight from an engine's onPhase/onProgress callback.
+//
+// CONTROLLER DECISION D5 (deferred twice, ends here): episodeId === takeId.
+// Both hosts share the takeId directory name for a recorded take, and the
+// exchange's manifest lands inside that same directory — so the wire's
+// episodeId is literally this host's lastTakeId. There is no separate
+// episode namespace to reconcile.
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import type { XferPort } from "@/hooks/useCallSession";
+import type { PodcastPanelState } from "@/components/PodcastPanel";
+import * as episodeStore from "@/lib/podcast/episodeStore";
+import type { SidecarEntry } from "@/lib/podcast/vault";
+import {
+  EpisodeReceiver,
+  EpisodeSender,
+  type EpisodeReceiverCallbacks,
+  type EpisodeSenderCallbacks,
+  type ReceiveProgress,
+  type ReceiverPhase,
+  type ReceiverStore,
+  type SendProgress,
+  type SenderPhase,
+  type SenderStore,
+  type XferLink,
+} from "@/lib/podcast/transfer";
+import { parseXferFrame } from "@/lib/podcast/xferProtocol";
+
+export type ExchangePanelState =
+  | { kind: "xfer-sending"; file: string; sentBytes: number; totalBytes: number; mbps: number; etaS: number | null }
+  | {
+      kind: "xfer-receiving";
+      file: string;
+      committedBytes: number;
+      totalBytes: number;
+      mbps: number;
+      etaS: number | null;
+      fromCodename: string | null;
+    } // canResend: sender side && xfer channel open again
+  | { kind: "xfer-interrupted"; direction: "send" | "receive"; canResend: boolean }
+  | { kind: "xfer-done"; direction: "send" | "receive"; totalBytes: number }
+  | { kind: "xfer-fault"; reason: string };
+
+export interface EpisodeExchange {
+  state: ExchangePanelState | null; // null = no exchange in flight or shown
+  busy: boolean; // sending or receiving RIGHT NOW → feeds holdRolls
+  canSend: boolean; // lastTakeId && exactly one peer && that peer's xfer channel open && no take active
+  actions: { send(): void; resend(): void; dismiss(): void };
+  debug: { kind: string | null; sentBytes: number; committedBytes: number; totalBytes: number; resumedParts: number | null };
+}
+
+export interface EpisodeExchangeArgs {
+  enabled: boolean; // authed && in-room && supported (same gate as the take hook)
+  xfer: XferPort;
+  peerIds: string[];
+  partnerCodename: string | null; // rides the offer's `from` + receiving copy
+  lastTakeId: string | null;
+  takeActive: boolean; // panel.kind in countdown|rolling|stopping|fault
+}
+
+// ---------------------------------------------------------------------------
+// episodeStore adapter — the REAL module, wrapped only so the engines see
+// the narrow Sender/ReceiverStore surface they declare. Referencing
+// `episodeStore.xxx` at call time (not destructured at import time) means a
+// hook test's `vi.mock("@/lib/podcast/episodeStore")` is honored exactly the
+// same way a direct import would be.
+// ---------------------------------------------------------------------------
+const senderStoreAdapter: SenderStore = {
+  readSendPlan: (episodeId) => episodeStore.readSendPlan(episodeId),
+  openPartReader: (episodeId, name) => episodeStore.openPartReader(episodeId, name),
+};
+const receiverStoreAdapter: ReceiverStore = {
+  scanCommitted: (episodeId) => episodeStore.scanCommitted(episodeId),
+  openIncomingPart: (episodeId, entry: SidecarEntry) => episodeStore.openIncomingPart(episodeId, entry),
+  writeManifest: (episodeId, remote, from) => episodeStore.writeManifest(episodeId, remote, from),
+};
+
+// ---------------------------------------------------------------------------
+// MB/s EMA: rate = 0.7*rate + 0.3*(Δbytes/Δt); etaS = remaining/rate, null
+// until rate > 0. One tracker per direction, reset whenever that direction
+// starts a fresh transfer session (a new offer sent, or a new offer adopted).
+// ---------------------------------------------------------------------------
+interface RateState {
+  rate: number; // bytes/sec, smoothed
+  lastBytes: number | null;
+  lastAt: number | null;
+}
+const RATE_IDLE: RateState = { rate: 0, lastBytes: null, lastAt: null };
+
+function sampleRate(prev: RateState, bytes: number, now: number): RateState {
+  if (prev.lastBytes === null || prev.lastAt === null) return { rate: prev.rate, lastBytes: bytes, lastAt: now };
+  const dtS = (now - prev.lastAt) / 1000;
+  if (dtS <= 0) return { rate: prev.rate, lastBytes: bytes, lastAt: now };
+  const instant = (bytes - prev.lastBytes) / dtS;
+  return { rate: 0.7 * prev.rate + 0.3 * instant, lastBytes: bytes, lastAt: now };
+}
+
+interface SenderView {
+  phase: SenderPhase;
+  file: string;
+  sentBytes: number;
+  totalBytes: number;
+  resumedParts: number;
+  mbps: number;
+  etaS: number | null;
+  faultReason: string | null;
+}
+const IDLE_SENDER_VIEW: SenderView = {
+  phase: "idle",
+  file: "",
+  sentBytes: 0,
+  totalBytes: 0,
+  resumedParts: 0,
+  mbps: 0,
+  etaS: null,
+  faultReason: null,
+};
+
+interface ReceiverView {
+  phase: ReceiverPhase;
+  // Local-only: hides a parked/done/fault card the operator dismissed,
+  // WITHOUT touching the engine, which is kept alive across dismissal — a
+  // re-offer from the partner must still land in the same receiver instance
+  // (Task 8 carry-in: a 4C link rebuild resumes the SAME parked receiver).
+  dismissed: boolean;
+  file: string;
+  committedBytes: number;
+  totalBytes: number;
+  fromCodename: string | null;
+  mbps: number;
+  etaS: number | null;
+  faultReason: string | null;
+}
+const IDLE_RECEIVER_VIEW: ReceiverView = {
+  phase: "idle",
+  dismissed: false,
+  file: "",
+  committedBytes: 0,
+  totalBytes: 0,
+  fromCodename: null,
+  mbps: 0,
+  etaS: null,
+  faultReason: null,
+};
+
+export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
+  const { enabled, xfer, peerIds, partnerCodename, lastTakeId, takeActive } = args;
+  const peerKey = peerIds.join("|");
+  const singlePeerId = peerIds.length === 1 ? peerIds[0] : null;
+
+  // Same `latest` idiom as usePodcastTake.ts: the wire-subscription effect
+  // below is built once per (enabled, xfer) and must read the CURRENT
+  // partnerCodename/lastTakeId at call time, not whatever was in scope when
+  // it was constructed.
+  const partnerCodenameRef = useRef(partnerCodename);
+  partnerCodenameRef.current = partnerCodename;
+  const lastTakeIdRef = useRef(lastTakeId);
+  lastTakeIdRef.current = lastTakeId;
+
+  const [senderView, setSenderView] = useState<SenderView>(IDLE_SENDER_VIEW);
+  const [receiverView, setReceiverView] = useState<ReceiverView>(IDLE_RECEIVER_VIEW);
+  const [xferOpen, setXferOpen] = useState(false);
+
+  const senderRef = useRef<EpisodeSender | null>(null);
+  const senderPeerRef = useRef<string | null>(null);
+  const senderEpisodeIdRef = useRef<string | null>(null);
+  const senderRateRef = useRef<RateState>(RATE_IDLE);
+
+  const receiverRef = useRef<EpisodeReceiver | null>(null);
+  const receiverPeerRef = useRef<string | null>(null);
+  const receiverRateRef = useRef<RateState>(RATE_IDLE);
+  // ReceiveProgress.totalBytes is PER-PART (the engine has no whole-episode
+  // total to report — a shipped, accepted asymmetry vs. SendProgress, which
+  // IS whole-episode). Tracked here by summing each distinct part name's
+  // size as it's first reported, so the "done" card can report a real
+  // episode total instead of just the last part's size. Keyed by episodeId
+  // (read off the wire offer itself, the only place this hook can learn it
+  // early) so a genuinely new episode doesn't inherit a prior one's totals,
+  // while a same-episode resume (adopt() rescans, no re-progress for
+  // already-committed parts) keeps what it already knows.
+  const receiverEpisodeIdRef = useRef<string | null>(null);
+  const receiverPartTotalsRef = useRef<Map<string, number>>(new Map());
+
+  const currentPeerIdRef = useRef<string | null>(null);
+
+  function disposeSender(): void {
+    senderRef.current?.dispose();
+    senderRef.current = null;
+    senderPeerRef.current = null;
+    senderEpisodeIdRef.current = null;
+  }
+
+  function disposeReceiver(): void {
+    receiverRef.current?.dispose();
+    receiverRef.current = null;
+    receiverPeerRef.current = null;
+    receiverEpisodeIdRef.current = null;
+    receiverPartTotalsRef.current = new Map();
+  }
+
+  function handleSenderPhase(phase: SenderPhase, detail?: string): void {
+    if (phase === "offering") senderRateRef.current = RATE_IDLE;
+    setSenderView((prev) => ({ ...prev, phase, faultReason: phase === "fault" ? (detail ?? "") : null }));
+  }
+
+  function handleSenderProgress(p: SendProgress): void {
+    const now = Date.now();
+    senderRateRef.current = sampleRate(senderRateRef.current, p.sentBytes, now);
+    const rate = senderRateRef.current.rate;
+    const mbps = rate / 1_000_000;
+    const remaining = Math.max(0, p.totalBytes - p.sentBytes);
+    const etaS = rate > 0 ? remaining / rate : null;
+    setSenderView((prev) => ({
+      ...prev,
+      file: p.file,
+      sentBytes: p.sentBytes,
+      totalBytes: p.totalBytes,
+      resumedParts: p.resumedParts,
+      mbps,
+      etaS,
+    }));
+  }
+
+  function handleReceiverPhase(phase: ReceiverPhase, detail?: string): void {
+    if (phase === "receiving") receiverRateRef.current = RATE_IDLE;
+    setReceiverView((prev) => ({
+      ...prev,
+      phase,
+      dismissed: false,
+      faultReason: phase === "fault" ? (detail ?? "") : null,
+    }));
+  }
+
+  function handleReceiverProgress(p: ReceiveProgress): void {
+    receiverPartTotalsRef.current.set(p.file, p.totalBytes);
+    const now = Date.now();
+    receiverRateRef.current = sampleRate(receiverRateRef.current, p.committedBytes, now);
+    const rate = receiverRateRef.current.rate;
+    const mbps = rate / 1_000_000;
+    const remaining = Math.max(0, p.totalBytes - p.committedBytes);
+    const etaS = rate > 0 ? remaining / rate : null;
+    setReceiverView((prev) => ({
+      ...prev,
+      file: p.file,
+      committedBytes: p.committedBytes,
+      totalBytes: p.totalBytes,
+      fromCodename: p.fromCodename,
+      mbps,
+      etaS,
+    }));
+  }
+
+  function makeLink(peerId: string): XferLink {
+    return {
+      send: (data) => xfer.send(peerId, data),
+      bufferedAmount: () => xfer.bufferedAmount(peerId),
+    };
+  }
+
+  /** ONE EpisodeSender per send()/resend() call — the old one is disposed
+   *  first (Task 8 loopback review's confirmed engine-construction model). */
+  function startSender(peerId: string, episodeId: string): void {
+    disposeSender();
+    senderRateRef.current = RATE_IDLE;
+    const cb: EpisodeSenderCallbacks = { onPhase: handleSenderPhase, onProgress: handleSenderProgress };
+    const sender = new EpisodeSender(peerId, makeLink(peerId), senderStoreAdapter, cb);
+    senderRef.current = sender;
+    senderPeerRef.current = peerId;
+    senderEpisodeIdRef.current = episodeId;
+    sender.start(episodeId, partnerCodenameRef.current);
+  }
+
+  /** ONE EpisodeReceiver, built lazily on the first inbound xfr/offer and
+   *  KEPT for the life of this hook (enabled/unmount is the only disposal
+   *  path) — a 4C link rebuild keeps the peerId and must resume into this
+   *  SAME parked receiver, not a fresh one. */
+  function createReceiver(peerId: string): void {
+    const cb: EpisodeReceiverCallbacks = { onPhase: handleReceiverPhase, onProgress: handleReceiverProgress };
+    const receiver = new EpisodeReceiver(peerId, makeLink(peerId), receiverStoreAdapter, cb);
+    receiverRef.current = receiver;
+    receiverPeerRef.current = peerId;
+  }
+
+  // ---------------------------------------------------------------------
+  // Wire subscriptions.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    if (!enabled) return;
+    const offMessage = xfer.onMessage((peerId, data) => {
+      const frame = typeof data === "string" ? parseXferFrame(data) : null;
+      if (!receiverRef.current && frame && frame.t === "xfr/offer") createReceiver(peerId);
+      // Each engine's own handleFrame already filters by frame type (a
+      // sender ignores xfr/offer/part, a receiver ignores xfr/have/
+      // part-committed/fault/done) — safe to forward unconditionally to
+      // whichever engine(s) are bound to this peerId.
+      if (senderRef.current && senderPeerRef.current === peerId) senderRef.current.handleFrame(peerId, data);
+      if (receiverRef.current && receiverPeerRef.current === peerId) {
+        if (frame && frame.t === "xfr/offer" && receiverEpisodeIdRef.current !== frame.episodeId) {
+          receiverEpisodeIdRef.current = frame.episodeId;
+          receiverPartTotalsRef.current = new Map();
+        }
+        receiverRef.current.handleFrame(peerId, data);
+      }
+    });
+    const offDrain = xfer.onDrain((peerId) => {
+      if (senderRef.current && senderPeerRef.current === peerId) senderRef.current.handleDrain();
+    });
+    // CHANNEL-CLOSED WIRING IS THE ONLY STALL RECOVERY: the engines have no
+    // sending-phase timeout by design. A "closed"/"error" xfer channel state
+    // MUST reach both engines' handleChannelClosed, or a stalled transfer is
+    // unrecoverable short of a page reload. Ordering vs. any aggregate
+    // channel-closed signal elsewhere is deliberately not depended on
+    // (Task 2 advisory) — this listens only to the per-channel event.
+    const offState = xfer.onChannelState((peerId, channel, state) => {
+      if (channel !== "xfer") return;
+      if (state === "closed" || state === "error") {
+        if (senderRef.current && senderPeerRef.current === peerId) senderRef.current.handleChannelClosed();
+        if (receiverRef.current && receiverPeerRef.current === peerId) receiverRef.current.handleChannelClosed();
+      }
+      if (peerId === currentPeerIdRef.current) setXferOpen(state === "open");
+    });
+    return () => {
+      offMessage();
+      offDrain();
+      offState();
+      disposeSender();
+      disposeReceiver();
+      setSenderView(IDLE_SENDER_VIEW);
+      setReceiverView(IDLE_RECEIVER_VIEW);
+    };
+    // Every listener above reads the CURRENT engine refs, not a closed-over
+    // render's — safe to build once per (enabled, xfer) identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, xfer]);
+
+  // The current peer's identity changed (or the room moved away from
+  // exactly one peer) — its xfer channel's open/closed state is unknown
+  // again until the next onChannelState event says otherwise.
+  useEffect(() => {
+    currentPeerIdRef.current = singlePeerId;
+    setXferOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peerKey]);
+
+  const sendingBusy = senderView.phase === "offering" || senderView.phase === "sending";
+  const receivingBusy = receiverView.phase === "receiving";
+  const busy = sendingBusy || receivingBusy;
+
+  const canSend = lastTakeId !== null && singlePeerId !== null && xferOpen && !takeActive;
+
+  const receiverEffectivePhase: ReceiverPhase | "idle" = receiverView.dismissed ? "idle" : receiverView.phase;
+
+  // Priority when both directions are simultaneously in flight (either host
+  // may click Send independently of receiving the other's episode): the
+  // outbound card wins. Not exercised by the brief's case list — a judgment
+  // call, documented rather than silent.
+  let state: ExchangePanelState | null = null;
+  switch (senderView.phase) {
+    case "offering":
+    case "sending":
+      state = {
+        kind: "xfer-sending",
+        file: senderView.file,
+        sentBytes: senderView.sentBytes,
+        totalBytes: senderView.totalBytes,
+        mbps: senderView.mbps,
+        etaS: senderView.etaS,
+      };
+      break;
+    case "parked":
+      state = { kind: "xfer-interrupted", direction: "send", canResend: xferOpen };
+      break;
+    case "done":
+      state = { kind: "xfer-done", direction: "send", totalBytes: senderView.totalBytes };
+      break;
+    case "fault":
+      state = { kind: "xfer-fault", reason: senderView.faultReason ?? "" };
+      break;
+    case "idle":
+      break;
+  }
+  if (state === null) {
+    switch (receiverEffectivePhase) {
+      case "receiving":
+        state = {
+          kind: "xfer-receiving",
+          file: receiverView.file,
+          committedBytes: receiverView.committedBytes,
+          totalBytes: receiverView.totalBytes,
+          mbps: receiverView.mbps,
+          etaS: receiverView.etaS,
+          // The engine only reports fromCodename via ReceiveProgress (i.e.
+          // not until the first chunk lands) — this hook already knows who
+          // the partner is the moment an offer is adopted, so the receiving
+          // copy rides THIS arg rather than flashing null while a transfer
+          // sits offer-received-but-nothing-streamed-yet.
+          fromCodename: partnerCodename,
+        };
+        break;
+      case "parked":
+        state = { kind: "xfer-interrupted", direction: "receive", canResend: false };
+        break;
+      case "done":
+        state = {
+          kind: "xfer-done",
+          direction: "receive",
+          totalBytes: [...receiverPartTotalsRef.current.values()].reduce((a, b) => a + b, 0),
+        };
+        break;
+      case "fault":
+        state = { kind: "xfer-fault", reason: receiverView.faultReason ?? "" };
+        break;
+      case "idle":
+        break;
+    }
+  }
+
+  const debug =
+    senderView.phase !== "idle"
+      ? {
+          kind: senderView.phase,
+          sentBytes: senderView.sentBytes,
+          committedBytes: 0,
+          totalBytes: senderView.totalBytes,
+          resumedParts: senderView.resumedParts,
+        }
+      : receiverView.phase !== "idle"
+        ? {
+            kind: receiverView.phase,
+            sentBytes: 0,
+            committedBytes: receiverView.committedBytes,
+            totalBytes: receiverView.totalBytes,
+            resumedParts: null,
+          }
+        : { kind: null, sentBytes: 0, committedBytes: 0, totalBytes: 0, resumedParts: null };
+
+  return {
+    state,
+    busy,
+    canSend,
+    actions: {
+      send: () => {
+        if (!canSend || singlePeerId === null || lastTakeId === null) return;
+        startSender(singlePeerId, lastTakeId);
+      },
+      resend: () => {
+        // Belt + suspenders, same idiom as usePodcastTake's roll(): the
+        // panel already hides Resume Transmission unless canResend, this is
+        // the backstop.
+        const peerId = senderPeerRef.current ?? singlePeerId;
+        const episodeId = senderEpisodeIdRef.current ?? lastTakeId;
+        if (senderView.phase !== "parked" || peerId === null || episodeId === null || !xferOpen) return;
+        startSender(peerId, episodeId);
+      },
+      dismiss: () => {
+        // Whichever card is actually on screen (same priority as `state`
+        // above) is the one Stand Down / File Away clears.
+        if (senderView.phase === "parked" || senderView.phase === "done" || senderView.phase === "fault") {
+          disposeSender();
+          setSenderView(IDLE_SENDER_VIEW);
+          return;
+        }
+        if (receiverView.phase === "parked" || receiverView.phase === "done" || receiverView.phase === "fault") {
+          setReceiverView((prev) => ({ ...prev, dismissed: true }));
+        }
+      },
+    },
+    debug,
+  };
+}
+
+/** Pure priority merge — take-in-progress outranks exchange outranks armed. */
+export function mergePanel(take: PodcastPanelState, xchg: EpisodeExchange): PodcastPanelState {
+  if (take.kind === "countdown" || take.kind === "rolling" || take.kind === "stopping" || take.kind === "fault") {
+    return take;
+  }
+  if (xchg.state !== null) return xchg.state;
+  if (take.kind === "armed") return { kind: "armed", canSend: xchg.canSend };
+  return take;
+}
