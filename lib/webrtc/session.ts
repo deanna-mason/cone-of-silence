@@ -12,6 +12,10 @@ import type { IceServer } from "./protocol";
 import { SignalingClient } from "./signaling";
 
 export type { RemotePeer } from "./mesh";
+// Phase 5B: React-free consumers (and the hook) import the xfer vocabulary
+// from session.ts rather than reaching into mesh.ts directly.
+export type { ChannelName, ChannelLifecycle } from "./mesh";
+import type { ChannelName, ChannelLifecycle } from "./mesh";
 
 export type CallStatus =
   | "connecting"
@@ -30,6 +34,12 @@ export type CallEventMap = {
   channelOpen: [];
   channelClosed: [];
   message: [string, string];
+  // Phase 5B (Task 3): per-peer, per-channel lifecycle and the xfer
+  // channel's data/backpressure events — straight mirrors of Mesh's
+  // onChannelState/onXferMessage/onXferDrain, peerId-prefixed.
+  channelState: [string, ChannelName, ChannelLifecycle, string | undefined];
+  xferMessage: [string, string | ArrayBuffer];
+  xferDrain: [string];
 };
 
 export class CallSession {
@@ -75,11 +85,15 @@ export class CallSession {
         onChannelOpen: () => this.events.emit("channelOpen"),
         onChannelClosed: () => this.events.emit("channelClosed"),
         onMessage: (peerId, text) => this.events.emit("message", peerId, text),
-        // Compiler-forced by MeshCallbacks' new required members — session's
-        // own event surface for these lands in Task 3, not here.
-        onChannelState: () => {},
-        onXferMessage: () => {},
-        onXferDrain: () => {},
+        // Straight forward to the session's own event surface. Ordering vs.
+        // the aggregate `channelClosed` event is deliberately unspecified —
+        // it's aggregate-first on a live close but per-channel-first on a
+        // mesh-synthesized one (remove/closeAll/rebuild) — so nothing here
+        // or downstream may assume an interleaving between the two.
+        onChannelState: (peerId, channel, state, detail) =>
+          this.events.emit("channelState", peerId, channel, state, detail),
+        onXferMessage: (peerId, data) => this.events.emit("xferMessage", peerId, data),
+        onXferDrain: (peerId) => this.events.emit("xferDrain", peerId),
       },
     );
     const ev = this.signaling.events;
@@ -145,6 +159,16 @@ export class CallSession {
   /** App-message broadcast: linkless/closed peers are skipped, not queued. */
   sendAll(text: string): void {
     this.mesh.sendAll(text);
+  }
+
+  /** Xfer-channel send to one peer. False if unknown, linkless, or channel-closed. */
+  sendXferTo(peerId: string, data: string | ArrayBuffer): boolean {
+    return this.mesh.sendXferTo(peerId, data);
+  }
+
+  /** -1 when the peer is unknown or its link isn't built yet. */
+  xferBufferedAmount(peerId: string): number {
+    return this.mesh.xferBufferedAmount(peerId);
   }
 
   private dropAll(status: CallStatus): void {

@@ -157,6 +157,15 @@ class FakeBusPair {
         this.listeners[idx].add(fn);
         return () => this.listeners[idx].delete(fn);
       },
+      // Compiler-forced by CallBus's new required member (Phase 5B Task 3) —
+      // untouched by anything this hook test exercises.
+      xfer: {
+        send: () => false,
+        bufferedAmount: () => -1,
+        onMessage: () => () => {},
+        onDrain: () => () => {},
+        onChannelState: () => () => {},
+      },
     };
   }
 
