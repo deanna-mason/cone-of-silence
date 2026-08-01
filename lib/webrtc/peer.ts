@@ -7,6 +7,8 @@
 // The data channel is negotiated (same id both sides) so its creation can't
 // glare; it carries the Phase 5/6 protocols later.
 
+import { vp9Preferences, type E2eeApi } from "./e2eeSupport";
+
 export const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
 export type ChannelName = "cos" | "xfer";
@@ -35,25 +37,50 @@ export interface PeerLinkOptions {
   onChannelState?: (channel: ChannelName, state: ChannelLifecycle, detail?: string) => void;
   onXferMessage?: (data: string | ArrayBuffer) => void;
   onXferDrain?: () => void;
+  /** Phase 5D (D15): every room key is present in production — the SESSION
+   *  always supplies this. Absent ONLY in tests that predate 5D, where its
+   *  absence must mean zero behavior change (no worker, no transform, no
+   *  codec pin, no encodedInsertableStreams) — that optionality is itself
+   *  the additivity proof for every 4B/4C/5A/5B test. */
+  e2ee?: { mediaKey: CryptoKey; api: E2eeApi };
 }
 
 function errDetail(ev: unknown): string {
   return (ev as RTCErrorEvent).error?.message ?? "channel error";
 }
 
+/** The legacy ("encoded-streams") transform API predates standardization and
+ * never made it into TypeScript's DOM lib — createEncodedStreams simply
+ * isn't a declared member of RTCRtpSender/RTCRtpReceiver there. These narrow
+ * intersection types are the cast surface, confined to this file. */
+interface LegacyEncodedStreams {
+  readable: ReadableStream;
+  writable: WritableStream;
+}
+type SenderWithStreams = RTCRtpSender & { createEncodedStreams(): LegacyEncodedStreams };
+type ReceiverWithStreams = RTCRtpReceiver & { createEncodedStreams(): LegacyEncodedStreams };
+
 export class PeerLink {
   readonly channel: RTCDataChannel;
   readonly xfer: RTCDataChannel;
   private readonly pc: RTCPeerConnection;
+  /** One worker per PeerLink (Phase 5D), null when opts.e2ee is absent.
+   *  Created here, terminated in close() — a 4C rebuild always constructs a
+   *  fresh PeerLink, so this is never reused across rebuilds either. */
+  private readonly worker: Worker | null;
   private makingOffer = false;
   private ignoreOffer = false;
 
   constructor(private readonly opts: PeerLinkOptions) {
+    const e2ee = opts.e2ee;
     const pc = new RTCPeerConnection({
       iceServers: opts.iceServers ?? ICE_SERVERS,
       ...(opts.forceRelay ? { iceTransportPolicy: "relay" as const } : {}),
+      // Legacy API only — script-transform needs no pc-level opt-in (spec).
+      ...(e2ee?.api === "encoded-streams" ? { encodedInsertableStreams: true } : {}),
     });
     this.pc = pc;
+    this.worker = e2ee ? new Worker(new URL("./e2ee.worker.ts", import.meta.url)) : null;
 
     this.channel = pc.createDataChannel("cos", { negotiated: true, id: 0 });
     this.channel.onopen = () => {
@@ -81,12 +108,26 @@ export class PeerLink {
     };
 
     for (const track of opts.localStream.getTracks()) {
-      pc.addTrack(track, opts.localStream);
+      const sender = pc.addTrack(track, opts.localStream);
+      // Additivity (D15): when e2ee is absent, this loop body is IDENTICAL
+      // to pre-5D — no getTransceivers() call, no transform, no pin — so a
+      // pre-5D fake pc (no getTransceivers/setCodecPreferences) never sees
+      // these calls and every predating test stays green unchanged.
+      if (e2ee) {
+        this.attachSenderTransform(sender);
+        const transceiver = pc.getTransceivers().find((t) => t.sender === sender);
+        if (transceiver) this.applyVp9Pin(transceiver);
+      }
     }
 
     pc.onnegotiationneeded = async () => {
       try {
         this.makingOffer = true;
+        // Re-pin every transceiver ahead of each offer (spec: Codec pin) —
+        // catches any transceiver the addTrack-time pin above didn't see.
+        if (e2ee) {
+          for (const transceiver of pc.getTransceivers()) this.applyVp9Pin(transceiver);
+        }
         await pc.setLocalDescription();
         opts.sendSignal(JSON.stringify({ description: pc.localDescription }));
       } catch {
@@ -101,6 +142,7 @@ export class PeerLink {
     };
 
     pc.ontrack = (ev) => {
+      this.attachReceiverTransform(ev.receiver);
       const stream = ev.streams[0];
       if (stream) opts.onRemoteStream(stream);
     };
@@ -154,6 +196,60 @@ export class PeerLink {
 
   close(): void {
     this.pc.close();
+    this.worker?.terminate();
+  }
+
+  /** Attaches an encrypt transform to a just-added local sender. No-op when
+   *  opts.e2ee is absent (additivity — see PeerLinkOptions.e2ee's doc).
+   *  Senders are only ever created here (construction's addTrack loop); a
+   *  later replaceStream() call swaps the TRACK on this same sender via
+   *  replaceTrack, which never touches — and therefore never needs to
+   *  re-attach — `sender.transform` (it lives on the sender, not the
+   *  track), so existing transforms survive device switches for free. */
+  private attachSenderTransform(sender: RTCRtpSender): void {
+    const e2ee = this.opts.e2ee;
+    if (!e2ee || !this.worker) return;
+    if (e2ee.api === "script-transform") {
+      sender.transform = new RTCRtpScriptTransform(this.worker, { key: e2ee.mediaKey, side: "encrypt" });
+    } else {
+      const { readable, writable } = (sender as SenderWithStreams).createEncodedStreams();
+      this.worker.postMessage({ op: "init", key: e2ee.mediaKey, side: "encrypt" });
+      this.worker.postMessage({ op: "pipe", readable, writable }, [readable, writable]);
+    }
+  }
+
+  /** Attaches a decrypt transform to a remote receiver — called from
+   *  `ontrack`, off `ev.receiver`, per pipe-per-track like the sender side. */
+  private attachReceiverTransform(receiver: RTCRtpReceiver): void {
+    const e2ee = this.opts.e2ee;
+    if (!e2ee || !this.worker) return;
+    if (e2ee.api === "script-transform") {
+      receiver.transform = new RTCRtpScriptTransform(this.worker, { key: e2ee.mediaKey, side: "decrypt" });
+    } else {
+      const { readable, writable } = (receiver as ReceiverWithStreams).createEncodedStreams();
+      this.worker.postMessage({ op: "init", key: e2ee.mediaKey, side: "decrypt" });
+      this.worker.postMessage({ op: "pipe", readable, writable }, [readable, writable]);
+    }
+  }
+
+  /** Codec pin (spec): E2EE on → video pinned to VP9, because the H.264
+   *  packetizer needs to parse frame contents that E2EE has made opaque.
+   *  Video-only; skipped entirely when the platform has no VP9 codec
+   *  (vp9Preferences returns null) rather than pinning to an empty list. */
+  private applyVp9Pin(transceiver: RTCRtpTransceiver): void {
+    if (!this.opts.e2ee) return;
+    const kind = transceiver.sender.track?.kind ?? transceiver.receiver.track?.kind;
+    if (kind !== "video") return;
+    // Defensive, mirroring e2eeSupport's own guard: e2ee is only ever
+    // supplied in production once detectE2eeApi() confirmed a real
+    // transform API exists (which itself requires RTCRtpSender to exist),
+    // but a bare global lookup would throw ReferenceError in any host
+    // (test or otherwise) that hasn't defined it at all — skip the pin
+    // rather than crash the constructor.
+    const rtpSender = (globalThis as { RTCRtpSender?: { getCapabilities(kind: string): RTCRtpCapabilities | null } })
+      .RTCRtpSender;
+    const prefs = rtpSender ? vp9Preferences(rtpSender.getCapabilities("video")) : null;
+    if (prefs) transceiver.setCodecPreferences(prefs);
   }
 
   /** App-message send over the cos channel. False (not queued) unless open. */
