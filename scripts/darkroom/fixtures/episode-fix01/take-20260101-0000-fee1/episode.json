@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "episodeId": "take-20260101-0000-fee1",
+  "receivedFrom": "NIGHTINGALE",
+  "completedAt": "2026-01-01T00:10:00.000Z",
+  "local": {
+    "audio": [
+      {
+        "name": "audio.part000",
+        "size": 8357,
+        "sha256": "254d2c438960b7146e461b79fa1bd0ded2e69f329ab45ff75129482a9b753222"
+      },
+      {
+        "name": "audio.part001",
+        "size": 7679,
+        "sha256": "74bee7201aac77f8cca1f6bb9c6f4d3f5081c8b53bb2bb2deffc0c184468dc8a"
+      },
+      {
+        "name": "audio.part002",
+        "size": 6551,
+        "sha256": "71e0b2af88276da662293caa1e7b4c17a0a2984c4ddac0c32057bbdcc26dc4b1"
+      }
+    ],
+    "video": [
+      {
+        "name": "video.part000",
+        "size": 57761,
+        "sha256": "8587bd0b43e3b55b495ec59f2258be442fa7af85edb36dc39f9bedd875e573f4"
+      },
+      {
+        "name": "video.part001",
+        "size": 53079,
+        "sha256": "f110820585161dc461a70b1301e0583a3ee234d91348cba587b5d0f6fba72972"
+      },
+      {
+        "name": "video.part002",
+        "size": 45273,
+        "sha256": "033675298379b2b934adb91104d527ce3198537f81275c3ffbf5a35242c83687"
+      }
+    ]
+  },
+  "remote": {
+    "audio": [
+      {
+        "name": "audio.part000",
+        "size": 8384,
+        "sha256": "2022d4f31ff01202c63b5aae8597179950c3e664b53853bd79ae78356598b548"
+      },
+      {
+        "name": "audio.part001",
+        "size": 7706,
+        "sha256": "4666aa399ff1696ff99e8b9803f733c14afc4ed5f176c0d983b73460ec9a4d73"
+      },
+      {
+        "name": "audio.part002",
+        "size": 6572,
+        "sha256": "2cba8807611d43df2893bb697b15b68ef31a8c84a4c6810fb6d94be70d297844"
+      }
+    ],
+    "video": [
+      {
+        "name": "video.part000",
+        "size": 57761,
+        "sha256": "9bd878fa4a4a07fa20a612f02c27b1111fdd8f30001a93a67a9dce67013f14f3"
+      },
+      {
+        "name": "video.part001",
+        "size": 53079,
+        "sha256": "f110820585161dc461a70b1301e0583a3ee234d91348cba587b5d0f6fba72972"
+      },
+      {
+        "name": "video.part002",
+        "size": 45273,
+        "sha256": "033675298379b2b934adb91104d527ce3198537f81275c3ffbf5a35242c83687"
+      }
+    ]
+  }
+}

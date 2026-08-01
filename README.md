@@ -64,3 +64,5 @@ npm i && npm run dev                                       # frontend :3000
 
 Studio processing needs `ffmpeg` (with `arnndn`) plus `RNNOISE_MODEL` and
 `UPLOAD_DIR` in `server/.env`. Fresh database: `supabase db push`.
+
+Darkroom (episode post): the podcast Mac needs node, ffmpeg with arnndn, and the rnnoise model at server/models/std.rnnn — `npm run darkroom -- --vault <Tape Vault>`.

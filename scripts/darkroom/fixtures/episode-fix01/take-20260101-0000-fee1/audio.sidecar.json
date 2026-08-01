@@ -1,0 +1,20 @@
+{
+  "base": "audio",
+  "parts": [
+    {
+      "name": "audio.part000",
+      "size": 8357,
+      "sha256": "254d2c438960b7146e461b79fa1bd0ded2e69f329ab45ff75129482a9b753222"
+    },
+    {
+      "name": "audio.part001",
+      "size": 7679,
+      "sha256": "74bee7201aac77f8cca1f6bb9c6f4d3f5081c8b53bb2bb2deffc0c184468dc8a"
+    },
+    {
+      "name": "audio.part002",
+      "size": 6551,
+      "sha256": "71e0b2af88276da662293caa1e7b4c17a0a2984c4ddac0c32057bbdcc26dc4b1"
+    }
+  ]
+}

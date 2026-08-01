@@ -101,10 +101,24 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
  * - remote (RIGHT pane, D14): remoteSetpts (drift-ratio rate correction)
  *   THEN its own tpad delay, both strictly before the contain scale/pad.
  * - Two-stage overlay: local composites onto the backdrop FIRST, with the
- *   overlay filter's own `shortest=1` option — this bounds the VIDEO half
- *   of the filtergraph to local's duration alone. Remote composites onto
- *   that result with the default eof_action (repeat), so it never extends
- *   or truncates the video timeline.
+ *   overlay filter's own `shortest=1` option — this bounds that stage's
+ *   output to local's duration alone. Remote composites onto that result
+ *   — and this second stage ALSO carries `shortest=1` (Task 7 e2e finding,
+ *   logged in task-7-report.md): the original single-`shortest=1` design
+ *   assumed the second overlay's default `eof_action=repeat` "never
+ *   extends... the video timeline" once its (already local-capped) main
+ *   input ends. Real ffmpeg does the opposite: `repeat` means the SHORTER
+ *   side's last frame is held while the LONGER side keeps driving output,
+ *   so the composite's actual duration is the UNION (the longer of the
+ *   two), not local's — confirmed against real ffmpeg with a
+ *   remote video genuinely longer than local (drift-stretched + delayed):
+ *   the shipped single-`shortest=1` build produced a 188-frame/6.267s
+ *   video against a 180-frame/6.000s local reference, violating the
+ *   "duration pinned to LOCAL" invariant this file otherwise documents
+ *   (D21). A second `shortest=1` on this stage bounds `[outv]` to
+ *   `min(bg1, rpad)`, which — since bg1 is already exactly local's
+ *   duration from the first stage — is local's duration regardless of
+ *   whether remote ends up longer OR shorter.
  * - Audio (D21, controller ruling on this task's review): the video-side
  *   `shortest=1` above does NOT bound the audio. The already-mixed,
  *   already-aligned episode m4a (upstream mixApplyArgs's amix defaults to
@@ -147,7 +161,10 @@ export function compositeArgs(
     localChain,
     remoteChain,
     `[0:v][lpad]overlay=${layout.left.x}:${layout.left.y}:shortest=1[bg1]`,
-    `[bg1][rpad]overlay=${layout.right.x}:${layout.right.y}[outv]`,
+    // shortest=1 here too (Task 7 finding, see the doc comment above): bg1
+    // is already exactly local's duration, so this bounds [outv] to
+    // min(bg1, rpad) = local's duration regardless of which side is longer.
+    `[bg1][rpad]overlay=${layout.right.x}:${layout.right.y}:shortest=1[outv]`,
     // D21: infinite-pad the audio so it never ends before the video does —
     // paired with the output-level `-shortest` below, the container's real
     // duration is then exactly the (already local-capped) video's.

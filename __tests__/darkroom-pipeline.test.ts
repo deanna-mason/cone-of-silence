@@ -193,14 +193,39 @@ describe("composite.mjs — compositeArgs", () => {
     expect(shortestIdx).toBeGreaterThan(lastMapIdx);
     expect(shortestIdx).toBeLessThan(args.length - 1);
 
-    // Duration-pin mechanism (video side, unchanged): the LOCAL overlay
-    // stage (only) carries the per-filter overlay `shortest=1` option —
-    // this bounds the video half of the filtergraph to local's length,
-    // without using ffmpeg's global `-shortest` output flag for THIS
-    // purpose (which would let a short remote win arbitrarily — the
-    // reason the plan text banned it in the first place, per D21 above).
+    // Duration-pin mechanism (video side): BOTH overlay stages carry the
+    // per-filter `shortest=1` option, not just the first (Task 7 e2e
+    // finding, real-ffmpeg-confirmed, logged in task-7-report.md and in
+    // composite.mjs's own doc comment): the original single-`shortest=1`
+    // build assumed the second overlay's default `eof_action=repeat` never
+    // extends the timeline once its main input (bg1, already local-capped)
+    // ends — real ffmpeg does the opposite, extending output to the UNION
+    // (longer) of the two when the overlay/secondary input outlasts main.
+    // A real fixture with remote genuinely longer than local (drift-
+    // stretched + delayed) measured a 188-frame/6.267s output against a
+    // 180-frame/6.000s local reference under the single-`shortest=1`
+    // build — this is what the second occurrence fixes. Global `-shortest`
+    // is still not used for THIS purpose (it would let a short remote win
+    // arbitrarily — the reason the plan text banned it in the first place,
+    // per D21 above); both pins are the narrower per-filter option.
     expect(fc).toContain(":shortest=1");
-    expect((fc.match(/:shortest=1/g) || []).length).toBe(1);
+    expect((fc.match(/:shortest=1/g) || []).length).toBe(2);
+  });
+
+  it("second overlay stage (remote onto bg1) also carries shortest=1, bounding [outv] to min(bg1, rpad) = local's duration (Task 7 finding)", () => {
+    const args = compositeArgs(
+      "/tmp/backdrop.png",
+      "/tmp/local.webm",
+      "/tmp/remote.webm",
+      LAYOUT,
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 250 } },
+      "/tmp/episode.m4a",
+      "/tmp/out.mp4",
+    );
+    const fc = filterComplexOf(args);
+    const secondOverlaySeg = fc.split(";").find((seg) => seg.includes("[bg1][rpad]overlay="));
+    expect(secondOverlaySeg).toBeDefined();
+    expect(secondOverlaySeg).toContain(":shortest=1");
   });
 });
 

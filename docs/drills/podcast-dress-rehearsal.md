@@ -47,7 +47,18 @@ between the two Macs.
 
 ## Full dress rehearsal — 40 minutes (5C-time)
 
-Not run yet — the darkroom (5C) has to exist first to make 40 minutes of
-tape worth generating. Repeat the take drill above end to end as a single
-40-minute take once 5C lands, and confirm the darkroom picks up the episode
-manifest and processes it.
+Run after `node e2e/darkroom-e2e.js` passes twice headless — this is the
+human half of the same acceptance. Repeat the take drill above end to end as
+a single 40-minute take, exchange the episode (Slice 5B drill), then:
+
+| # | Step | Expect |
+|---|------|--------|
+| 15 | On the receiving Mac, start `npm run darkroom -- --vault <vault> --own-codename <yours>` | It watches the vault hands-off — no `--develop` flag, no manual trigger |
+| 16 | Wait for the manifest to complete | The darkroom fires on its own and develops the episode |
+| 17 | Listen to `episode.m4a`, start AND end | Both hosts' tone marks are fused (one clean sync tone each end, not doubled) |
+| 18 | Watch `episode.mp4`, start AND end | Lip-sync holds at both ends |
+| 19 | Eyeball the dossier backdrop (`template.html`) | Design checkpoint for Deanna — draft aged-dossier look, codename labels, stamp |
+
+Quality-max alternative (rejected for live use): native iPhone 4K capture —
+iOS camera exclusivity means the phone can't feed the call while recording,
+so no live monitoring.
