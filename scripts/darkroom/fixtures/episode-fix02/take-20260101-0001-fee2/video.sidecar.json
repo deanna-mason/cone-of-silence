@@ -1,0 +1,20 @@
+{
+  "base": "video",
+  "parts": [
+    {
+      "name": "video.part000",
+      "size": 57761,
+      "sha256": "0497f805254d0779c41dadf8d61ad40383eec442006156875f7aa49d21653d76"
+    },
+    {
+      "name": "video.part001",
+      "size": 53079,
+      "sha256": "f110820585161dc461a70b1301e0583a3ee234d91348cba587b5d0f6fba72972"
+    },
+    {
+      "name": "video.part002",
+      "size": 45273,
+      "sha256": "033675298379b2b934adb91104d527ce3198537f81275c3ffbf5a35242c83687"
+    }
+  ]
+}

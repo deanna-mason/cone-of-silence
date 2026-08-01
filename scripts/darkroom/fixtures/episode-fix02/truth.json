@@ -1,0 +1,23 @@
+{
+  "sampleRate": 48000,
+  "local": {
+    "startSample": 48000,
+    "endSample": 249600,
+    "startS": 1,
+    "endS": 5.2,
+    "trackS": 6
+  },
+  "remote": {
+    "startSample": 59988,
+    "endSample": 261548,
+    "startS": 1.24975,
+    "endS": 5.448916666666666,
+    "trackS": 6
+  },
+  "ratio": 1.000198452073824,
+  "ratioTarget": 1.0002,
+  "ratioDeviationPpm": -1.5479261759043794,
+  "expectedDelayMs": 249.998,
+  "expectedWho": "local",
+  "notes": "All fields above are computed directly from the sample positions this generator injects synthesizeMark() at — never from running the darkroom pipeline. ratio = localSpan/remoteSpan per drift.mjs's driftRatio contract. expectedDelayMs/expectedWho mirror alignment()'s own contract: diff = localStart - remoteStart*ratio; diff>=0 => who=remote."
+}

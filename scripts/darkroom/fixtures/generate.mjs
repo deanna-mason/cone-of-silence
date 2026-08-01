@@ -1,20 +1,33 @@
 #!/usr/bin/env node
 // Fixture generator (provenance only — run ONCE, its OUTPUT is what's
-// committed under scripts/darkroom/fixtures/episode-fix01/; the e2e runs
-// those committed bytes, never this script). Builds a complete two-host
-// take dir with real tone marks, real opus/vp8 media (real ffmpeg), and a
-// `truth.json` ground-truth file computed directly from the generation
-// parameters below — never from running the darkroom pipeline itself (that
-// would make truth.json circular: "the pipeline is right because it agrees
-// with itself").
+// committed under scripts/darkroom/fixtures/episode-fix0{1,2}/; the e2e
+// runs those committed bytes, never this script). Builds two complete
+// two-host take dirs with real tone marks, real opus/vp8 media (real
+// ffmpeg), and a `truth.json` ground-truth file per fixture computed
+// directly from the generation parameters below — never from running the
+// darkroom pipeline itself (that would make truth.json circular: "the
+// pipeline is right because it agrees with itself").
 //
-// Two brief-text corrections made here, both logged in task-7-report.md:
+// TWO fixtures, not one (Task 7 review round 2 — COVERAGE requirement):
+// episode-fix01 has `who: "remote"` (remote's mark comes earlier, gets
+// delayed); episode-fix02 has `who: "local"` (mirror image — local's mark
+// comes earlier, LOCAL gets delayed). The e2e runs BOTH through the real
+// watcher + developEpisode + compositeArgs, because a composite.mjs bug
+// that only manifests in one direction (exactly what happened: round 1's
+// fix pinned mp4 duration to whichever side was SHORTER, not to local
+// specifically — see composite.mjs's doc comment and task-7-report.md's
+// fix-report addendum) is invisible to a gate that only ever exercises one
+// offset sign.
+//
+// Two brief-text corrections made for episode-fix01, both logged in
+// task-7-report.md:
 //
 // 1. Directory/episodeId suffix: the brief's literal `take-20260101-0000-
 //    fix1` is NOT a valid take dir name — vault.mjs's TAKE_DIR_RE requires
 //    the last 4 chars to be `[0-9a-f]{4}` (hex), and 'i'/'x' aren't hex
 //    digits. scanVault() would silently skip it, so the watcher (check 1)
-//    would never fire. Uses `fee1` instead (hex-valid: f,e,e,1).
+//    would never fire. Uses `fee1` instead (hex-valid: f,e,e,1); fix02
+//    uses `fee2` for the same reason.
 //
 // 2. Remote mark timing: the brief's literal "marks at 1.000s and 5.1990s"
 //    (a 4-decimal rounding) implies a remote span of 4.199s, giving
@@ -22,19 +35,33 @@
 //    "ratio 1.0002" target, an order of magnitude past the e2e's own ±5ppm
 //    gate. The actual sample-accurate span for ratio 1.0002 is
 //    localSpan/1.0002 = 201600/1.0002 = 201559.688 samples, rounded to the
-//    nearest sample (201560) — see REMOTE_SPAN below — which recovers a
-//    ratio only ~1.6 ppm off target. The end mark this places is
-//    ~5.19917s, not 5.1990s; that's the number actually generated and
-//    recorded in truth.json.
+//    nearest sample (201560, shared by both fixtures) — which recovers a
+//    ratio only ~1.6 ppm off target.
 //
-// Offset: remote's start mark sits at 0.750s in its own file (vs. local's
-// 1.000s) — a genuine 250ms-class offset for alignment() to correct, not
-// just the ~0.2ms the ratio scaling alone would produce. After ratio
-// correction this resolves to a ~249.85ms delay applied to remote (see the
-// computed truth.expectedDelayMs/expectedWho below) — close to, but not
-// exactly, "250ms" by design: the ratio scaling itself contributes a small
-// residual, and that residual being present-and-small is itself part of
-// what the e2e's alignment check is proving.
+// Offset/residual tuning: each fixture's non-local mark position is chosen
+// (not the round "0.75s"/"1.25s" it's near) so alignment()'s computed
+// delayMs lands within a few microseconds of a WHOLE millisecond. `adelay`
+// only has integer-millisecond resolution, and at the 2417Hz tone band a
+// half-millisecond of unmodeled residual is more than a full cycle — a
+// careless offset choice left an early draft of fixture 1 with one tone
+// band's SNR just under the matched-filter's 6x gate purely from residual
+// sub-ms phase cancellation between the two hosts' copies, nothing to do
+// with drift correction actually being wrong. See each fixture's REMOTE_
+// START/LOCAL_START comment for its specific chosen value.
+// Note on re-running this script: the synthesized PCM content (noise bed +
+// injected marks) and every truth.json field are fully deterministic (a
+// seeded LCG only, no Date.now/Math.random) — but ffmpeg's own webm/
+// matroska muxer stamps a wall-clock DateUTC (and a per-mux random Segment
+// UID) into each container's header REGARDLESS of our input, so re-running
+// this generator produces a fixture with the identical decoded audio/video
+// content and identical truth.json numbers, but NOT necessarily
+// byte-identical committed files (confirmed: re-running produced a 16-byte
+// diff in fixture 1's audio.part000, isolated to two 8-byte fields via
+// `cmp -l`, consistent with a muxer timestamp). This is fine for this
+// generator's actual job — the COMMITTED bytes are the source of truth the
+// e2e runs against, per the plan's "run once, then commit" instruction; the
+// script itself is kept for provenance/documentation, not as a
+// reproducible-build guarantee.
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -46,40 +73,6 @@ import { makeRunner } from "../runner.mjs";
 import { decodePcm } from "../decode.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const FIX_ROOT = path.join(SCRIPT_DIR, "episode-fix01");
-const TAKE_ID = "take-20260101-0000-fee1";
-const TAKE_DIR = path.join(FIX_ROOT, TAKE_ID);
-const REMOTE_DIR = path.join(TAKE_DIR, "remote");
-
-const TRACK_S = 6.0;
-const TRACK_SAMPLES = Math.round(TRACK_S * SAMPLE_RATE); // 288000
-
-// ---- ground-truth generation parameters — the ONLY source of truth.json's
-// numbers. Nothing below this block is derived by running the pipeline. ----
-const LOCAL_START = Math.round(1.0 * SAMPLE_RATE); // 48000 (1.000s)
-const LOCAL_END = Math.round(5.2 * SAMPLE_RATE); // 249600 (5.200s)
-const LOCAL_SPAN = LOCAL_END - LOCAL_START; // 201600
-
-const TARGET_RATIO = 1.0002; // 200ppm fast remote clock (spec)
-const REMOTE_SPAN = Math.round(LOCAL_SPAN / TARGET_RATIO); // 201560
-// 35993, not the rounder 36000 (~0.750s): chosen so the delay alignment()
-// computes lands within a few microseconds of a WHOLE millisecond (see
-// task-7-report.md's "adelay granularity" note) — adelay's own resolution
-// is integer milliseconds, and at the 2417Hz tone band a half-millisecond
-// of unmodeled residual is more than a full cycle, so a careless offset
-// choice can leave the two hosts' end-to-end mixed copies of the mark
-// PARTIALLY destructively interfering even though the alignment math is
-// exactly correct. 35993 keeps that residual under 0.01ms (~0.4 samples),
-// negligible at both tone frequencies, while still sitting close to the
-// spec's "~250ms offset" (35993 samples = 0.749854s, i.e. still "0.750s"
-// to 3 decimals).
-const REMOTE_START = 35993;
-const REMOTE_END = REMOTE_START + REMOTE_SPAN;
-
-const RATIO = LOCAL_SPAN / REMOTE_SPAN; // the ACTUAL ratio these sample positions encode
-
-const NOISE_AMPLITUDE = 0.02;
-const HEADROOM = 0.9; // keeps injected-mark peaks + noise floor under +/-1.0 before opus encode
 
 function seededLcg(seed) {
   let state = seed >>> 0;
@@ -110,8 +103,11 @@ function injectMark(track, startSample) {
   for (let i = 0; i < mark.length; i++) track[startSample + i] += mark[i];
 }
 
-function buildTrack(seed, marks) {
-  const track = noiseBed(TRACK_SAMPLES, seed, NOISE_AMPLITUDE);
+const NOISE_AMPLITUDE = 0.02;
+const HEADROOM = 0.9; // keeps injected-mark peaks + noise floor under +/-1.0 before opus encode
+
+function buildTrack(length, seed, marks) {
+  const track = noiseBed(length, seed, NOISE_AMPLITUDE);
   for (const at of marks) injectMark(track, at);
   for (let i = 0; i < track.length; i++) track[i] *= HEADROOM;
   return track;
@@ -171,7 +167,7 @@ async function encodeAudio(pcm, outPath) {
   }
 }
 
-async function encodeVideo(outPath) {
+async function encodeVideo(outPath, trackS) {
   // testsrc's own built-in scrolling-gradient + timestamp burn-in requires
   // no drawtext/freetype (D10: this ffmpeg build has neither) — the source
   // filter renders its own counter with a hardcoded bitmap font.
@@ -182,7 +178,7 @@ async function encodeVideo(outPath) {
     "-f",
     "lavfi",
     "-i",
-    `testsrc=size=320x180:rate=30:duration=${TRACK_S}`,
+    `testsrc=size=320x180:rate=30:duration=${trackS}`,
     "-c:v",
     "libvpx",
     "-b:v",
@@ -224,25 +220,42 @@ async function writeParts(dir, base, buf) {
   return entries;
 }
 
-async function main() {
-  await fsp.rm(FIX_ROOT, { recursive: true, force: true });
-  await fsp.mkdir(REMOTE_DIR, { recursive: true });
+/**
+ * Builds one complete fixture take dir + its own truth.json.
+ *
+ * `cfg`: { dirName, takeId, completedAt, trackS, local: {start,end,seed},
+ * remote: {start,end,seed,trackS?} } — all sample positions are absolute
+ * generation parameters; nothing here is derived by running the pipeline.
+ */
+async function buildFixture(cfg) {
+  const fixRoot = path.join(SCRIPT_DIR, cfg.dirName);
+  const takeDir = path.join(fixRoot, cfg.takeId);
+  const remoteDir = path.join(takeDir, "remote");
 
-  console.log(`generating: local marks ${LOCAL_START}/${LOCAL_END} (span ${LOCAL_SPAN}), ` +
-    `remote marks ${REMOTE_START}/${REMOTE_END} (span ${REMOTE_SPAN}), ratio ${RATIO}`);
+  await fsp.rm(fixRoot, { recursive: true, force: true });
+  await fsp.mkdir(remoteDir, { recursive: true });
 
-  const localAudioPcm = buildTrack(0xc0de1, [LOCAL_START, LOCAL_END]);
-  const remoteAudioPcm = buildTrack(0xc0de2, [REMOTE_START, REMOTE_END]);
+  const localSamples = Math.round(cfg.trackS * SAMPLE_RATE);
+  const remoteTrackS = cfg.remote.trackS ?? cfg.trackS;
+  const remoteSamples = Math.round(remoteTrackS * SAMPLE_RATE);
 
-  const localAudioWebm = path.join(TAKE_DIR, "local-audio.webm.tmp");
-  const remoteAudioWebm = path.join(TAKE_DIR, "remote-audio.webm.tmp");
-  const localVideoWebm = path.join(TAKE_DIR, "local-video.webm.tmp");
-  const remoteVideoWebm = path.join(TAKE_DIR, "remote-video.webm.tmp");
+  console.log(
+    `generating ${cfg.dirName}: local marks ${cfg.local.start}/${cfg.local.end}, ` +
+      `remote marks ${cfg.remote.start}/${cfg.remote.end}, ratio ${cfg.ratio}`,
+  );
+
+  const localAudioPcm = buildTrack(localSamples, cfg.local.seed, [cfg.local.start, cfg.local.end]);
+  const remoteAudioPcm = buildTrack(remoteSamples, cfg.remote.seed, [cfg.remote.start, cfg.remote.end]);
+
+  const localAudioWebm = path.join(takeDir, "local-audio.webm.tmp");
+  const remoteAudioWebm = path.join(takeDir, "remote-audio.webm.tmp");
+  const localVideoWebm = path.join(takeDir, "local-video.webm.tmp");
+  const remoteVideoWebm = path.join(takeDir, "remote-video.webm.tmp");
 
   await encodeAudio(localAudioPcm, localAudioWebm);
   await encodeAudio(remoteAudioPcm, remoteAudioWebm);
-  await encodeVideo(localVideoWebm);
-  await encodeVideo(remoteVideoWebm);
+  await encodeVideo(localVideoWebm, cfg.trackS);
+  await encodeVideo(remoteVideoWebm, remoteTrackS);
 
   // ---- generation-time consistency spot-check (NOT the ground truth
   // itself — a sanity net that the real opus encode round-trip hasn't
@@ -257,69 +270,73 @@ async function main() {
     const { start, end } = findMarks(pcm);
     const dStart = Math.abs(start - expectedStart);
     const dEnd = Math.abs(end - expectedEnd);
-    console.log(`spot-check ${label}: found start=${start} (expected ${expectedStart}, delta ${dStart}), end=${end} (expected ${expectedEnd}, delta ${dEnd})`);
+    console.log(
+      `spot-check ${label}: found start=${start} (expected ${expectedStart}, delta ${dStart}), end=${end} (expected ${expectedEnd}, delta ${dEnd})`,
+    );
     if (dStart > SPOT_CHECK_TOLERANCE || dEnd > SPOT_CHECK_TOLERANCE) {
       throw new Error(`${label}: opus round-trip moved a mark by more than ${SPOT_CHECK_TOLERANCE} samples`);
     }
   }
-  await spotCheck("local", localAudioWebm, LOCAL_START, LOCAL_END);
-  await spotCheck("remote", remoteAudioWebm, REMOTE_START, REMOTE_END);
+  await spotCheck(`${cfg.dirName}/local`, localAudioWebm, cfg.local.start, cfg.local.end);
+  await spotCheck(`${cfg.dirName}/remote`, remoteAudioWebm, cfg.remote.start, cfg.remote.end);
 
-  const localAudioEntries = await writeParts(TAKE_DIR, "audio", await fsp.readFile(localAudioWebm));
-  const localVideoEntries = await writeParts(TAKE_DIR, "video", await fsp.readFile(localVideoWebm));
-  const remoteAudioEntries = await writeParts(REMOTE_DIR, "audio", await fsp.readFile(remoteAudioWebm));
-  const remoteVideoEntries = await writeParts(REMOTE_DIR, "video", await fsp.readFile(remoteVideoWebm));
+  const localAudioEntries = await writeParts(takeDir, "audio", await fsp.readFile(localAudioWebm));
+  const localVideoEntries = await writeParts(takeDir, "video", await fsp.readFile(localVideoWebm));
+  const remoteAudioEntries = await writeParts(remoteDir, "audio", await fsp.readFile(remoteAudioWebm));
+  const remoteVideoEntries = await writeParts(remoteDir, "video", await fsp.readFile(remoteVideoWebm));
 
   // Local sidecars — real-vault-shaped (lib/podcast/vault.ts's PartWriter
   // writes these), for take-dir realism. The darkroom pipeline itself never
   // reads them (it reads local entries straight out of the manifest), so
   // this is provenance/realism only, not a functional dependency.
   await fsp.writeFile(
-    path.join(TAKE_DIR, "audio.sidecar.json"),
+    path.join(takeDir, "audio.sidecar.json"),
     JSON.stringify({ base: "audio", parts: localAudioEntries }, null, 2),
   );
   await fsp.writeFile(
-    path.join(TAKE_DIR, "video.sidecar.json"),
+    path.join(takeDir, "video.sidecar.json"),
     JSON.stringify({ base: "video", parts: localVideoEntries }, null, 2),
   );
 
   const manifest = {
     version: 1,
-    episodeId: TAKE_ID,
+    episodeId: cfg.takeId,
     receivedFrom: "NIGHTINGALE",
-    completedAt: "2026-01-01T00:10:00.000Z",
+    completedAt: cfg.completedAt,
     local: { audio: localAudioEntries, video: localVideoEntries },
     remote: { audio: remoteAudioEntries, video: remoteVideoEntries },
   };
-  await fsp.writeFile(path.join(TAKE_DIR, "episode.json"), JSON.stringify(manifest, null, 2));
+  await fsp.writeFile(path.join(takeDir, "episode.json"), JSON.stringify(manifest, null, 2));
 
   for (const f of [localAudioWebm, remoteAudioWebm, localVideoWebm, remoteVideoWebm]) {
     await fsp.rm(f, { force: true });
   }
 
   // ---- ground truth: computed from the generation parameters above ONLY. ----
-  const expectedRemoteStartCorrected = REMOTE_START * RATIO;
-  const diff = LOCAL_START - expectedRemoteStartCorrected; // >0 => remote earlier
+  const expectedRemoteStartCorrected = cfg.remote.start * cfg.ratio;
+  const diff = cfg.local.start - expectedRemoteStartCorrected; // >0 => remote earlier
   const expectedWho = diff >= 0 ? "remote" : "local";
   const expectedDelayMs = Number(((Math.abs(diff) / SAMPLE_RATE) * 1000).toFixed(3));
 
   const truth = {
     sampleRate: SAMPLE_RATE,
     local: {
-      startSample: LOCAL_START,
-      endSample: LOCAL_END,
-      startS: LOCAL_START / SAMPLE_RATE,
-      endS: LOCAL_END / SAMPLE_RATE,
+      startSample: cfg.local.start,
+      endSample: cfg.local.end,
+      startS: cfg.local.start / SAMPLE_RATE,
+      endS: cfg.local.end / SAMPLE_RATE,
+      trackS: cfg.trackS,
     },
     remote: {
-      startSample: REMOTE_START,
-      endSample: REMOTE_END,
-      startS: REMOTE_START / SAMPLE_RATE,
-      endS: REMOTE_END / SAMPLE_RATE,
+      startSample: cfg.remote.start,
+      endSample: cfg.remote.end,
+      startS: cfg.remote.start / SAMPLE_RATE,
+      endS: cfg.remote.end / SAMPLE_RATE,
+      trackS: remoteTrackS,
     },
-    ratio: RATIO,
-    ratioTarget: TARGET_RATIO,
-    ratioDeviationPpm: (RATIO - TARGET_RATIO) * 1e6,
+    ratio: cfg.ratio,
+    ratioTarget: cfg.ratioTarget,
+    ratioDeviationPpm: (cfg.ratio - cfg.ratioTarget) * 1e6,
     expectedDelayMs,
     expectedWho,
     notes:
@@ -329,9 +346,63 @@ async function main() {
       "contract. expectedDelayMs/expectedWho mirror alignment()'s own " +
       "contract: diff = localStart - remoteStart*ratio; diff>=0 => who=remote.",
   };
-  await fsp.writeFile(path.join(FIX_ROOT, "truth.json"), JSON.stringify(truth, null, 2));
+  await fsp.writeFile(path.join(fixRoot, "truth.json"), JSON.stringify(truth, null, 2));
 
-  console.log("fixture generated:", TAKE_DIR);
+  console.log(`fixture generated: ${takeDir} (expectedWho=${expectedWho}, expectedDelayMs=${expectedDelayMs})`);
+}
+
+// ---- fixture 1: who === "remote" (remote's mark comes earlier; remote
+// gets delayed). Unchanged since the first cut of this generator — see the
+// module header for the ratio/offset derivation. ----
+const LOCAL_SPAN_1 = 249600 - 48000;
+const TARGET_RATIO = 1.0002;
+const REMOTE_SPAN = Math.round(LOCAL_SPAN_1 / TARGET_RATIO); // 201560, shared by both fixtures
+const RATIO = LOCAL_SPAN_1 / REMOTE_SPAN;
+
+const FIXTURE_1 = {
+  dirName: "episode-fix01",
+  takeId: "take-20260101-0000-fee1",
+  completedAt: "2026-01-01T00:10:00.000Z",
+  trackS: 6.0,
+  ratio: RATIO,
+  ratioTarget: TARGET_RATIO,
+  local: { start: 48000, end: 249600, seed: 0xc0de1 }, // 1.000s / 5.200s
+  // 35993, not the rounder 36000 (~0.750s): chosen so alignment()'s
+  // computed delayMs lands within ~0.003ms of a whole millisecond (see
+  // module header). 35993/48000 = 0.749854s.
+  remote: { start: 35993, end: 35993 + REMOTE_SPAN, seed: 0xc0de2 },
+};
+
+// ---- fixture 2: who === "local" (mirror image — local's mark comes
+// earlier; LOCAL gets delayed). New in Task 7 review round 2 (COVERAGE):
+// exercises the composite.mjs code path the round-1 duration-pin fix got
+// backwards (see composite.mjs's doc comment). Same local marks/ratio as
+// fixture 1; only the "which side has the bigger lead-in" is flipped. ----
+const FIXTURE_2 = {
+  dirName: "episode-fix02",
+  takeId: "take-20260101-0001-fee2",
+  completedAt: "2026-01-01T00:11:00.000Z",
+  trackS: 6.0,
+  ratio: RATIO,
+  ratioTarget: TARGET_RATIO,
+  local: { start: 48000, end: 249600, seed: 0xfee1a }, // same local marks as fixture 1
+  // 59988, not the rounder 60000 (~1.250s): chosen the same way as
+  // fixture 1's 35993 — alignment()'s computed delayMs (249.998ms) lands
+  // within ~0.002ms of a whole millisecond. 59988/48000 = 1.249750s.
+  // trackS deliberately matches local's 6.0s (not padded out, ~0.13s tail
+  // margin after the end mark) rather than a safer-but-longer track: this
+  // is the specific shape that exposes the round-1 composite bug — with
+  // BOTH raw tracks the same 6.0s length, local's OWN 250ms delay is what
+  // makes its chain (6.25s) longer than remote's (6.0s), so a duration-pin
+  // mechanism that secretly picks "whichever side is shorter" instead of
+  // "local specifically" fails on exactly this case (reviewer's own repro:
+  // "remote chain shorter even with EQUAL recordings").
+  remote: { start: 59988, end: 59988 + REMOTE_SPAN, seed: 0xfee2b },
+};
+
+async function main() {
+  await buildFixture(FIXTURE_1);
+  await buildFixture(FIXTURE_2);
 }
 
 main().catch((err) => {

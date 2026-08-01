@@ -193,37 +193,54 @@ describe("composite.mjs — compositeArgs", () => {
     expect(shortestIdx).toBeGreaterThan(lastMapIdx);
     expect(shortestIdx).toBeLessThan(args.length - 1);
 
-    // Duration-pin mechanism (video side): BOTH overlay stages carry the
-    // per-filter `shortest=1` option, not just the first (Task 7 e2e
-    // finding, real-ffmpeg-confirmed, logged in task-7-report.md and in
-    // composite.mjs's own doc comment): the original single-`shortest=1`
-    // build assumed the second overlay's default `eof_action=repeat` never
-    // extends the timeline once its main input (bg1, already local-capped)
-    // ends — real ffmpeg does the opposite, extending output to the UNION
-    // (longer) of the two when the overlay/secondary input outlasts main.
-    // A real fixture with remote genuinely longer than local (drift-
-    // stretched + delayed) measured a 188-frame/6.267s output against a
-    // 180-frame/6.000s local reference under the single-`shortest=1`
-    // build — this is what the second occurrence fixes. Global `-shortest`
-    // is still not used for THIS purpose (it would let a short remote win
-    // arbitrarily — the reason the plan text banned it in the first place,
-    // per D21 above); both pins are the narrower per-filter option.
-    expect(fc).toContain(":shortest=1");
-    expect((fc.match(/:shortest=1/g) || []).length).toBe(2);
+    // Duration-pin mechanism (video side), ROUND 2 (Task 7 review): exactly
+    // ONE `:shortest=1`, and it must sit on the LAST overlay stage (the one
+    // whose secondary input is `lpad`, local's own chain) — not the first.
+    //
+    // Round 1 (shipped, then reverted — see composite.mjs's doc comment for
+    // the full derivation) put local FIRST with its own `shortest=1`
+    // (making bg1 finite, exactly local's length) and added a SECOND
+    // `shortest=1` on remote's stage. That computes min(bg1, rpad) =
+    // min(localLen, remoteLen) — pins to whichever side is SHORTER, not to
+    // local specifically. It happened to look right against the bug report
+    // that motivated it (remote longer than local) and silently pinned to
+    // REMOTE instead the moment local was the longer side (`who ===
+    // "local"`, content loss + truncated audio via the output `-shortest`
+    // below) — reviewer-measured 150fr/5.000s against a 180fr/6.000s local
+    // reference. The corrected graph puts remote FIRST with no shortest
+    // (bg1 stays effectively infinite, driven by the looped backdrop input,
+    // regardless of remote's length) and local LAST carrying the ONLY
+    // shortest=1 — order-independent, verified 180fr/6.000s with either
+    // side longer (e2e now runs both directions: episode-fix01 is
+    // `who: "remote"`, episode-fix02 is `who: "local"`).
+    expect((fc.match(/:shortest=1/g) || []).length).toBe(1);
+    const lastOverlaySeg = fc.split(";").find((seg) => seg.includes("overlay=") && seg.includes(":shortest=1"));
+    expect(lastOverlaySeg).toBeDefined();
+    expect(lastOverlaySeg).toContain("[lpad]");
+    expect(lastOverlaySeg).toContain("[outv]");
   });
 
-  it("second overlay stage (remote onto bg1) also carries shortest=1, bounding [outv] to min(bg1, rpad) = local's duration (Task 7 finding)", () => {
+  it("first overlay stage (remote onto the backdrop) carries NO shortest — bg1 must stay effectively infinite regardless of remote's length (Task 7 review round 2)", () => {
     const args = compositeArgs(
       "/tmp/backdrop.png",
       "/tmp/local.webm",
       "/tmp/remote.webm",
       LAYOUT,
-      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 250 } },
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 250, remote: 0 } },
       "/tmp/episode.m4a",
       "/tmp/out.mp4",
     );
     const fc = filterComplexOf(args);
-    const secondOverlaySeg = fc.split(";").find((seg) => seg.includes("[bg1][rpad]overlay="));
+    const firstOverlaySeg = fc.split(";").find((seg) => seg.includes("[0:v][rpad]overlay="));
+    expect(firstOverlaySeg).toBeDefined();
+    expect(firstOverlaySeg).not.toContain("shortest");
+    expect(firstOverlaySeg).toContain("[bg1]");
+
+    // And the second/last stage overlays LOCAL onto bg1, carrying the sole
+    // shortest=1 — this is the who==="local" direction (local delayed,
+    // so LOCAL is the longer chain here): the graph shape must not change
+    // based on which side happens to be longer.
+    const secondOverlaySeg = fc.split(";").find((seg) => seg.includes("[bg1][lpad]overlay="));
     expect(secondOverlaySeg).toBeDefined();
     expect(secondOverlaySeg).toContain(":shortest=1");
   });

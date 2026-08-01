@@ -100,25 +100,44 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
  *   the earlier side. Never setpts — local is the reference timeline.
  * - remote (RIGHT pane, D14): remoteSetpts (drift-ratio rate correction)
  *   THEN its own tpad delay, both strictly before the contain scale/pad.
- * - Two-stage overlay: local composites onto the backdrop FIRST, with the
- *   overlay filter's own `shortest=1` option — this bounds that stage's
- *   output to local's duration alone. Remote composites onto that result
- *   — and this second stage ALSO carries `shortest=1` (Task 7 e2e finding,
- *   logged in task-7-report.md): the original single-`shortest=1` design
- *   assumed the second overlay's default `eof_action=repeat` "never
- *   extends... the video timeline" once its (already local-capped) main
- *   input ends. Real ffmpeg does the opposite: `repeat` means the SHORTER
- *   side's last frame is held while the LONGER side keeps driving output,
- *   so the composite's actual duration is the UNION (the longer of the
- *   two), not local's — confirmed against real ffmpeg with a
- *   remote video genuinely longer than local (drift-stretched + delayed):
- *   the shipped single-`shortest=1` build produced a 188-frame/6.267s
- *   video against a 180-frame/6.000s local reference, violating the
- *   "duration pinned to LOCAL" invariant this file otherwise documents
- *   (D21). A second `shortest=1` on this stage bounds `[outv]` to
- *   `min(bg1, rpad)`, which — since bg1 is already exactly local's
- *   duration from the first stage — is local's duration regardless of
- *   whether remote ends up longer OR shorter.
+ * - Two-stage overlay, REMOTE FIRST then LOCAL LAST (Task 7 review, round 2
+ *   — the round-1 fix below was itself wrong; both are logged in
+ *   task-7-report.md's fix-report addendum for the full derivation):
+ *
+ *   `[0:v][rpad]overlay=<rx>:<ry>[bg1]` (remote onto the backdrop, NO
+ *   shortest) `;[bg1][lpad]overlay=<lx>:<ly>:shortest=1[outv]` (local onto
+ *   that, WITH shortest=1 — the only shortest anywhere in this graph).
+ *
+ *   Why order matters and a single `shortest=1` isn't enough on its own:
+ *   the backdrop input is `-loop 1`, i.e. genuinely infinite. Stage 1 has
+ *   no `shortest`, so with the default `eof_action=repeat` its MAIN input
+ *   (the infinite backdrop) is what keeps driving output — remote's last
+ *   frame just freezes once remote's own (possibly delayed/drift-stretched)
+ *   video ends, regardless of whether remote is longer or shorter than
+ *   local. `bg1` therefore stays infinite no matter remote's length. Stage
+ *   2's `shortest=1` then bounds `[outv]` to `min(bg1, lpad)` —
+ *   `min(infinite, local's own duration)` — which is exactly local's
+ *   duration, unconditionally, regardless of which of {local, remote} is
+ *   actually longer.
+ *
+ *   ROUND 1 of this fix (shipped, then reverted) put local FIRST and added
+ *   a second `shortest=1` on remote's stage instead:
+ *   `[0:v][lpad]overlay=...:shortest=1[bg1];[bg1][rpad]overlay=...:shortest=1[outv]`.
+ *   That makes stage 1's `bg1` FINITE (exactly local's own duration, via
+ *   its own shortest=1) — so stage 2's `shortest=1` then computes
+ *   `min(bg1, rpad)` = `min(localLen, remoteLen)`, i.e. it pins to
+ *   WHICHEVER SIDE IS SHORTER, not to local specifically. Reviewer measured
+ *   both directions against real ffmpeg: with remote genuinely longer than
+ *   local, round 1 correctly landed on local's 180fr/6.000s (the case the
+ *   original Task 5 bug report used, which is why round 1 looked right);
+ *   with LOCAL genuinely longer (the `who === "local"` half of the offset
+ *   space — local is the side that gets tpad-delayed and so becomes the
+ *   longer chain), round 1 pinned to remote's 150fr/5.000s instead —
+ *   content loss, with the mixed audio truncating right along with it via
+ *   the output-level `-shortest` below. The remote-first/local-last
+ *   ordering above is order-INDEPENDENT: verified 180fr/6.000s in BOTH
+ *   directions (e2e now exercises both — episode-fix01 is `who: "remote"`,
+ *   episode-fix02 is `who: "local"`).
  * - Audio (D21, controller ruling on this task's review): the video-side
  *   `shortest=1` above does NOT bound the audio. The already-mixed,
  *   already-aligned episode m4a (upstream mixApplyArgs's amix defaults to
@@ -160,11 +179,14 @@ export function compositeArgs(
   const filterComplex = [
     localChain,
     remoteChain,
-    `[0:v][lpad]overlay=${layout.left.x}:${layout.left.y}:shortest=1[bg1]`,
-    // shortest=1 here too (Task 7 finding, see the doc comment above): bg1
-    // is already exactly local's duration, so this bounds [outv] to
-    // min(bg1, rpad) = local's duration regardless of which side is longer.
-    `[bg1][rpad]overlay=${layout.right.x}:${layout.right.y}:shortest=1[outv]`,
+    // Remote first, NO shortest — see the doc comment above for why this
+    // keeps bg1 effectively infinite (driven by the looped backdrop input)
+    // regardless of remote's own length.
+    `[0:v][rpad]overlay=${layout.right.x}:${layout.right.y}[bg1]`,
+    // Local LAST, the only shortest=1 in this graph — bounds [outv] to
+    // min(bg1, lpad) = local's duration, unconditionally (order-independent
+    // fix, Task 7 review round 2; see the doc comment above).
+    `[bg1][lpad]overlay=${layout.left.x}:${layout.left.y}:shortest=1[outv]`,
     // D21: infinite-pad the audio so it never ends before the video does —
     // paired with the output-level `-shortest` below, the container's real
     // duration is then exactly the (already local-capped) video's.

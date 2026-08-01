@@ -55,7 +55,7 @@ a single 40-minute take, exchange the episode (Slice 5B drill), then:
 |---|------|--------|
 | 15 | On the receiving Mac, start `npm run darkroom -- --vault <vault> --own-codename <yours>` | It watches the vault hands-off — no `--develop` flag, no manual trigger |
 | 16 | Wait for the manifest to complete | The darkroom fires on its own and develops the episode |
-| 17 | Listen to `episode.m4a`, start AND end | Both hosts' tone marks are fused (one clean sync tone each end, not doubled) |
+| 17 | Listen to `episode.m4a`, start AND end | The sync tone itself is EXPECTED to be faint or inaudible (the noise-suppression stage removes it, same as it removes hiss — this is provenance, not a listening cue). Judge alignment by SPEECH instead: no doubling/flam/echo of either host's voice at either end |
 | 18 | Watch `episode.mp4`, start AND end | Lip-sync holds at both ends |
 | 19 | Eyeball the dossier backdrop (`template.html`) | Design checkpoint for Deanna — draft aged-dossier look, codename labels, stamp |
 
