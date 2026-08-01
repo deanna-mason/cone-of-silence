@@ -53,6 +53,9 @@ class FakeWritable {
   }
 
   async close(): Promise<void> {
+    // A close() can fail too (disk-full-at-flush is a real failure mode) —
+    // exercised by episodeStore's abandon()-must-never-throw tests.
+    if (this.shouldFailWrite()) throw new Error("disk full");
     const total = this.chunks.reduce((n, c) => n + c.length, 0);
     const committed = new Uint8Array(total);
     let offset = 0;
@@ -64,13 +67,23 @@ class FakeWritable {
   }
 }
 
+// Phase 5B (episodeStore.ts) extends this fake with atomic move() (renamed
+// entry appears under the new name and vanishes under the old in the SAME
+// synchronous step — no `await` between the delete and the set, so nothing
+// can observe an in-between state) and read-only directory listing
+// (getDirectoryHandle/removeEntry/keys), mirrored into
+// __tests__/episode-store.test.ts rather than imported — importing this
+// FILE would re-run its own describe() blocks as part of the importing
+// file, per this repo's existing "mirror the fake, don't import the test
+// file" pattern (see xfer-channel.test.ts mirroring peer-ice.test.ts's FakePC).
 class FakeFileHandle {
   committed = new Uint8Array(0);
   createWritableCallCount = 0;
   constructor(
-    public readonly name: string,
+    public name: string,
     private readonly shouldFailWrite: () => boolean,
-    private readonly gate?: Promise<void>,
+    private readonly gate: Promise<void> | undefined,
+    private readonly parent: FakeDirHandle,
   ) {}
 
   async createWritable(opts?: { keepExistingData?: boolean }): Promise<FakeWritable> {
@@ -88,23 +101,54 @@ class FakeFileHandle {
   async getFile(): Promise<Blob> {
     return new Blob([this.committed]);
   }
+
+  async move(newName: string): Promise<void> {
+    this.parent.ops.push(`move:${this.name}->${newName}`);
+    this.parent.files.delete(this.name);
+    this.name = newName;
+    this.parent.files.set(newName, this);
+  }
 }
 
 class FakeDirHandle {
   files = new Map<string, FakeFileHandle>();
+  dirs = new Map<string, FakeDirHandle>();
   failWriteFor = new Set<string>();
   failOpenFor = new Set<string>();
   gateFor = new Map<string, Promise<void>>();
+  /** Records getFileHandle(create:true) and move() calls, in order — lets
+   *  episodeStore.ts's tests assert a name never exists under its real
+   *  identity until the final move (manifest-last, hash-gated commits). */
+  ops: string[] = [];
 
   async getFileHandle(name: string, opts?: { create?: boolean }): Promise<FakeFileHandle> {
     if (this.failOpenFor.has(name)) throw new Error("disk full opening part");
     let fh = this.files.get(name);
     if (!fh) {
       if (!opts?.create) throw new Error(`not found: ${name}`);
-      fh = new FakeFileHandle(name, () => this.failWriteFor.has(name), this.gateFor.get(name));
+      this.ops.push(`create:${name}`);
+      fh = new FakeFileHandle(name, () => this.failWriteFor.has(name), this.gateFor.get(name), this);
       this.files.set(name, fh);
     }
     return fh;
+  }
+
+  async getDirectoryHandle(name: string, opts?: { create?: boolean }): Promise<FakeDirHandle> {
+    let d = this.dirs.get(name);
+    if (!d) {
+      if (!opts?.create) throw new Error(`not found: ${name}`);
+      d = new FakeDirHandle();
+      this.dirs.set(name, d);
+    }
+    return d;
+  }
+
+  async removeEntry(name: string): Promise<void> {
+    if (!this.files.delete(name)) throw new Error(`not found: ${name}`);
+  }
+
+  async *keys(): AsyncGenerator<string> {
+    for (const name of this.files.keys()) yield name;
   }
 }
 
