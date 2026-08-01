@@ -146,8 +146,9 @@ export class EpisodeReceiver {
       if (!frame) return; // foreign "t" or unparseable JSON — silently ignored, mirrors takeProtocol
       if (frame.t === "xfr/offer") this.onOffer(frame as unknown as Record<string, unknown>);
       else if (frame.t === "xfr/part") this.onPart(frame as unknown as Record<string, unknown>);
-      // xfr/have, xfr/part-committed, xfr/done, xfr/fault are frames THIS
-      // class sends, never receives in a well-formed exchange — ignored.
+      else if (frame.t === "xfr/fault") this.onPeerFault(frame as unknown as Record<string, unknown>);
+      // xfr/have, xfr/part-committed and xfr/done are frames THIS class
+      // sends, never receives in a well-formed exchange — ignored.
     } else {
       this.onChunk(data);
     }
@@ -270,6 +271,29 @@ export class EpisodeReceiver {
     });
   }
 
+  // -- xfr/fault (inbound) ---------------------------------------------------
+
+  /** `xfr/fault` FROM the sender — they gave up on this episode on their own
+   *  side (plan:/open:/read: errors, or a malformed frame from us). PARK,
+   *  don't fault: every part already committed is on disk and disk IS the
+   *  resume state, so a later re-offer picks up from exactly there, and the
+   *  card is dismissible meanwhile. Nothing is sent back — an xfr/fault
+   *  reply would just ping-pong the two sides (mirrors
+   *  EpisodeSender.onPeerFault). Same transition shape as
+   *  handleChannelClosed(): `activePart` is nulled in the SAME synchronous
+   *  step `phase` changes, so any queued part-level continuation sees itself
+   *  superseded, and the in-flight temp is abandoned rather than leaked. */
+  private onPeerFault(raw: Record<string, unknown>): void {
+    if (this.disposed || this.phase !== "receiving") return;
+    if (typeof raw.episodeId === "string" && raw.episodeId !== this.episodeId) return; // stray fault for a superseded/foreign episode
+    const reason = typeof raw.reason === "string" ? raw.reason : "peer fault";
+    const slot = this.activePart;
+    this.activePart = null;
+    this.phase = "parked";
+    this.abandonSlot(slot);
+    this.cb.onPhase("parked", reason);
+  }
+
   // -- xfr/part + chunks -----------------------------------------------------
 
   private onPart(raw: Record<string, unknown>): void {
@@ -297,6 +321,31 @@ export class EpisodeReceiver {
     };
     slot.partPromise = this.enqueue(() => this.store.openIncomingPart(episodeId, entry));
     this.activePart = slot;
+
+    // A ZERO-CHUNK part has no chunk to ride to completion: `isLast` only
+    // ever fires inside onChunk(), so without this the part would never
+    // commit, no xfr/part-committed would go out, and BOTH engines would
+    // wait forever (the sender's pump has nothing to send either). Real
+    // plans can contain one — the recorder's empty-blob drop is
+    // forward-only, so a take recorded before it still carries a zero-size
+    // sidecar entry, and lastTakeId persists. Committing straight from the
+    // announcement is safe rather than trusting: commit() verifies the
+    // written bytes against `entry.sha256`, and SHA-256 of zero bytes is a
+    // perfectly ordinary hash — a part that claims chunks: 0 but a nonzero
+    // size simply fails that check and faults, exactly like any other
+    // mismatch. Queued behind the open above (one chain, so ordering is
+    // free) and slot-identity-checked like every other continuation.
+    if (slot.chunksExpected === 0) {
+      this.enqueue(async () => {
+        if (this.activePart !== slot) return; // superseded by fault/park/restart/dispose while queued
+        try {
+          await this.commitPart(slot);
+        } catch (err) {
+          if (this.activePart !== slot || this.disposed) return;
+          this.fault(`open:${errMessage(err)}`); // only reachable if the open itself rejected — commitPart faults on its own for commit errors
+        }
+      });
+    }
   }
 
   private onChunk(buf: ArrayBuffer): void {

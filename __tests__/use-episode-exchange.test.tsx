@@ -494,6 +494,43 @@ describe("useEpisodeExchange", () => {
     expect(view.result.current.busy).toBe(false);
   });
 
+  test("an inbound xfr/fault mid-receive parks the receiving card, releases busy, and is dismissible", () => {
+    const takeId = "take-peer-fault";
+    const { port, view } = setup({ lastTakeId: null });
+
+    act(() => {
+      port.deliver(
+        PEER,
+        JSON.stringify({
+          t: "xfr/offer",
+          v: 1,
+          episodeId: takeId,
+          from: "Otter",
+          files: [
+            { base: "audio", parts: [{ name: "audio.part000", size: 10, sha256: "x" }] },
+            { base: "video", parts: [] },
+          ],
+        }),
+      );
+    });
+    expect(view.result.current.state?.kind).toBe("xfer-receiving");
+    expect(view.result.current.busy).toBe(true);
+
+    // The far sender hit a real error on ITS side (plan:/open:/read:, or a
+    // malformed frame from us) and gave up. Without the receiver honoring
+    // this frame the card stayed "receiving" forever, busy stayed true, and
+    // holdRolls blocked every future take on this host.
+    act(() => {
+      port.deliver(PEER, JSON.stringify({ t: "xfr/fault", v: 1, episodeId: takeId, reason: "read:disk gone" }));
+    });
+
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "receive", canResend: false });
+    expect(view.result.current.busy).toBe(false);
+
+    act(() => view.result.current.actions.dismiss());
+    expect(view.result.current.state).toBeNull();
+  });
+
   // -------------------------------------------------------------------
   // Peer churn (fix round: findings #2/#3/#4). The harness below extends
   // setup()'s single-peer pin via view.rerender, rather than working
@@ -656,6 +693,50 @@ describe("useEpisodeExchange", () => {
     // Still parked — resend() was a genuine no-op, not a silent success
     // into the void.
     expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
+  });
+
+  test("(v) GLOBAL CONSTRAINT: an offer arriving while a take is rolling is dropped outright; a re-offer after the take ends adopts normally", async () => {
+    const offer = JSON.stringify({
+      t: "xfr/offer",
+      v: 1,
+      episodeId: "take-mid-roll",
+      from: "Otter",
+      files: [
+        { base: "audio", parts: [{ name: "audio.part000", size: 10, sha256: "x" }] },
+        { base: "video", parts: [] },
+      ],
+    });
+
+    const { port, view } = setup({ lastTakeId: null, takeActive: true });
+
+    act(() => port.deliver(PEER, offer));
+
+    // No receiver created, no state change, nothing acknowledged on the wire
+    // — the far sender's own OFFER_TIMEOUT_MS parks them, which is the
+    // spec's answer for an unanswered offer.
+    expect(view.result.current.state).toBeNull();
+    expect(view.result.current.busy).toBe(false);
+    expect(port.framesSentTo(PEER)).toEqual([]);
+
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: null,
+        takeActive: false,
+      });
+    });
+
+    act(() => port.deliver(PEER, offer));
+
+    expect(view.result.current.state).toMatchObject({ kind: "xfer-receiving" });
+    expect(view.result.current.busy).toBe(true);
+    await waitFor(() => {
+      expect(port.framesSentTo(PEER).filter((f) => f.t === "xfr/have")).toHaveLength(1);
+    });
   });
 
   test("(e) dismiss() clears a done card", async () => {

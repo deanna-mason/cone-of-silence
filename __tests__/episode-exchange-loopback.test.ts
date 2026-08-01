@@ -90,6 +90,7 @@ class MemorySenderStore implements SenderStore {
   ops: string[] = [];
   reads: Array<{ name: string; offset: number; length: number }> = [];
   private readonly pauseGates = new Map<string, { index: number; gate: Promise<void>; release: () => void }>();
+  private readonly failGates = new Map<string, number>();
 
   constructor(
     private readonly plan: FilePlan[],
@@ -113,6 +114,15 @@ class MemorySenderStore implements SenderStore {
     this.pauseGates.delete(name);
   }
 
+  /** Rejects the zero-based `index`-th read() issued against a fresh reader
+   *  for `name` — the counterpart to pauseAtReadIndex above, driving the
+   *  sender's real `read:` fault path (transfer.ts's pump()) instead of
+   *  merely freezing it. One-shot: a later start() re-reads cleanly, so the
+   *  same store can serve the resume half of a test. */
+  failAtReadIndex(name: string, index: number): void {
+    this.failGates.set(name, index);
+  }
+
   async readSendPlan(episodeId: string): Promise<FilePlan[]> {
     this.ops.push(`plan:${episodeId}`);
     return this.plan;
@@ -129,6 +139,11 @@ class MemorySenderStore implements SenderStore {
         const idx = readIndex++;
         this.reads.push({ name, offset, length });
         this.ops.push(`read:${name}:${offset}`);
+        const failAt = this.failGates.get(name);
+        if (failAt !== undefined && idx === failAt) {
+          this.failGates.delete(name);
+          throw new Error(`fixture read failure: ${name}#${idx}`);
+        }
         const pending = this.pauseGates.get(name);
         if (pending && idx === pending.index) await pending.gate;
         return bytes.slice(offset, offset + length);
@@ -553,5 +568,101 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     await waitFor(() => senderCb.lastPhase() === "done" && receiverCb.lastPhase() === "done");
 
     expect(receiverStore.committedNames).toEqual(new Set(fixture.allNames));
+  });
+
+  // -- (e) a SENDER-side fault mid-transfer parks the receiver ---------------
+  it("(e) a sender-side fault mid-transfer parks the receiver resumable, and a later re-offer resumes from the committed parts", async () => {
+    // A three-chunk audio.part001, frozen at chunk 1's read exactly like
+    // case (b) — that pause is only there to make the mid-part state
+    // deterministic and assertable; the FAULT itself comes from the gate on
+    // chunk 2, i.e. the sender's real `read:` path. That is the state that
+    // used to wedge the receiver in "receiving" forever (busy true,
+    // holdRolls blocking every future take) because inbound xfr/fault was
+    // dropped on the floor.
+    const fixture = await buildEpisodeFixture({ audio1Size: 2 * XFER_CHUNK_BYTES + 3000 });
+    const senderStore = new MemorySenderStore(fixture.plan, fixture.bytes);
+    const receiverStore = new MemoryReceiverStore();
+    senderStore.pauseAtReadIndex("audio.part001", 1);
+    senderStore.failAtReadIndex("audio.part001", 2);
+
+    const { sender, senderCb, receiverCb, toSender } = makeExchange(senderStore, receiverStore);
+
+    sender.start("ep-peer-fault", "static-otter");
+    // audio.part000 fully commits; audio.part001 has its first chunk
+    // appended and is genuinely half-written when the pump freezes.
+    await waitFor(() => receiverStore.ops.filter((o) => o.startsWith("append:audio.part001")).length >= 1);
+    await flush();
+    expect(receiverStore.committedNames.has("audio.part000")).toBe(true);
+    expect(receiverStore.ops.filter((o) => o.startsWith("commit:"))).toEqual(["commit:audio.part000"]);
+    expect(receiverCb.lastPhase()).toBe("receiving");
+
+    // Release: chunk 1 goes out, chunk 2's read rejects, the sender faults
+    // for real and sends xfr/fault while the receiver still holds an open
+    // temp for audio.part001.
+    senderStore.releaseRead("audio.part001");
+    await waitFor(() => senderCb.lastPhase() === "fault");
+    expect(senderCb.phases.at(-1)?.detail).toContain("read:");
+
+    // PARKED, not stuck receiving and not faulted: resumable (disk state is
+    // authoritative) and dismissible (Task 11 maps parked -> the
+    // xfer-interrupted card, which Stand Down clears).
+    await waitFor(() => receiverCb.lastPhase() === "parked");
+    expect(receiverCb.phases.at(-1)?.detail).toContain("read:"); // the sender's own reason, reflected
+
+    // The half-written part was abandoned, never committed, never renamed.
+    await flush();
+    expect(receiverStore.committedNames.has("audio.part001")).toBe(false);
+    expect(receiverStore.ops.filter((o) => o.startsWith("commit:"))).toEqual(["commit:audio.part000"]);
+    expect(receiverStore.ops.filter((o) => o.startsWith("abandon:"))).toEqual(["abandon:audio.part001"]);
+    expect(receiverStore.manifestCalls).toEqual([]);
+
+    // -- a later re-offer resumes from exactly what committed -------------
+    toSender.sent = []; // isolate the resumed session's frames for the have assertion
+    sender.start("ep-peer-fault", "static-otter");
+    await waitFor(() => senderCb.lastPhase() === "done" && receiverCb.lastPhase() === "done");
+
+    const haveFrames = toSender.frames().filter((f) => f.t === "xfr/have");
+    expect(haveFrames).toEqual([{ t: "xfr/have", v: 1, episodeId: "ep-peer-fault", committed: ["audio.part000"] }]);
+    expect(receiverStore.committedNames).toEqual(new Set(fixture.allNames));
+    expect(receiverStore.manifestCalls).toHaveLength(1);
+  });
+
+  // -- (f) a zero-byte part ------------------------------------------------
+  it("(f) a zero-byte part in the plan commits with no chunks at all and the exchange completes", async () => {
+    // Takes recorded before the recorder's empty-blob drop (commit f54d893)
+    // can still carry a zero-size sidecar entry, and lastTakeId persists —
+    // so a real plan can contain a 0-byte part. chunks: 0 means the receiver
+    // never sees an onChunk for it, which is the only place `isLast` fires.
+    const audio0 = await makePart("audio.part000", 2048, 11);
+    const audioEmpty = await makePart("audio.part001", 0, 0); // sha256 of zero bytes
+    const video0 = await makePart("video.part000", 1024, 33);
+    const plan: FilePlan[] = [
+      { base: "audio", parts: [audio0.entry, audioEmpty.entry] },
+      { base: "video", parts: [video0.entry] },
+    ];
+    const bytes = new Map<string, Uint8Array>([
+      [audio0.entry.name, audio0.bytes],
+      [audioEmpty.entry.name, audioEmpty.bytes],
+      [video0.entry.name, video0.bytes],
+    ]);
+    const senderStore = new MemorySenderStore(plan, bytes);
+    const receiverStore = new MemoryReceiverStore();
+    const { sender, senderCb, receiverCb, toReceiver } = makeExchange(senderStore, receiverStore);
+
+    sender.start("ep-zero", "static-otter");
+    await waitFor(() => senderCb.lastPhase() === "done" && receiverCb.lastPhase() === "done");
+
+    expect(receiverStore.committedNames).toEqual(new Set(["audio.part000", "audio.part001", "video.part000"]));
+    // The empty part was announced with chunks: 0 and no chunk ever followed
+    // — it commits on the strength of the announcement alone.
+    const emptyPartFrame = toReceiver.frames().find((f) => f.t === "xfr/part" && f.name === "audio.part001");
+    expect(emptyPartFrame).toMatchObject({ chunks: 0, size: 0 });
+    expect(receiverStore.ops.filter((o) => o.startsWith("append:audio.part001"))).toEqual([]);
+    expect(receiverStore.ops).toContain("open:audio.part001");
+    expect(receiverStore.ops).toContain("commit:audio.part001");
+    // Its xfr/part-committed really did unblock the next part — the sender
+    // announces one part at a time and waits for the ack.
+    expect(receiverStore.ops.indexOf("commit:video.part000")).toBeGreaterThan(receiverStore.ops.indexOf("commit:audio.part001"));
+    expect(receiverStore.manifestCalls).toHaveLength(1);
   });
 });

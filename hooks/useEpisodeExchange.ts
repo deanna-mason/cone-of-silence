@@ -167,6 +167,8 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   partnerCodenameRef.current = partnerCodename;
   const lastTakeIdRef = useRef(lastTakeId);
   lastTakeIdRef.current = lastTakeId;
+  const takeActiveRef = useRef(takeActive);
+  takeActiveRef.current = takeActive;
 
   const [senderView, setSenderView] = useState<SenderView>(IDLE_SENDER_VIEW);
   const [receiverView, setReceiverView] = useState<ReceiverView>(IDLE_RECEIVER_VIEW);
@@ -308,6 +310,16 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     if (!enabled) return;
     const offMessage = xfer.onMessage((peerId, data) => {
       const frame = typeof data === "string" ? parseXferFrame(data) : null;
+      // GLOBAL CONSTRAINT ("the transfer never runs during a take"),
+      // RECEIVING half — `canSend` above is only the sending half. An offer
+      // that lands while THIS host is rolling is dropped outright: not
+      // queued, not adopted-then-parked, no receiver even constructed. The
+      // far sender's own OFFER_TIMEOUT_MS parks them, which is already the
+      // spec's answer for an unanswered offer, and their operator can press
+      // SEND again once the take is done. Only the OFFER is gated: an
+      // exchange already in flight keeps its remaining frames, since a take
+      // can't have started under it (busy feeds holdRolls).
+      if (frame && frame.t === "xfr/offer" && takeActiveRef.current) return;
       if (frame && frame.t === "xfr/offer") {
         if (!receiverRef.current) {
           createReceiver(peerId);
