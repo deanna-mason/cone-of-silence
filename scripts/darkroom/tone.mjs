@@ -55,8 +55,17 @@ function envelopeAt(t, start, stop) {
 
 /**
  * Synthesize the full dual-tone sync mark: two beeps, each
- * `env(t) * (sin(2*pi*f1*t) + sin(2*pi*f2*t))`, silence in the gap.
- * Length is exactly `MARK_TOTAL_MS/1000 * SAMPLE_RATE` samples.
+ * `env(t) * (sin(2*pi*f1*(t-start)) + sin(2*pi*f2*(t-start)))`, silence in
+ * the gap. Length is exactly `MARK_TOTAL_MS/1000 * SAMPLE_RATE` samples.
+ *
+ * The carrier phase is relative to EACH BEEP'S OWN start, not to the mark's
+ * absolute time — `scheduleToneMark` creates a fresh `OscillatorNode` per
+ * beep and calls `osc.start(start)`, and a Web Audio oscillator's phase is
+ * zero at its own start time, not at the AudioContext's t=0. Getting this
+ * wrong only shows up on beep 2 (t=0 and beep-1's start coincide), and only
+ * breaks the matched-filter refine (the coarse Goertzel stage doesn't care
+ * about absolute phase) — see darkroom-tone.test.ts's independently-built
+ * regression fixture, which pins this.
  */
 export function synthesizeMark() {
   const length = Math.round((MARK_TOTAL_MS / 1000) * SAMPLE_RATE);
@@ -69,7 +78,7 @@ export function synthesizeMark() {
       const env = envelopeAt(t, start, stop);
       if (env === 0) continue;
       let carrier = 0;
-      for (const freq of TONE_FREQS) carrier += Math.sin(2 * Math.PI * freq * t);
+      for (const freq of TONE_FREQS) carrier += Math.sin(2 * Math.PI * freq * (t - start));
       sample += env * carrier;
     }
     out[i] = sample;
@@ -133,13 +142,24 @@ function findBeepOnsets(pcm, lo, hi) {
   return onsets;
 }
 
-/** Adjacent beep pairs whose onsets are 300ms +/- 30ms apart. */
+/** Beep onsets `i` that have SOME later onset `j` (not necessarily
+ * adjacent) 300ms +/- 30ms apart — an intervening echo of the same beep at
+ * the wrong spacing must not shadow the true partner further out. Onsets
+ * are scan-ordered ascending, so returned pairs stay in ascending order too
+ * (each `i` contributes at most once, at its first valid partner). Known
+ * limit (ledgered, not fixed this round): an echo close enough to merge
+ * into the same Goertzel frame run as the real beep (roughly within one
+ * 120ms frame width) isn't a separate onset in the first place — no amount
+ * of pairing logic recovers that. */
 function findValidPairs(onsets) {
   const pairs = [];
-  for (let i = 0; i + 1 < onsets.length; i++) {
-    const spacingS = (onsets[i + 1] - onsets[i]) / SAMPLE_RATE;
-    if (Math.abs(spacingS - SPACING_TARGET_S) <= SPACING_TOLERANCE_S) {
-      pairs.push(onsets[i]);
+  for (let i = 0; i < onsets.length; i++) {
+    for (let j = i + 1; j < onsets.length; j++) {
+      const spacingS = (onsets[j] - onsets[i]) / SAMPLE_RATE;
+      if (Math.abs(spacingS - SPACING_TARGET_S) <= SPACING_TOLERANCE_S) {
+        pairs.push(onsets[i]);
+        break;
+      }
     }
   }
   return pairs;
@@ -167,13 +187,14 @@ function refineOnset(pcm, coarseOnset) {
   return best;
 }
 
-/** Locate one mark inside `[lo, hi)`. `pick` selects which valid beep pair
- * is the genuine injected mark when more than one is found: "first" (the
- * earliest — used for the start-of-take window, since any acoustic
- * re-capture always follows the genuine digital injection) or "last" (the
- * latest — used for the end-of-take window, searched from its trailing
- * edge inward for the same reason). */
-function locateMark(pcm, lo, hi, pick, missingCode) {
+/** Locate one mark inside `[lo, hi)`. The genuine injected mark is always
+ * the FIRST valid beep pair — any acoustic re-capture (an echo bleeding
+ * back in through a mic) is later by definition, in both the start-of-take
+ * and end-of-take windows alike. `minOnset` excludes pairs before that
+ * sample (used to keep the end-of-take search from re-matching the start
+ * mark itself when a short track's two 20s search windows fully overlap —
+ * see `findMarks`). */
+function locateMark(pcm, lo, hi, missingCode, minOnset = -Infinity) {
   const onsets = findBeepOnsets(pcm, lo, hi);
   if (onsets.length === 0) {
     throw new DarkroomError(missingCode, `no candidate beep in [${lo}, ${hi})`);
@@ -181,12 +202,11 @@ function locateMark(pcm, lo, hi, pick, missingCode) {
   if (onsets.length === 1) {
     throw new DarkroomError("tone-one-beep", `only one beep found at sample ${onsets[0]}`);
   }
-  const pairs = findValidPairs(onsets);
+  const pairs = findValidPairs(onsets).filter((onset) => onset >= minOnset);
   if (pairs.length === 0) {
     throw new DarkroomError(missingCode, `no beep pair with valid 300ms spacing in [${lo}, ${hi})`);
   }
-  const coarse = pick === "first" ? pairs[0] : pairs[pairs.length - 1];
-  return refineOnset(pcm, coarse);
+  return refineOnset(pcm, pairs[0]);
 }
 
 /**
@@ -198,14 +218,18 @@ function locateMark(pcm, lo, hi, pick, missingCode) {
  */
 export function findMarks(pcm) {
   const windowLen = SEARCH_WINDOW_S * SAMPLE_RATE;
+  const markLen = Math.round((MARK_TOTAL_MS / 1000) * SAMPLE_RATE);
 
   const startLo = 0;
   const startHi = Math.min(windowLen, pcm.length);
-  const start = locateMark(pcm, startLo, startHi, "first", "tone-start-missing");
+  const start = locateMark(pcm, startLo, startHi, "tone-start-missing");
 
+  // A short take's end-window can fully overlap the start-window (both
+  // clamp to the whole track). Excluding anything before the start mark's
+  // own span keeps the end search from re-matching it.
   const endLo = Math.max(0, pcm.length - windowLen);
   const endHi = pcm.length;
-  const end = locateMark(pcm, endLo, endHi, "last", "tone-end-missing");
+  const end = locateMark(pcm, endLo, endHi, "tone-end-missing", start + markLen);
 
   return { start, end };
 }
