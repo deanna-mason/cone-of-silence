@@ -890,4 +890,28 @@ describe("Mesh proven-gated dcOpen aggregate (Phase 5D review fix, Minor 7)", ()
     made[1].events.onChannelState("cos", "closed");
     expect(cb.onChannelClosed).not.toHaveBeenCalled();
   });
+
+  it("removing an unproven peer whose channel was open never fires onChannelClosed for a different, still-open proven peer (Minor 7 completion, review fix round 2)", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addExistingPeers(["p1", "p2"], false);
+    settle();
+    made[0].events.onChannelOpen(); // p1: unproven, channel opens — never counted
+    made[1].events.onChannelOpen(); // p2: also unproven for now
+    mesh.setProven("p2", true); // p2 becomes the aggregate's sole contributor
+    expect(cb.onChannelOpen).toHaveBeenCalledOnce();
+
+    mesh.remove("p1"); // p1 never contributed to the aggregate — removing it must not read as "the open channel closed"
+    expect(cb.onChannelClosed).not.toHaveBeenCalled();
+  });
+
+  it("removing a NEVER-proven, sole peer whose channel was open does not fire a spurious onChannelClosed (Minor 7 completion, review fix round 2)", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addNewcomer("p1", false); // never proven
+    settle();
+    made[0].events.onChannelOpen(); // raw channel open, but unproven — aggregate stays 0
+    expect(cb.onChannelOpen).not.toHaveBeenCalled(); // confirms the aggregate never counted it
+
+    mesh.remove("p1"); // no OTHER peer exists to keep openChannels() at 1 either way
+    expect(cb.onChannelClosed).not.toHaveBeenCalled(); // no matching "open" was ever reported — nothing to close
+  });
 });

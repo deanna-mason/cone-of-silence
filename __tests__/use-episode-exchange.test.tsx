@@ -284,6 +284,7 @@ function setup(overrides: Partial<EpisodeExchangeArgs> = {}) {
     partnerCodename: "Falcon",
     lastTakeId: null,
     takeActive: false,
+    dcOpen: true, // review fix round 2: default "call is up" — tests targeting this specifically override it
     ...overrides,
   };
   const view = renderHook((props: EpisodeExchangeArgs) => useEpisodeExchange(props), { initialProps });
@@ -334,6 +335,16 @@ describe("useEpisodeExchange", () => {
       expect(view.result.current.canSend).toBe(false);
       act(() => port.setChannelState(PEER, "xfer", "open"));
       expect(view.result.current.canSend).toBe(true);
+    }
+    // Review fix (Phase 5D round 2, UX): dcOpen false -> canSend false even
+    // with the xfer channel itself reporting open — the sub-second window
+    // during a 4C re-proof where the raw "cos-xfer" channel has reopened
+    // but the fresh join-proof (and therefore mesh's proven-gated dcOpen)
+    // hasn't completed yet, so sendXferTo would still refuse underneath.
+    {
+      const { port, view } = setup({ lastTakeId: "take-1", dcOpen: false });
+      act(() => port.setChannelState(PEER, "xfer", "open"));
+      expect(view.result.current.canSend).toBe(false);
     }
   });
 
@@ -469,6 +480,63 @@ describe("useEpisodeExchange", () => {
     });
   });
 
+  test("(d2) canResend/resend() stay gated while dcOpen is false, even once the xfer channel itself reopens (Phase 5D round 2 review fix)", async () => {
+    const takeId = "take-d2";
+    const audio = await makePart("audio.part000", 100, 3);
+    H.state.plans.set(takeId, [
+      { base: "audio", parts: [audio.entry] },
+      { base: "video", parts: [] },
+    ]);
+    H.state.partBytes.set(`${takeId}:audio.part000`, audio.bytes);
+
+    const { port, view } = setup({ lastTakeId: takeId });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+    act(() => {
+      view.result.current.actions.send();
+      port.setChannelState(PEER, "xfer", "closed");
+    });
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
+
+    // The xfer channel reopens, but dcOpen (the proven-gated aggregate) is
+    // still false — a 4C re-proof in flight. canResend must stay false, and
+    // resend() must be a genuine no-op, not a silent send into a channel
+    // sendXferTo would refuse underneath.
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: takeId,
+        takeActive: false,
+        dcOpen: false,
+      });
+    });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
+
+    const offersBefore = port.framesSentTo(PEER).filter((f) => f.t === "xfr/offer").length;
+    act(() => view.result.current.actions.resend());
+    expect(port.framesSentTo(PEER).filter((f) => f.t === "xfr/offer").length).toBe(offersBefore);
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
+
+    // Once dcOpen genuinely goes true, the same reopened channel unlocks it.
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: takeId,
+        takeActive: false,
+        dcOpen: true,
+      });
+    });
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: true });
+  });
+
   test("channel-closed wiring reaches the receiver too: a close during an inbound transfer parks it", () => {
     const takeId = "take-park-recv";
     const { port, view } = setup({ lastTakeId: null });
@@ -579,6 +647,7 @@ describe("useEpisodeExchange", () => {
         partnerCodename: "P2Name",
         lastTakeId: null,
         takeActive: false,
+        dcOpen: true,
       });
     });
 
@@ -624,6 +693,7 @@ describe("useEpisodeExchange", () => {
         partnerCodename: "Falcon",
         lastTakeId: "take-1",
         takeActive: false,
+        dcOpen: true,
       });
     });
     // Not exactly one peer -> false, even though P1's channel is still open.
@@ -638,6 +708,7 @@ describe("useEpisodeExchange", () => {
         partnerCodename: "Falcon",
         lastTakeId: "take-1",
         takeActive: false,
+        dcOpen: true,
       });
     });
     // Back to exactly one peer. P1's channel never actually closed — no
@@ -675,6 +746,7 @@ describe("useEpisodeExchange", () => {
         partnerCodename: "Falcon",
         lastTakeId: takeId,
         takeActive: false,
+        dcOpen: true,
       });
     });
     act(() => port.setChannelState(PEER2, "xfer", "open"));
@@ -727,6 +799,7 @@ describe("useEpisodeExchange", () => {
         partnerCodename: "Falcon",
         lastTakeId: null,
         takeActive: false,
+        dcOpen: true,
       });
     });
 

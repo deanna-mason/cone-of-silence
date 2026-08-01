@@ -725,6 +725,7 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
   interface PeerHandle {
     link: FakeLink;
     proof: JoinProof;
+    failReason: "bad-mac" | "timeout" | null;
     openChannel: () => void;
     deliverMessage: (text: string) => void;
     deliverStream: (stream: MediaStream) => void;
@@ -745,6 +746,11 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
     // time. See checkCountersignFailed's doc.
     private joinedPopulatedRoom = false;
     private hasEnteredOnce = false;
+    // Review fix round 2 (BLOCKING): latched true the first time ANY peer
+    // proves, forever — exactly like session.ts's everProvenAnyone. Closes
+    // the peer-churn variant of the false-refusal hole (prove A, A leaves,
+    // wrong-secret C joins) that joinedPopulatedRoom alone doesn't cover.
+    private everProvenAnyone = false;
 
     constructor(
       private readonly selfPeerId: string,
@@ -837,17 +843,21 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
         },
         onProven: () => {
           this.mesh.setProven(peerId, true);
+          this.everProvenAnyone = true; // see the field's doc — one-way, never cleared
           if (stashedStream) {
             const stream = stashedStream;
             stashedStream = null;
             ev.onRemoteStream(stream);
           }
         },
-        // Review fix (Important 4): only a genuine bad-mac is evidence about
-        // the secret — a timeout just leaves the peer unproven and the link
-        // alone (see session.ts's identical branch for the full rationale).
+        // Review fix (Important 4, completed round 2): only a genuine
+        // bad-mac is evidence about the secret and gets recorded as such —
+        // a timeout just leaves the peer unproven and the link alone (see
+        // session.ts's identical branch for the full rationale).
         onFailed: (reason) => {
           this.mesh.setProven(peerId, false);
+          const entry = this.peers.get(peerId);
+          if (entry) entry.failReason = reason;
           if (reason === "bad-mac") {
             this.mesh.revokeVisibility(peerId);
             link.close();
@@ -864,6 +874,7 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
       this.peers.set(peerId, {
         link,
         proof,
+        failReason: null,
         openChannel: () => {
           ev.onChannelOpen();
           proof.start();
@@ -882,15 +893,17 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
       return link;
     }
 
-    // Review fix (Critical 2/D24): see joinedPopulatedRoom's doc — the
-    // original "polite" discriminator is unstable across a signaling
-    // reconnect; this latch replaces it. Only once EVERY currently-tracked
-    // proof has failed, AND we ourselves joined a populated room at least
-    // once (first entry only), do we conclude our own invitation was refused.
+    // Review fix (Critical 2/D24, completed round 2 with everProvenAnyone):
+    // see both fields' docs — the original "polite" discriminator was
+    // unstable across a signaling reconnect, and joinedPopulatedRoom alone
+    // was still vulnerable to peer churn. Only once EVERY currently-tracked
+    // proof has genuinely bad-mac'd (not merely timed out), AND we joined a
+    // populated room at least once, AND we have NEVER proven anyone, do we
+    // conclude our own invitation was refused.
     private checkCountersignFailed(): void {
-      if (!this.joinedPopulatedRoom) return;
+      if (!this.joinedPopulatedRoom || this.everProvenAnyone) return;
       const proofs = [...this.peers.values()];
-      if (proofs.length > 0 && proofs.every((p) => p.proof.phase === "failed")) {
+      if (proofs.length > 0 && proofs.every((p) => p.failReason === "bad-mac")) {
         this.signalingStopped = true; // mirrors session.ts's Important-3 fix
         this.countersignFailedCount += 1;
       }

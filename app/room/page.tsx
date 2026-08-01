@@ -148,6 +148,7 @@ export default function RoomPage() {
     partnerCodename: podcast.partnerCodename,
     lastTakeId: podcast.lastTakeId,
     takeActive: podcastLocked,
+    dcOpen: call.dcOpen,
   });
   // Available for usePodcastTake on the NEXT render — see the comment above.
   exchangeBusyRef.current = exchange.busy;

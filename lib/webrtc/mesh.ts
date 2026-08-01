@@ -258,7 +258,15 @@ export class Mesh {
     // Synthesized closes: the mesh killed this link, so the mesh reports the
     // deaths — a straggling real onclose from the discarded link is eaten by
     // the identity guard in construct()'s event wiring.
-    const hadChannelOpen = entry.channelOpen;
+    // `&& entry.proven` (review fix round 2, Minor 7 completion): this entry
+    // is already gone from `this.entries` by the time openChannels() runs
+    // below, so an unproven entry's own channelOpen flag can't have
+    // contributed to that count in the first place — without the guard, a
+    // removed-but-never-proven peer whose channel happened to be open could
+    // fire a spurious onChannelClosed purely because the (correctly
+    // proven-filtered) remaining aggregate reads 0, even though it was
+    // already 0 before this removal and no onChannelOpen ever fired for it.
+    const hadChannelOpen = entry.channelOpen && entry.proven;
     if (entry.channelOpen) {
       entry.channelOpen = false;
       this.cb.onChannelState(peerId, "cos", "closed");

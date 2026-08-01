@@ -78,8 +78,39 @@ export class CallSession {
   private selfPeerId: string | null = null;
   /** Phase 5D (Task 5): one live JoinProof per remote peer, replaced (old one
    *  disposed first) on every fresh link — including a 4C rebuild, which is
-   *  a fresh cos channel and therefore a fresh rising edge (spec). */
-  private readonly proofs = new Map<string, JoinProof>();
+   *  a fresh cos channel and therefore a fresh rising edge (spec).
+   *  `failReason` (review fix round 2, Important 4 completion): JoinProof's
+   *  own `phase` collapses "bad-mac" and "timeout" into the same terminal
+   *  "failed" state, so checking `phase === "failed"` in
+   *  checkCountersignFailed would count a timed-out peer toward "every link
+   *  failed" too — one later genuine bad-mac elsewhere would then convert a
+   *  pile of accumulated timeouts into the refusal card, exactly the
+   *  accusation a timeout never made (Important 4's own stated intent).
+   *  Tracked per peer, set only inside onFailed, read only by
+   *  checkCountersignFailed. */
+  private readonly proofs = new Map<string, { proof: JoinProof; failReason: "bad-mac" | "timeout" | null }>();
+  /**
+   * Review fix round 2 (BLOCKING): latched true the first time ANY peer's
+   * proof reaches "proven", for the lifetime of this session — never
+   * cleared, including across a 4C rebuild or a later peerLeft. Required
+   * (alongside `joinedPopulatedRoom`) in checkCountersignFailed.
+   *
+   * Why: dropping the `polite` filter (Critical 2's own fix) reopened the
+   * false-refusal hole through PEER CHURN instead of a socket blip.
+   * `joinedPopulatedRoom` only proves "the room LOOKED populated when I
+   * joined" — it says nothing about whether anyone in it ever actually
+   * accepted me. Scenario: honest joiner B enters a populated room
+   * (joinedPopulatedRoom latches true) and proves peer A. A hangs up —
+   * peerLeft deletes A's proof entirely. A wrong-secret peer C now joins:
+   * `proofs` is back down to just {C: failed}, `every(...)` is vacuously
+   * true, and B — who is completely innocent, having already proven
+   * someone — gets the terminal card, now irreversible thanks to the
+   * Important-3 `signaling.stop()` fix. `everProvenAnyone` closes this: once
+   * we've proven ANYONE, ever, we are definitively not the wrong-secret
+   * party, and no amount of later churn can manufacture "every link failed"
+   * against us again.
+   */
+  private everProvenAnyone = false;
   /**
    * Review fix (Critical 2, ratified as D24): latched exactly once, on the
    * FIRST "entered" event this session ever receives, to whatever
@@ -156,7 +187,7 @@ export class CallSession {
     ev.on("peerJoined", (peerId) => this.mesh.addNewcomer(peerId, false));
     ev.on("peerLeft", (peerId) => {
       this.mesh.remove(peerId);
-      this.proofs.get(peerId)?.dispose();
+      this.proofs.get(peerId)?.proof.dispose();
       this.proofs.delete(peerId);
       if (this.mesh.size === 0) this.setStatus("waiting");
     });
@@ -223,7 +254,7 @@ export class CallSession {
 
     // A prior proof for this SAME peerId (a rebuild superseding an earlier,
     // possibly-proven link) must not linger — it owns an armed setTimeout.
-    this.proofs.get(peerId)?.dispose();
+    this.proofs.get(peerId)?.proof.dispose();
     // Fresh link ⇒ fresh rising edge: re-arm the MESSAGE/SEND gate now,
     // unconditionally (covers the rebuild-of-a-previously-proven-peer case —
     // mesh's own initiallyProven only guards the very first construction).
@@ -245,6 +276,7 @@ export class CallSession {
       },
       onProven: () => {
         this.mesh.setProven(peerId, true);
+        this.everProvenAnyone = true; // see the field's doc — one-way, never cleared
         if (stashedStream) {
           const stream = stashedStream;
           stashedStream = null;
@@ -263,6 +295,8 @@ export class CallSession {
       // closing the door on, an accusation the timeout never actually made.
       onFailed: (reason) => {
         this.mesh.setProven(peerId, false);
+        const entry = this.proofs.get(peerId);
+        if (entry) entry.failReason = reason; // recorded regardless — only "bad-mac" is ever read as a refusal signal
         if (reason === "bad-mac") {
           this.mesh.revokeVisibility(peerId);
           link.close();
@@ -276,7 +310,7 @@ export class CallSession {
       remotePeerId: peerId,
       events: proofEvents,
     });
-    this.proofs.set(peerId, proof);
+    this.proofs.set(peerId, { proof, failReason: null });
 
     // Review fix (Minor 8): if PeerLink construction itself throws, mesh's
     // own construct() evicts the entry (onThrow "evict") or marks it failed
@@ -326,7 +360,7 @@ export class CallSession {
         onE2eeFailure: (detail) => console.error(`[e2ee] ${detail} (peer ${peerId})`),
       });
     } catch (err) {
-      proof.dispose();
+      this.proofs.get(peerId)?.proof.dispose();
       this.proofs.delete(peerId);
       throw err; // mesh.construct()'s own catch handles eviction/keep-failed
     }
@@ -344,22 +378,34 @@ export class CallSession {
    * (joined vs. joined-by), which is unstable across a signaling reconnect
    * — see `joinedPopulatedRoom`'s doc for the exact attacker-triggerable
    * scenario that broke. `joinedPopulatedRoom` replaces it: latched once,
-   * from the FIRST "entered" event only, and never recomputed. Only once
-   * EVERY currently-tracked proof has failed, AND we ourselves originally
-   * joined a populated room, do we conclude our own invitation was refused.
-   * A host whose first entry was an empty room can never reach this, no
-   * matter how the peer list churns afterward (rejoins, squatters,
-   * reconnects) — matching "a right-secret host whose single stranger fails
-   * proof just never sees them." A wrong-secret joiner's first (and every)
-   * entered event finds the room already populated, so this fires as soon
-   * as the last of its peers fails. A legitimate joiner who has since proven
-   * at least one peer is safe too: `every(...)` is false the moment any
-   * proof succeeds (analyzed for 3-4 party rooms — benign).
+   * from the FIRST "entered" event only, and never recomputed.
+   *
+   * Review fix round 2 (BLOCKING): `joinedPopulatedRoom` alone isn't enough
+   * — see `everProvenAnyone`'s doc for the peer-churn variant of the same
+   * false-refusal hole (B proves A, A leaves, a wrong-secret C joins). Both
+   * latches are required: we must have joined a populated room AND never
+   * have proven anyone, ever, for "every currently-tracked proof genuinely
+   * failed (bad-mac)" to mean "my own invitation was refused" rather than
+   * "everyone currently in view happens to be untrustworthy, but I already
+   * know I'm not the problem."
+   *
+   * Review fix round 2 (Important 4 completion): counts only `failReason
+   * === "bad-mac"` — a proof still pending, or one that merely timed out,
+   * must not contribute to "every link failed" (see `proofs`'s doc).
+   *
+   * A host whose first entry was an empty room can never reach this
+   * (joinedPopulatedRoom false), no matter how the peer list churns
+   * afterward. A wrong-secret joiner's first entered event finds the room
+   * already populated AND it never proves anyone (both peer secrets differ
+   * from its own), so this fires as soon as the last of its peers
+   * genuinely fails. A legitimate joiner who has proven even one peer, ever,
+   * is permanently safe (everProvenAnyone) — including across that peer
+   * later leaving and a stranger arriving in its place.
    */
   private checkCountersignFailed(): void {
-    if (!this.joinedPopulatedRoom) return;
+    if (!this.joinedPopulatedRoom || this.everProvenAnyone) return;
     const proofs = [...this.proofs.values()];
-    if (proofs.length > 0 && proofs.every((p) => p.phase === "failed")) {
+    if (proofs.length > 0 && proofs.every((p) => p.failReason === "bad-mac")) {
       // Review fix (Important 3): countersign-failed is self-inflicted —
       // unlike every other terminal CallStatus (room-full, room-not-found,
       // etc.), which SignalingClient itself already stops/closes on before
@@ -375,7 +421,7 @@ export class CallSession {
   }
 
   private disposeAllProofs(): void {
-    for (const proof of this.proofs.values()) proof.dispose();
+    for (const { proof } of this.proofs.values()) proof.dispose();
     this.proofs.clear();
   }
 

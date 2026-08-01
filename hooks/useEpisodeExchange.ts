@@ -66,6 +66,19 @@ export interface EpisodeExchangeArgs {
   partnerCodename: string | null; // receiving copy only
   lastTakeId: string | null;
   takeActive: boolean; // panel.kind in countdown|rolling|stopping|fault
+  // Review fix (Phase 5D round 2, UX): the call session's aggregate cos
+  // channel signal (hooks/useCallSession.ts), which mesh.ts now gates on
+  // PROVEN peers only (Minor 7). `xferOpen` below tracks the "cos-xfer"
+  // channel's raw open/closed lifecycle, which is deliberately NOT
+  // proof-gated (Task 5 scope — only message/send content is), so during a
+  // 4C rebuild's re-proof window the xfer channel can physically reopen
+  // (xferOpen -> true) a beat before the fresh join-proof actually
+  // completes, while sendXferTo still correctly refuses. Without this,
+  // canSend/canResend would read true for that sub-second window and
+  // transfer.ts's callers ignore send()'s boolean return, so pressing SEND
+  // would silently drop the offer and park on OFFER_TIMEOUT_MS. `dcOpen`
+  // is already proven-gated, so requiring it here closes that window.
+  dcOpen: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +167,7 @@ const IDLE_RECEIVER_VIEW: ReceiverView = {
 };
 
 export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
-  const { enabled, xfer, peerIds, myCodename, partnerCodename, lastTakeId, takeActive } = args;
+  const { enabled, xfer, peerIds, myCodename, partnerCodename, lastTakeId, takeActive, dcOpen } = args;
   const singlePeerId = peerIds.length === 1 ? peerIds[0] : null;
 
   // Same `latest` idiom as usePodcastTake.ts: the wire-subscription effect
@@ -393,7 +406,9 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   const receivingBusy = receiverView.phase === "receiving";
   const busy = sendingBusy || receivingBusy;
 
-  const canSend = lastTakeId !== null && singlePeerId !== null && xferOpen && !takeActive;
+  // `dcOpen` (review fix round 2): see EpisodeExchangeArgs's doc — closes the
+  // sub-second sendable-but-refused window during a 4C re-proof.
+  const canSend = lastTakeId !== null && singlePeerId !== null && xferOpen && dcOpen && !takeActive;
 
   const receiverEffectivePhase: ReceiverPhase | "idle" = receiverView.dismissed ? "idle" : receiverView.phase;
 
@@ -421,8 +436,9 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         // Peer-aware, matching resend()'s own guard below: the parked
         // sender's peer must still BE the current single peer, not merely
         // have some peer's channel open — otherwise this button would
-        // render live while resend() silently no-ops behind it.
-        canResend: senderPeerRef.current === singlePeerId && xferOpen,
+        // render live while resend() silently no-ops behind it. `dcOpen`:
+        // see EpisodeExchangeArgs's doc — same sendable-but-refused window.
+        canResend: senderPeerRef.current === singlePeerId && xferOpen && dcOpen,
       };
       break;
     case "done":
@@ -516,7 +532,8 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
           // now under a resume the operator didn't ask for.
           peerId !== singlePeerId ||
           episodeId === null ||
-          !xferOpen
+          !xferOpen ||
+          !dcOpen // see EpisodeExchangeArgs's doc — same sendable-but-refused window
         ) {
           return;
         }

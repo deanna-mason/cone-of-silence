@@ -369,6 +369,51 @@ describe("Phase 5D join-proof gating on the real CallSession stack", () => {
     expect(cos.sent).toContain("hello");
   });
 
+  it("having ever proven someone survives their departure — a later wrong-secret joiner never triggers countersign-failed (BLOCKING round-2 review fix)", async () => {
+    // B (this session) joins a populated room and proves A — an entirely
+    // honest exchange. joinedPopulatedRoom latches true here, same as any
+    // legitimate joiner.
+    const ws = startAndOpen();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [{ peerId: "A" }], ice: ICE_A });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const cosA = cosChannelOf(FakePC.instances[0]);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, "A", "me", cosA);
+    cosA.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "A") ?? false);
+
+    // A hangs up — peerLeft deletes A's proof entirely. Under the
+    // joinedPopulatedRoom-only fix (round 1), `this.proofs` would now be
+    // empty, and the NEXT peer to fail would vacuously satisfy
+    // `every(...)`. everProvenAnyone (round 2) must prevent that.
+    ws.serverSays({ v: 1, t: "peer-left", peerId: "A" });
+    expect(rosters.at(-1)).toEqual([]);
+
+    // A wrong-secret peer C joins next — its proof genuinely fails (bad-mac).
+    ws.serverSays({ v: 1, t: "peer-joined", peerId: "C" });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const pcC = FakePC.instances.at(-1)!;
+    const cosC = cosChannelOf(pcC);
+    const wrongKey = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const impostor = new JoinProof({
+      proofKey: wrongKey,
+      selfPeerId: "C",
+      remotePeerId: "me",
+      events: { onSend: (text) => cosC.onmessage?.({ data: text }), onProven: () => {}, onFailed: () => {} },
+    });
+    cosC.readyState = "open";
+    cosC.send = (data: unknown) => {
+      cosC.sent.push(data);
+      if (typeof data === "string") impostor.handleMessage(data);
+    };
+    cosC.onopen!();
+    await waitFor(() => pcC.closed); // C's bad-mac failure closes its link
+
+    // B already proved someone, once — that can never be un-proven by later
+    // churn. The right-secret host here must see no status change at all.
+    expect(statuses).not.toContain("countersign-failed");
+    expect(rosters.at(-1)).toEqual([]);
+  });
+
   it("a signaling reconnect never resurrects a host's impolite squatter into a countersign-failed misfire (Critical 2 / D24 review fix)", async () => {
     // Host's FIRST "entered" is an EMPTY room — joinedPopulatedRoom latches
     // false PERMANENTLY, no matter what any later "entered" (a reconnect's
@@ -476,6 +521,48 @@ describe("Phase 5D join-proof gating on the real CallSession stack", () => {
     // into a live call (the exact shape 5D exists to close).
     expect(ws.readyState).toBe(3); // signaling.stop() actually closed the socket
     expect(statuses.at(-1)).toBe("countersign-failed");
+  });
+
+  it("a timed-out proof never counts toward countersign-failed, even once a DIFFERENT peer genuinely bad-macs (Important 4 completion review fix)", async () => {
+    // WE joined a populated room with two peers — X (goes silent, times out)
+    // and Y (wrong secret, genuinely bad-macs). Before this fix,
+    // checkCountersignFailed read JoinProof.phase, which collapses "timeout"
+    // and "bad-mac" into the same terminal "failed" — so X's mere silence
+    // would count toward "every link failed" once Y's real bad-mac ran the
+    // check, converting a stalled handshake into an accusation it never made.
+    const ws = startAndOpen();
+    ws.serverSays({
+      v: 1, t: "joined", selfId: "me", peers: [{ peerId: "X" }, { peerId: "Y" }], ice: ICE_A,
+    });
+    vi.advanceTimersByTime(STAGGER_MS * 2);
+    const cosX = cosChannelOf(FakePC.instances[0]);
+    const cosY = cosChannelOf(FakePC.instances[1]);
+
+    // X: channel opens, nobody ever answers — pure timeout, no bad-mac.
+    cosX.readyState = "open";
+    cosX.onopen!();
+    vi.advanceTimersByTime(5_000); // JoinProof's default timeoutMs
+
+    // Y: wrong secret, answers with a genuinely bad mac.
+    const wrongKey = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const impostorY = new JoinProof({
+      proofKey: wrongKey,
+      selfPeerId: "Y",
+      remotePeerId: "me",
+      events: { onSend: (text) => cosY.onmessage?.({ data: text }), onProven: () => {}, onFailed: () => {} },
+    });
+    cosY.readyState = "open";
+    cosY.send = (data: unknown) => {
+      cosY.sent.push(data);
+      if (typeof data === "string") impostorY.handleMessage(data);
+    };
+    cosY.onopen!();
+    await waitFor(() => FakePC.instances[1].closed);
+
+    // Y's bad-mac genuinely fails and closes its link; X only timed out
+    // (link untouched, per Important 4). `every(...)` must be false because
+    // X's failReason is "timeout", not "bad-mac" — no card.
+    expect(statuses).not.toContain("countersign-failed");
   });
 
   it("a link-factory throw during construction does not leave a stale proof pinning checkCountersignFailed forever (Minor 8 review fix)", async () => {
