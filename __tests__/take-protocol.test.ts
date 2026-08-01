@@ -1009,6 +1009,59 @@ describe("peerId scoping fix round (Task 9 review)", () => {
     b.dispose();
   });
 
+  it("a re-announce from the still-pinned partner AFTER a stashed foreign hello cancels the stash — latest hello wins for real", () => {
+    // Fix round 2: onHello's accept branch re-pins but must also clear
+    // pendingHello. Without that, "latest hello wins" degrades to "latest
+    // IGNORED hello wins" — a live partner's own roster-change re-announce
+    // (the hook does this on every peerKey change) would be silently
+    // trumped by an earlier, already-superseded stash once the take ends.
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+    expect(cbA.onPartnerCodename).toHaveBeenCalledWith("MONGOOSE");
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // rolling on both sides
+
+    // p3 joins mid-take and announces — ignored + stashed.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(1); // still just MONGOOSE
+
+    // The STILL-PINNED live partner (p2) re-announces afterward (a roster
+    // change firing the hook's announce effect, say) — this hits the accept
+    // branch (peerId === partnerId), not the mid-take ignore branch.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "MONGOOSE" }), "p2");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2);
+    expect(cbA.onPartnerCodename).toHaveBeenLastCalledWith("MONGOOSE");
+
+    // Cut. The stale p3 stash must NOT apply — p2 (the live partner) stays
+    // pinned, and onPartnerCodename never fires with JACKAL.
+    a.requestStop();
+    vi.advanceTimersByTime(1_000 + MARK_TOTAL_MS + 250 + 100); // through the stop
+
+    expect(cbA.onPartnerCodename).not.toHaveBeenCalledWith("JACKAL");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2); // no third call from a stale-stash heal
+
+    // A fresh roll still targets p2, not p3.
+    const sentBeforeReroll = pair.sentLog.length;
+    const newTakeId = a.propose()!;
+    expect(newTakeId).not.toBe(takeId);
+    const sentAfterReroll = pair.sentLog.slice(sentBeforeReroll);
+    expect(
+      sentAfterReroll.some((e) => e.from === 0 && e.toPeerId === "p2" && (JSON.parse(e.text) as { t: string }).t === "pod/roll"),
+    ).toBe(true);
+    expect(sentAfterReroll.some((e) => e.from === 0 && e.toPeerId === "p3")).toBe(false);
+
+    a.dispose();
+    b.dispose();
+  });
+
   it("pending hello also applies when the take ends via the unacked-proposal abort path", () => {
     const pair = new FakeBusPair(["host-a", "p2"]);
     const { cb: cbA } = makeCb();

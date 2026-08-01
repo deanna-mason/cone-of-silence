@@ -306,6 +306,7 @@ export class TakeCoordinator {
       return;
     }
     this.partnerId = peerId;
+    this.pendingHello = null; // a live re-announce supersedes any earlier stashed hello — latest wins for real
     this.helloReceived = true;
     this.cb.onPartnerCodename(msg.codename);
     this.ensureHelloSent();
