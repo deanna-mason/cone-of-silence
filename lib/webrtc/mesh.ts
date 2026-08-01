@@ -125,13 +125,28 @@ interface Entry {
    *  callback suppresses those writes — see construct(), onLinkState(), and
    *  rebuildLink(). */
   recovering: boolean;
-  /** Phase 5D (Task 5), additive: gates roster visibility and app-message
-   *  send/receive. Defaults to true (see add()'s `initiallyProven` param) so
-   *  every pre-5D caller — which never touches proof state at all — sees
-   *  the exact same behavior as before. CallSession (the only production
-   *  caller that cares) adds every peer with initiallyProven=false and
-   *  flips it via setProven() around its own JoinProof lifecycle. */
+  /** Phase 5D (Task 5), additive: gates app-message send/receive (sendTo/
+   *  sendAll/sendXferTo) and the dcOpen aggregate. Defaults to true (see
+   *  add()'s `initiallyProven` param) so every pre-5D caller — which never
+   *  touches proof state at all — sees the exact same behavior as before.
+   *  CallSession (the only production caller that cares) adds every peer
+   *  with initiallyProven=false and flips it via setProven() around its own
+   *  JoinProof lifecycle, resetting it to false on every fresh rising edge
+   *  (including a 4C rebuild) — strict, no memory across links. Roster
+   *  VISIBILITY is a separate, stickier concern — see `everProven`. */
   proven: boolean;
+  /** Review fix (Important 5), additive: latches true the first time
+   *  `proven` is ever set true, and — unlike `proven` — is NOT reset by a
+   *  fresh rising edge (a 4C rebuild re-arming `proven` to false for the
+   *  re-proof window). Gates roster() visibility instead of `proven`: a
+   *  peer that has been proven at least once keeps its tile/badge through a
+   *  rebuild's re-proof window (connectionState/recovering already carry
+   *  the honest "still down" story — see mesh's recovering doc), rather
+   *  than unmounting and remounting every reconnect. Only revokeVisibility()
+   *  drops it back to false, when a fresh proof of a previously-proven peer
+   *  genuinely fails. Defaults to `initiallyProven`, same additivity as
+   *  `proven` — pre-5D callers never see a difference between the two. */
+  everProven: boolean;
 }
 
 export class Mesh {
@@ -146,13 +161,16 @@ export class Mesh {
     return this.entries.size;
   }
 
-  /** Phase 5D (Task 5), additive: an unproven entry is invisible here —
+  /** Phase 5D (Task 5), additive: a never-proven entry is invisible here —
    *  no roster row, no participant count — until setProven(peerId, true).
-   *  Pre-5D callers never touch proven state, so it's always true for them
-   *  and this filter is a no-op (every entry passes). */
+   *  Filters on `everProven` (review fix, Important 5), not the stricter
+   *  `proven` — a peer proven at least once keeps its row through a 4C
+   *  rebuild's re-proof window; see `everProven`'s doc. Pre-5D callers never
+   *  touch either flag, so both default true and this filter is a no-op
+   *  (every entry passes). */
   roster(): RemotePeer[] {
     return [...this.entries]
-      .filter(([, e]) => e.proven)
+      .filter(([, e]) => e.everProven)
       .map(([peerId, e]) => ({
         peerId,
         stream: e.stream,
@@ -191,13 +209,43 @@ export class Mesh {
     this.emitRoster();
   }
 
-  /** Phase 5D (Task 5), additive: flips one peer's roster/message-gate
-   *  state. No-op on an unknown peer (already torn down) or a redundant
-   *  call (same value) — the latter also skips the roster re-emit. */
+  /**
+   * Phase 5D (Task 5), additive: flips one peer's message-gate state.
+   * `proven: true` also latches `everProven` (see its doc) — one-way, never
+   * cleared here (only revokeVisibility() clears it). No-op on an unknown
+   * peer (already torn down) or a redundant call (same value).
+   *
+   * Review fix (Minor 7): re-checks the dcOpen aggregate around the flip.
+   * `openChannels()` now counts only proven entries (see its doc) — a cos
+   * channel that physically opened before its peer proved never counted
+   * toward the aggregate in the first place, so nothing re-fires
+   * onChannelOpen for it once that channel-open event has already come and
+   * gone; this is the ONLY place that later transition gets noticed and
+   * (re-)dispatched, in either direction (a fresh rising edge's
+   * setProven(false) can equally drop the aggregate to 0 if this was the
+   * only proven-open peer).
+   */
   setProven(peerId: string, proven: boolean): void {
     const entry = this.entries.get(peerId);
     if (!entry || entry.proven === proven) return;
+    const wasOpenAgg = this.openChannels() > 0;
     entry.proven = proven;
+    if (proven) entry.everProven = true;
+    const isOpenAgg = this.openChannels() > 0;
+    if (!wasOpenAgg && isOpenAgg) this.cb.onChannelOpen();
+    else if (wasOpenAgg && !isOpenAgg) this.cb.onChannelClosed();
+    this.emitRoster();
+  }
+
+  /** Review fix (Important 5), additive: drops a peer's roster visibility
+   *  even though it was proven before — called when a FRESH proof (e.g.
+   *  post-rebuild) of a previously-proven peer genuinely fails (bad-mac).
+   *  No-op if the peer was never visible to begin with (everProven already
+   *  false) or is unknown. */
+  revokeVisibility(peerId: string): void {
+    const entry = this.entries.get(peerId);
+    if (!entry || !entry.everProven) return;
+    entry.everProven = false;
     this.emitRoster();
   }
 
@@ -274,9 +322,14 @@ export class Mesh {
     }
   }
 
-  /** Send over the xfer channel to one peer. False if unknown, linkless, or channel-closed. */
+  /** Send over the xfer channel to one peer. False if unknown, unproven,
+   *  linkless, or channel-closed (Phase 5D review fix: D16 names cos-xfer
+   *  explicitly — "every cos/cos-xfer app message" is proof-gated, same as
+   *  sendTo/sendAll above). */
   sendXferTo(peerId: string, data: string | ArrayBuffer): boolean {
-    return this.entries.get(peerId)?.link?.sendXfer(data) ?? false;
+    const entry = this.entries.get(peerId);
+    if (!entry || !entry.proven) return false;
+    return entry.link?.sendXfer(data) ?? false;
   }
 
   /** -1 when the peer is unknown or its link isn't built yet. */
@@ -324,6 +377,7 @@ export class Mesh {
       pendingCapWarned: false,
       recovering: false,
       proven: initiallyProven,
+      everProven: initiallyProven,
     };
     this.entries.set(peerId, entry);
     this.scheduleConstruction(peerId, entry, "evict");
@@ -411,7 +465,13 @@ export class Mesh {
           if (this.entries.get(peerId) !== entry || entry.link !== link) return;
           const wasOpen = this.openChannels() > 0;
           entry.channelOpen = true;
-          if (!wasOpen) this.cb.onChannelOpen();
+          // Review fix (Minor 7): openChannels() now counts only PROVEN
+          // entries — an unproven peer's channel physically opening must
+          // not move the dcOpen aggregate (see openChannels()'s doc). Without
+          // the `entry.proven` guard, `!wasOpen` alone would fire this for
+          // an unproven peer whose flip doesn't actually change the filtered
+          // count at all.
+          if (!wasOpen && entry.proven) this.cb.onChannelOpen();
         },
         onMessage: (text) => {
           // Same identity guard as the other link events: a superseded
@@ -429,13 +489,21 @@ export class Mesh {
             if (channel === "cos") {
               const wasOpen = this.openChannels() > 0;
               entry.channelOpen = true;
-              if (!wasOpen) this.cb.onChannelOpen();
+              // Review fix (Minor 7): see the plain onChannelOpen handler's
+              // comment above — same `entry.proven` guard, same reason.
+              if (!wasOpen && entry.proven) this.cb.onChannelOpen();
             } else {
               entry.xferOpen = true;
             }
           } else if (state === "closed") {
             if (channel === "cos") {
-              const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
+              // `&& entry.proven`: without it, an UNPROVEN entry's channel
+              // closing could read `openChannels() === 1` purely because
+              // some OTHER, actually-proven peer is open — firing a spurious
+              // onChannelClosed even though that other peer's channel never
+              // closed (this entry never contributed to the count in the
+              // first place).
+              const wasOnlyOpen = entry.channelOpen && entry.proven && this.openChannels() === 1;
               entry.channelOpen = false;
               if (wasOnlyOpen) this.cb.onChannelClosed();
             } else {
@@ -593,7 +661,9 @@ export class Mesh {
     // "new"/"connecting" writes while it's set; "connected" clears it, and
     // "failed"/"disconnected" pass through as honest news.
     entry.recovering = true;
-    const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
+    // `&& entry.proven`: see the identical guard in construct()'s
+    // onChannelState "closed" branch (Minor 7 review fix) — same reasoning.
+    const wasOnlyOpen = entry.channelOpen && entry.proven && this.openChannels() === 1;
     if (entry.channelOpen) {
       entry.channelOpen = false; // old channel died with the old pc
       this.cb.onChannelState(peerId, "cos", "closed"); // synthesized — see remove()
@@ -642,9 +712,14 @@ export class Mesh {
     entry.pending = [];
   }
 
+  /** Review fix (Minor 7): counts only PROVEN entries — an unproven peer's
+   *  cos channel opening (SCTP can establish ~5s before its proof settles)
+   *  must not move the dcOpen aggregate (podcast-panel gating etc.) any more
+   *  than it moves the roster. Pre-5D callers never set proven=false, so
+   *  this is a no-op filter for them (identical to the old plain sum). */
   private openChannels(): number {
     let n = 0;
-    for (const e of this.entries.values()) if (e.channelOpen) n += 1;
+    for (const e of this.entries.values()) if (e.channelOpen && e.proven) n += 1;
     return n;
   }
 

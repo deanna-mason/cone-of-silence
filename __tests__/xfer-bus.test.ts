@@ -11,21 +11,24 @@
 //   - "useCallSession bus.xfer": renderHook over the same fakes — the hook
 //     builds its own CallSession internally, so there is no lower seam to
 //     mock without losing coverage of the wiring itself.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { CallSession, type ChannelLifecycle, type ChannelName, type SessionCrypto } from "@/lib/webrtc/session";
+import { CallSession, type ChannelLifecycle, type ChannelName, type RemotePeer, type SessionCrypto } from "@/lib/webrtc/session";
 import { useCallSession } from "@/hooks/useCallSession";
 import { STAGGER_MS } from "@/lib/webrtc/mesh";
+import { JoinProof } from "@/lib/webrtc/joinProof";
 import type { RoomKeys } from "@/lib/roomLink";
 
 // Phase 5D (Task 5): CallSession now requires a `crypto` dep (D15 — every
 // production call is encrypted), and the hook derives its own crypto keys
-// asynchronously before ever constructing a session. None of this file's
-// tests exercise the "cos" channel (only "cos-xfer"), so no join-proof ever
-// starts and no real crypto.subtle call is ever made against these fakes —
-// FAKE_CRYPTO/the mocked deriveRoomKeys+detectE2eeApi below exist purely so
-// construction doesn't throw and the hook's async derivation step resolves
-// deterministically inside these tests' fake-timer runs.
+// asynchronously before ever constructing a session. FAKE_CRYPTO/the mocked
+// deriveRoomKeys+detectE2eeApi below exist so construction doesn't throw and
+// the hook's async derivation step resolves deterministically. Review fix
+// (Critical 1): the cos-xfer channel is now proof-gated, so several of this
+// file's tests need a REAL, working proofKey (not an opaque stand-in) to
+// drive a genuine JoinProof to "proven" over the fake "cos" channel — a real
+// HMAC CryptoKey (not derived via HKDF; that derivation isn't what's under
+// test here) is generated once in beforeAll.
 const FAKE_CRYPTO: SessionCrypto = {
   keys: {
     mediaKey: {} as CryptoKey,
@@ -35,11 +38,23 @@ const FAKE_CRYPTO: SessionCrypto = {
   api: "encoded-streams",
 };
 
+beforeAll(async () => {
+  FAKE_CRYPTO.keys.proofKey = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+    "verify",
+  ]);
+});
+
 vi.mock("@/lib/crypto/derive", () => ({
   deriveRoomKeys: vi.fn(async () => FAKE_CRYPTO.keys),
 }));
 vi.mock("@/lib/webrtc/e2eeSupport", () => ({
   detectE2eeApi: vi.fn(() => FAKE_CRYPTO.api),
+  // Minor 9 (review fix): peer.ts imports vp9Preferences unconditionally —
+  // omitting it here only survived because jsdom has no global RTCRtpSender,
+  // so applyVp9Pin's early-return exits before ever calling it. Included for
+  // real, so that stays true by construction rather than by accident.
+  vp9Preferences: vi.fn(() => null),
 }));
 
 class FakeWS {
@@ -171,8 +186,56 @@ function xferChannelOf(pc: FakePC): FakeChannel {
   return pc.channels.find((c) => c.label === "cos-xfer")!;
 }
 
+function cosChannelOf(pc: FakePC): FakeChannel {
+  return pc.channels.find((c) => c.label === "cos")!;
+}
+
 function enterWithOnePeer(ws: FakeWS): void {
   ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [{ peerId: "p1" }], ice: ICE_A });
+}
+
+/** Wires a real JoinProof, playing the honest remote peer "p1", onto the
+ *  "cos" FakeChannel: its outbound wire text lands on the channel's own
+ *  onmessage (exactly like real inbound bytes reaching PeerLink), and the
+ *  local session's outbound sends (channel.send) are fed straight into it.
+ *  It never needs to call .start() itself — the LOCAL session's own proof
+ *  only cares that ITS OWN challenge gets answered validly, and answering
+ *  an incoming challenge runs regardless of this peer's own phase (see
+ *  joinProof.ts's answerChallenge doc) — same loopback idiom as
+ *  join-proof.test.ts's BusEvents/GatingHarness. */
+function wireHonestPeer(proofKey: CryptoKey, cosChannel: FakeChannel): void {
+  // PeerLink.send() checks readyState !== "open" and silently no-ops
+  // otherwise — a real channel's onopen firing implies readyState is
+  // already "open"; this fake one needs it set explicitly.
+  cosChannel.readyState = "open";
+  const peer = new JoinProof({
+    proofKey,
+    selfPeerId: "p1",
+    remotePeerId: "me", // matches enterWithOnePeer's serverSays selfId
+    events: {
+      onSend: (text) => cosChannel.onmessage?.({ data: text }),
+      onProven: () => {},
+      onFailed: () => {},
+    },
+  });
+  cosChannel.send = (data: unknown) => {
+    cosChannel.sent.push(data);
+    if (typeof data === "string") peer.handleMessage(data);
+  };
+}
+
+/** Polls the fake clock in small async-aware steps (real crypto.subtle HMAC
+ *  underneath, same reasoning as join-proof.test.ts's waitForFake) until
+ *  `predicate` holds, wrapped in `act` so any React state updates the real
+ *  CallSession/hook makes along the way are flushed and not warned about. */
+async function waitFor(predicate: () => boolean, maxTicks = 200): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    if (predicate()) return;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+  throw new Error("waitFor: condition not met within maxTicks");
 }
 
 beforeEach(() => {
@@ -229,14 +292,30 @@ describe("CallSession xfer events", () => {
     expect(events.at(-1)).toEqual(["p1", "xfer", "closed", undefined]);
   });
 
-  it("(b) xferMessage and xferDrain events fire with peerId", () => {
+  it("(b) xferMessage/xferDrain are gated until the peer is proven (Critical 1 review fix), then fire with peerId", async () => {
     session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
     const messages: [string, string | ArrayBuffer][] = [];
     const drains: string[] = [];
+    const rosters: RemotePeer[][] = [];
     session.events.on("xferMessage", (peerId, data) => messages.push([peerId, data]));
     session.events.on("xferDrain", (peerId) => drains.push(peerId));
-    const { xfer } = buildLiveLink();
+    session.events.on("roster", (r) => rosters.push(r));
+    const { pc, xfer } = buildLiveLink();
     xfer.readyState = "open";
+
+    // Before proof: an impostor's xfr/* traffic must never reach the app —
+    // this is exactly the hole Critical 1 named (useEpisodeExchange would
+    // otherwise build a receiver and commit parts off an unproven peerId).
+    xfer.onmessage!({ data: "too-early" });
+    xfer.onbufferedamountlow!();
+    expect(messages).toEqual([]);
+    expect(drains).toEqual([]);
+
+    // Drive the REAL join-proof to completion over the real "cos" channel.
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
 
     const buf = new ArrayBuffer(4);
     xfer.onmessage!({ data: "hello" });
@@ -250,12 +329,25 @@ describe("CallSession xfer events", () => {
     expect(drains).toEqual(["p1"]);
   });
 
-  it("(c) sendXferTo/xferBufferedAmount delegate to the mesh", () => {
+  it("(c) sendXferTo/xferBufferedAmount are gated until proven (Critical 1 review fix), then delegate to the mesh", async () => {
     session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
-    const { xfer } = buildLiveLink();
+    const rosters: RemotePeer[][] = [];
+    session.events.on("roster", (r) => rosters.push(r));
+    const { pc, xfer } = buildLiveLink();
 
     expect(session.sendXferTo("p1", "x")).toBe(false); // not open yet — refused, not queued
+
     xfer.readyState = "open";
+    // Channel is physically open but the peer is still unproven — must still
+    // refuse, not fall through to the now-open real channel (Critical 1).
+    expect(session.sendXferTo("p1", "x")).toBe(false);
+    expect(xfer.sent).toEqual([]);
+
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+
     expect(session.sendXferTo("p1", "x")).toBe(true);
     const buf = new ArrayBuffer(8);
     expect(session.sendXferTo("p1", buf)).toBe(true);
@@ -291,7 +383,7 @@ describe("useCallSession bus.xfer", () => {
     h.unmount();
   });
 
-  it("(d) a listener registered before any session exists still receives events once the session emits; unsubscribe stops delivery", async () => {
+  it("(d) a listener registered before any session exists still receives events once the session emits — gated until proven (Critical 1), unsubscribe stops delivery", async () => {
     const h = drive(false);
     const received: [string, string | ArrayBuffer][] = [];
     const off = h.result.current.bus.xfer.onMessage((peerId, data) => received.push([peerId, data]));
@@ -310,6 +402,17 @@ describe("useCallSession bus.xfer", () => {
     const xfer = xferChannelOf(pc);
     xfer.readyState = "open";
 
+    // Before proof: gated, not merely "no listener wired yet" (Critical 1).
+    act(() => xfer.onmessage!({ data: "too-early" }));
+    expect(received).toEqual([]);
+
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, cos);
+    await act(async () => {
+      cos.onopen!();
+    });
+    await waitFor(() => h.result.current.peers.some((p) => p.peerId === "p1"));
+
     act(() => xfer.onmessage!({ data: "hi" }));
     expect(received).toEqual([["p1", "hi"]]);
 
@@ -320,7 +423,7 @@ describe("useCallSession bus.xfer", () => {
     h.unmount();
   });
 
-  it("(d) bus.xfer.onDrain and onChannelState route through the session, and send/bufferedAmount delegate", async () => {
+  it("(d) bus.xfer.onDrain/onChannelState route through the session; send/bufferedAmount gated until proven (Critical 1), then delegate", async () => {
     const h = drive(true);
     // Phase 5D: flush the async key-derivation microtask before the session
     // (and its WebSocket) exists — see the previous test's comment.
@@ -338,9 +441,20 @@ describe("useCallSession bus.xfer", () => {
     h.result.current.bus.xfer.onChannelState((peerId, channel, state) => states.push([peerId, channel, state]));
 
     act(() => xfer.onopen!());
-    expect(states).toEqual([["p1", "xfer", "open"]]);
+    expect(states).toEqual([["p1", "xfer", "open"]]); // channel lifecycle itself is not proof-gated
 
     xfer.bufferedAmount = 777;
+    act(() => xfer.onbufferedamountlow!()); // still unproven — drain gated
+    expect(drains).toEqual([]);
+    expect(h.result.current.bus.xfer.send("p1", "x")).toBe(false); // unproven — refused
+
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, cos);
+    await act(async () => {
+      cos.onopen!();
+    });
+    await waitFor(() => h.result.current.peers.some((p) => p.peerId === "p1"));
+
     act(() => xfer.onbufferedamountlow!());
     expect(drains).toEqual(["p1"]);
 

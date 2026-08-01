@@ -843,3 +843,51 @@ describe("Mesh recovery roster honesty — connecting suppressed during ANY in-f
     expect(made).toHaveLength(3); // rebuild #2 landed — within MAX_LINK_REBUILDS
   });
 });
+
+describe("Mesh proven-gated dcOpen aggregate (Phase 5D review fix, Minor 7)", () => {
+  it("an unproven peer's channel opening does not fire the aggregate onChannelOpen", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addNewcomer("p1", false); // initiallyProven=false
+    settle();
+    made[0].events.onChannelOpen();
+    expect(cb.onChannelOpen).not.toHaveBeenCalled();
+  });
+
+  it("becoming proven while the channel is already open fires the aggregate then", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addNewcomer("p1", false);
+    settle();
+    made[0].events.onChannelOpen();
+    expect(cb.onChannelOpen).not.toHaveBeenCalled();
+
+    mesh.setProven("p1", true);
+    expect(cb.onChannelOpen).toHaveBeenCalledOnce();
+  });
+
+  it("losing proven status while the channel is still open (and was the only one) fires the aggregate onChannelClosed", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addNewcomer("p1", false);
+    settle();
+    made[0].events.onChannelOpen();
+    mesh.setProven("p1", true);
+    expect(cb.onChannelOpen).toHaveBeenCalledOnce();
+
+    mesh.setProven("p1", false); // e.g. a 4C rebuild's fresh rising edge
+    expect(cb.onChannelClosed).toHaveBeenCalledOnce();
+  });
+
+  it("an unproven peer's channel closing never fires onChannelClosed for a DIFFERENT, still-open proven peer", () => {
+    const { mesh, made, cb } = harness();
+    mesh.addExistingPeers(["p1", "p2"], false);
+    settle();
+    made[0].events.onChannelOpen();
+    mesh.setProven("p1", true); // p1 proven+open — the aggregate's sole contributor
+    expect(cb.onChannelOpen).toHaveBeenCalledOnce();
+
+    // p2's channel opens (still unproven, never counted) then closes again —
+    // must not touch the aggregate at all, since p2 never contributed to it.
+    made[1].events.onChannelState("cos", "open");
+    made[1].events.onChannelState("cos", "closed");
+    expect(cb.onChannelClosed).not.toHaveBeenCalled();
+  });
+});

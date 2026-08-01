@@ -4,16 +4,17 @@
 //
 // Phase 5D (Task 5): CallSession now requires a `crypto` dep and always
 // passes `e2ee` into every PeerLink it builds (D15 — every production call
-// is encrypted). FAKE_CRYPTO below is a placeholder (opaque CryptoKey
-// stand-ins, never fed to real crypto.subtle in these tests — no test here
-// ever opens the "cos" channel, so no JoinProof ever starts and proofKey is
-// never actually signed with). FakePC/FakeWorker below grew the minimal
-// surface PeerLink's e2ee wiring touches (getTransceivers, a sender with
-// createEncodedStreams, a global Worker stub) so construction doesn't throw;
-// none of it is otherwise exercised by these tests.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// is encrypted). FAKE_CRYPTO's proofKey is a REAL HMAC CryptoKey (review fix
+// — Important 6: several tests below drive a genuine JoinProof to "proven"
+// over the fake "cos" channel, the same wireHonestPeer idiom as
+// xfer-bus.test.ts). FakePC/FakeChannel/FakeWorker grew the minimal surface
+// PeerLink's e2ee wiring and the "cos" channel touch (getTransceivers, a
+// sender with createEncodedStreams, a global Worker stub, labeled data
+// channels) so construction doesn't throw and "cos" can be driven directly.
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CallSession, type CallStatus, type RemotePeer, type SessionCrypto } from "@/lib/webrtc/session";
-import { STAGGER_MS } from "@/lib/webrtc/mesh";
+import { STAGGER_MS, RESTART_RECOVERY_MS } from "@/lib/webrtc/mesh";
+import { JoinProof } from "@/lib/webrtc/joinProof";
 
 const FAKE_CRYPTO: SessionCrypto = {
   keys: {
@@ -23,6 +24,13 @@ const FAKE_CRYPTO: SessionCrypto = {
   },
   api: "encoded-streams",
 };
+
+beforeAll(async () => {
+  FAKE_CRYPTO.keys.proofKey = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+    "verify",
+  ]);
+});
 
 class FakeWS {
   static instances: FakeWS[] = [];
@@ -52,6 +60,26 @@ class FakeWS {
   }
 }
 
+class FakeChannel {
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: ((ev: unknown) => void) | null = null;
+  onmessage: ((ev: { data: unknown }) => void) | null = null;
+  onbufferedamountlow: (() => void) | null = null;
+  bufferedAmountLowThreshold = 0;
+  bufferedAmount = 0;
+  readyState: RTCDataChannelState = "connecting";
+  binaryType = "blob";
+  sent: unknown[] = [];
+  constructor(
+    public label: string,
+    public init?: RTCDataChannelInit,
+  ) {}
+  send(data: unknown) {
+    this.sent.push(data);
+  }
+}
+
 class FakeSender {
   transform: unknown = null;
   createEncodedStreams = () => ({ readable: {} as ReadableStream, writable: {} as WritableStream });
@@ -73,27 +101,31 @@ class FakeWorker {
   }
 }
 
-// connectionState is not modeled here — onconnectionstatechange is stored but
-// never invoked, so PeerLink's onConnectionState never fires; a future slice
-// exercising connection-state transitions must add that.
+// onconnectionstatechange is stored but only invoked where a test explicitly
+// calls it (the post-reconnect countersign regression below) — most tests in
+// this file don't model connection-state transitions at all.
 class FakePC {
   static instances: FakePC[] = [];
   config: RTCConfiguration | undefined;
   addedTracks: MediaStreamTrack[] = [];
+  channels: FakeChannel[] = [];
   senders: FakeSender[] = [];
   transceivers: FakeTransceiver[] = [];
   onnegotiationneeded: (() => void) | null = null;
   onicecandidate: unknown = null;
   ontrack: unknown = null;
   onconnectionstatechange: (() => void) | null = null;
+  connectionState: RTCPeerConnectionState = "new";
   signalingState = "stable";
   closed = false;
   constructor(config?: RTCConfiguration) {
     this.config = config;
     FakePC.instances.push(this);
   }
-  createDataChannel() {
-    return { onopen: null } as unknown as RTCDataChannel;
+  createDataChannel(label: string, init?: RTCDataChannelInit) {
+    const ch = new FakeChannel(label, init);
+    this.channels.push(ch);
+    return ch as unknown as RTCDataChannel;
   }
   addTrack(track: MediaStreamTrack) {
     this.addedTracks.push(track);
@@ -133,6 +165,50 @@ function startAndOpen(): FakeWS {
   const ws = lastWS();
   ws.open();
   return ws;
+}
+
+function cosChannelOf(pc: FakePC): FakeChannel {
+  return pc.channels.find((c) => c.label === "cos")!;
+}
+
+/** Wires a real JoinProof, playing the honest remote peer, onto a "cos"
+ *  FakeChannel — same idiom as xfer-bus.test.ts's wireHonestPeer. Its
+ *  outbound wire text lands on the channel's own onmessage (exactly like
+ *  real inbound bytes reaching PeerLink), and the local session's outbound
+ *  sends (channel.send) are fed straight into it. Never needs .start() —
+ *  the LOCAL session's own proof only cares that ITS OWN challenge gets
+ *  answered validly (answering an incoming challenge runs regardless of the
+ *  answerer's own phase — see joinProof.ts's answerChallenge doc). */
+function wireHonestPeer(proofKey: CryptoKey, remotePeerId: string, selfPeerId: string, cosChannel: FakeChannel): void {
+  // PeerLink.send() no-ops unless readyState === "open" — a real channel's
+  // onopen firing implies that; this fake one needs it set explicitly.
+  cosChannel.readyState = "open";
+  const peer = new JoinProof({
+    proofKey,
+    selfPeerId: remotePeerId,
+    remotePeerId: selfPeerId,
+    events: {
+      onSend: (text) => cosChannel.onmessage?.({ data: text }),
+      onProven: () => {},
+      onFailed: () => {},
+    },
+  });
+  cosChannel.send = (data: unknown) => {
+    cosChannel.sent.push(data);
+    if (typeof data === "string") peer.handleMessage(data);
+  };
+}
+
+/** Polls the fake clock in small async-aware steps until `predicate` holds —
+ *  real crypto.subtle HMAC underneath (same reasoning as join-proof.test.ts's
+ *  waitForFake); vitest 4's *Async timer APIs yield to the microtask queue
+ *  between steps so a pending crypto promise still gets to resolve. */
+async function waitFor(predicate: () => boolean, maxTicks = 200): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    if (predicate()) return;
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  throw new Error("waitFor: condition not met within maxTicks");
 }
 
 beforeEach(() => {
@@ -251,5 +327,201 @@ describe("refusal mapping", () => {
     ws2.serverSays({ v: 1, t: "error", reason: "room-not-found", message: "" }); // triggers create
     ws2.serverSays({ v: 1, t: "error", reason: "create-refused", message: "" });
     expect(statuses.at(-1)).toBe("create-refused"); // NOT recovery-failed (controller ruling, Task 1 fix round)
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5D review fixes (Important 6): the honest-pair and post-reconnect
+// countersign cases moved/duplicated onto the REAL CallSession harness above
+// — a real Mesh + real PeerLink + real JoinProof (real HMAC) actually
+// reaching "proven"/"failed", not the hand-mirrored GatingHarness in
+// join-proof.test.ts (which validates the intended design, not this file's
+// shipped session.ts).
+// ---------------------------------------------------------------------------
+describe("Phase 5D join-proof gating on the real CallSession stack", () => {
+  it("honest pair: roster/messages gated on the real 'cos' channel until proven, then flow", async () => {
+    startAndOpen().serverSays({
+      v: 1, t: "joined", selfId: "me", peers: [{ peerId: "p1" }], ice: ICE_A,
+    });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const cos = cosChannelOf(FakePC.instances[0]);
+
+    const messages: [string, string][] = [];
+    session.events.on("message", (peerId, text) => messages.push([peerId, text]));
+
+    expect(rosters.at(-1)).toEqual([]); // invisible before any proof starts
+
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, "p1", "me", cos);
+    cos.onopen!();
+
+    // Before proof completes: an inbound app message must never surface.
+    cos.onmessage!({ data: "too-early" });
+    expect(messages).toEqual([]);
+
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+
+    expect(rosters.at(-1)).toEqual([{ peerId: "p1", stream: null, connectionState: "new" }]);
+
+    cos.onmessage!({ data: "post-proof" });
+    expect(messages).toEqual([["p1", "post-proof"]]);
+
+    session.sendAll("hello");
+    expect(cos.sent).toContain("hello");
+  });
+
+  it("a signaling reconnect never resurrects a host's impolite squatter into a countersign-failed misfire (Critical 2 / D24 review fix)", async () => {
+    // Host's FIRST "entered" is an EMPTY room — joinedPopulatedRoom latches
+    // false PERMANENTLY, no matter what any later "entered" (a reconnect's
+    // re-emit, carrying the room's current peer list) looks like.
+    const ws1 = startAndOpen();
+    ws1.serverSays({ v: 1, t: "joined", selfId: "me", peers: [] });
+    expect(statuses).toEqual(["waiting"]);
+
+    // A wrong-secret squatter joins US (peer-joined ⇒ addNewcomer ⇒ WE are
+    // impolite toward it) — the shape Critical 2 named exactly.
+    ws1.serverSays({ v: 1, t: "peer-joined", peerId: "squatter" });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const pc1 = FakePC.instances.at(-1)!;
+    const cos1 = cosChannelOf(pc1);
+
+    const wrongKey1 = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    // A bare JoinProof standing in for the squatter, holding a DIFFERENT key
+    // — genuinely fails the countersign (bad-mac), not a timeout.
+    const impostor1 = new JoinProof({
+      proofKey: wrongKey1,
+      selfPeerId: "squatter",
+      remotePeerId: "me",
+      events: { onSend: (text) => cos1.onmessage?.({ data: text }), onProven: () => {}, onFailed: () => {} },
+    });
+    cos1.readyState = "open";
+    cos1.send = (data: unknown) => {
+      cos1.sent.push(data);
+      if (typeof data === "string") impostor1.handleMessage(data);
+    };
+    cos1.onopen!();
+    // Bad-mac closes the link (pc.close()) — this file doesn't model
+    // connectionState transitions, so pc.closed is the observable signal
+    // that the proof genuinely failed (a timeout would NOT close it —
+    // Important 4 — so this also confirms we're on the bad-mac path).
+    await waitFor(() => pc1.closed);
+
+    expect(statuses).not.toContain("countersign-failed"); // D18 — right-secret host, no status change
+    expect(rosters.at(-1)).toEqual([]); // squatter never surfaced
+
+    // Socket blip: reconnect. SignalingClient re-emits "entered" with the
+    // room's CURRENT peer list — the squatter is still server-side present
+    // (Important 3: a refused peer's own socket isn't ours to close), so the
+    // reconnect's "entered" is populated even though our OWN first one wasn't.
+    ws1.close();
+    expect(statuses.at(-1)).toBe("reconnecting");
+    vi.advanceTimersByTime(20_000);
+    const ws2 = lastWS();
+    ws2.open();
+    ws2.serverSays({
+      v: 1, t: "joined", selfId: "me2", peers: [{ peerId: "squatter" }], ice: ICE_A,
+    });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const pc2 = FakePC.instances.at(-1)!;
+    const cos2 = cosChannelOf(pc2);
+
+    const wrongKey2 = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const impostor2 = new JoinProof({
+      proofKey: wrongKey2,
+      selfPeerId: "squatter",
+      remotePeerId: "me2",
+      events: { onSend: (text) => cos2.onmessage?.({ data: text }), onProven: () => {}, onFailed: () => {} },
+    });
+    cos2.readyState = "open";
+    cos2.send = (data: unknown) => {
+      cos2.sent.push(data);
+      if (typeof data === "string") impostor2.handleMessage(data);
+    };
+    cos2.onopen!();
+    await waitFor(() => pc2.closed);
+
+    // The exact regression: pre-fix, addExistingPeers(["squatter"], false)
+    // on THIS "entered" made us polite toward it, and polite-everyone-failed
+    // fired the refusal card here. Post-fix, joinedPopulatedRoom was decided
+    // once, on the FIRST entered (empty), and this reconnect can't change it.
+    expect(statuses).not.toContain("countersign-failed");
+    expect(rosters.at(-1)).toEqual([]);
+  });
+
+  it("countersign-failed stops signaling so it can never dissolve back into a live call (Important 3 review fix)", async () => {
+    // WE are the wrong-secret joiner this time: our first "entered" already
+    // shows an existing peer — joinedPopulatedRoom latches true.
+    const ws = startAndOpen();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [{ peerId: "p1" }], ice: ICE_A });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const cos1 = cosChannelOf(FakePC.instances[0]);
+
+    const wrongKey = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const impostor = new JoinProof({
+      proofKey: wrongKey,
+      selfPeerId: "p1",
+      remotePeerId: "me",
+      events: { onSend: (text) => cos1.onmessage?.({ data: text }), onProven: () => {}, onFailed: () => {} },
+    });
+    cos1.readyState = "open";
+    cos1.send = (data: unknown) => {
+      cos1.sent.push(data);
+      if (typeof data === "string") impostor.handleMessage(data);
+    };
+    cos1.onopen!();
+    await waitFor(() => statuses.includes("countersign-failed"));
+
+    // Without the fix, the socket stays alive and a LATER peerJoined whose
+    // proof actually succeeds would flip status back to "connected" via
+    // onRoster's "≥1 stream ⇒ connected" — resurrecting a terminal card
+    // into a live call (the exact shape 5D exists to close).
+    expect(ws.readyState).toBe(3); // signaling.stop() actually closed the socket
+    expect(statuses.at(-1)).toBe("countersign-failed");
+  });
+
+  it("a link-factory throw during construction does not leave a stale proof pinning checkCountersignFailed forever (Minor 8 review fix)", async () => {
+    let throwNext = true;
+    class ThrowingPC extends FakePC {
+      addTrack(track: MediaStreamTrack) {
+        if (throwNext) {
+          throwNext = false;
+          throw new Error("addTrack boom");
+        }
+        return super.addTrack(track);
+      }
+    }
+    vi.stubGlobal("RTCPeerConnection", ThrowingPC);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    startAndOpen().serverSays({
+      v: 1, t: "joined", selfId: "me",
+      peers: [{ peerId: "p1" }, { peerId: "p2" }], ice: ICE_A,
+    });
+    vi.advanceTimersByTime(STAGGER_MS * 2); // both staggered constructions run — p1 throws, p2 succeeds
+    expect(FakePC.instances).toHaveLength(2); // p1's pc object exists; its addTrack just threw
+
+    const cos2 = cosChannelOf(FakePC.instances[1]);
+    const wrongKey = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const impostor = new JoinProof({
+      proofKey: wrongKey,
+      selfPeerId: "p2",
+      remotePeerId: "me",
+      events: { onSend: (text) => cos2.onmessage?.({ data: text }), onProven: () => {}, onFailed: () => {} },
+    });
+    cos2.readyState = "open";
+    cos2.send = (data: unknown) => {
+      cos2.sent.push(data);
+      if (typeof data === "string") impostor.handleMessage(data);
+    };
+    cos2.onopen!();
+    await waitFor(() => statuses.includes("countersign-failed"));
+
+    // Without the fix, p1's proof — registered in session's proofs map right
+    // before the throwing PeerLink construction — would linger forever at
+    // "pending" (mesh evicted the ENTRY, but nothing disposed/deleted the
+    // proof), so checkCountersignFailed's `every(...)` could never be true
+    // again for the rest of the session, silently disabling the refusal
+    // card p2's genuine bad-mac failure should have raised.
+    expect(statuses.at(-1)).toBe("countersign-failed");
+    logged.mockRestore();
   });
 });

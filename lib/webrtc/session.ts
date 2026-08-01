@@ -78,11 +78,29 @@ export class CallSession {
   private selfPeerId: string | null = null;
   /** Phase 5D (Task 5): one live JoinProof per remote peer, replaced (old one
    *  disposed first) on every fresh link — including a 4C rebuild, which is
-   *  a fresh cos channel and therefore a fresh rising edge (spec). `polite`
-   *  is carried alongside so checkCountersignFailed can restrict "every link
-   *  failed" to the peers WE joined (see that method's doc — this is what
-   *  makes D18's asymmetry work without any crypto-level signal for it). */
-  private readonly proofs = new Map<string, { proof: JoinProof; polite: boolean }>();
+   *  a fresh cos channel and therefore a fresh rising edge (spec). */
+  private readonly proofs = new Map<string, JoinProof>();
+  /**
+   * Review fix (Critical 2, ratified as D24): latched exactly once, on the
+   * FIRST "entered" event this session ever receives, to whatever
+   * `info.peers.length > 0` was at that moment — and never recomputed after,
+   * no matter how many later "entered" events arrive (every signaling
+   * reconnect re-emits one with the room's CURRENT peer list, per
+   * signaling.ts). `polite` was the original discriminator for
+   * checkCountersignFailed, but it is a per-CONSTRUCTION artifact, not a
+   * stable room relationship: a reconnect calls closeAll() (wiping every
+   * mesh entry) and then addExistingPeers(..., false) for whoever the
+   * server currently lists — which makes us polite toward a peer we were
+   * originally impolite toward (an incumbent host, rejoining after a socket
+   * blip, who has a wrong-secret squatter still sitting in the room) purely
+   * because of when we happened to observe them. This latch is decided once,
+   * from the FIRST entered event only, so it can never flip under a
+   * reconnect: a host whose very first entry was an empty room stays
+   * permanently ineligible for "countersign-failed", exactly like it always
+   * was pre-reconnect (see checkCountersignFailed).
+   */
+  private joinedPopulatedRoom = false;
+  private hasEnteredOnce = false;
 
   constructor(
     roomId: string,
@@ -120,6 +138,10 @@ export class CallSession {
     const ev = this.signaling.events;
 
     ev.on("entered", (info) => {
+      if (!this.hasEnteredOnce) {
+        this.hasEnteredOnce = true;
+        this.joinedPopulatedRoom = info.peers.length > 0; // see the field's doc — decided ONCE
+      }
       this.selfPeerId = info.selfId;
       this.iceServers = info.ice; // freshest creds — reconnects re-mint via the join reply
       if (info.peers.length === 0) {
@@ -134,7 +156,7 @@ export class CallSession {
     ev.on("peerJoined", (peerId) => this.mesh.addNewcomer(peerId, false));
     ev.on("peerLeft", (peerId) => {
       this.mesh.remove(peerId);
-      this.proofs.get(peerId)?.proof.dispose();
+      this.proofs.get(peerId)?.dispose();
       this.proofs.delete(peerId);
       if (this.mesh.size === 0) this.setStatus("waiting");
     });
@@ -193,18 +215,26 @@ export class CallSession {
         onChannelOpen: ev.onChannelOpen,
         onMessage: () => {},
         onChannelState: ev.onChannelState,
-        onXferMessage: ev.onXferMessage,
-        onXferDrain: ev.onXferDrain,
+        onXferMessage: () => {},
+        onXferDrain: () => {},
         onE2eeFailure: (detail) => console.error(`[e2ee] ${detail} (peer ${peerId})`),
       });
     }
 
     // A prior proof for this SAME peerId (a rebuild superseding an earlier,
     // possibly-proven link) must not linger — it owns an armed setTimeout.
-    this.proofs.get(peerId)?.proof.dispose();
-    // Fresh link ⇒ fresh rising edge: re-arm gating now, unconditionally.
-    // Covers the rebuild-of-a-previously-proven-peer case (mesh's own
-    // initiallyProven only guards the very first construction).
+    this.proofs.get(peerId)?.dispose();
+    // Fresh link ⇒ fresh rising edge: re-arm the MESSAGE/SEND gate now,
+    // unconditionally (covers the rebuild-of-a-previously-proven-peer case —
+    // mesh's own initiallyProven only guards the very first construction).
+    // Review fix (Important 5): this does NOT drop roster visibility for a
+    // peer that was proven before — mesh.setProven(false) only resets the
+    // strict, per-rising-edge trust gate; `everProven` (roster visibility)
+    // is a separate, sticky flag mesh.ts keeps until revokeVisibility()
+    // explicitly drops it below, on an actual (re-)proof failure. Without
+    // this split, every 4C rebuild of an already-trusted peer would unmount
+    // its tile and reset the SIGNAL LOST badge hold for the whole reconnect
+    // window, defeating `recovering`'s entire purpose.
     this.mesh.setProven(peerId, false);
 
     let link!: PeerLink;
@@ -221,10 +251,23 @@ export class CallSession {
           ev.onRemoteStream(stream);
         }
       },
-      onFailed: () => {
+      // Review fix (Important 4): JoinProof distinguishes "bad-mac" (the
+      // countersign was actually wrong) from "timeout" (nobody answered in
+      // 5s — jank, a stalled main thread, or a channel that opened before
+      // the far side's JS was ready; NOT evidence about the secret). Only a
+      // genuine bad-mac closes the link and can count toward
+      // checkCountersignFailed / drop a previously-proven peer's row
+      // (revokeVisibility). A timeout just leaves the peer unproven and the
+      // link alone — 4C's own connectionState-driven recovery (or a future
+      // rebuild) gets a fair shot instead of the session being told, and
+      // closing the door on, an accusation the timeout never actually made.
+      onFailed: (reason) => {
         this.mesh.setProven(peerId, false);
-        link.close();
-        this.checkCountersignFailed();
+        if (reason === "bad-mac") {
+          this.mesh.revokeVisibility(peerId);
+          link.close();
+          this.checkCountersignFailed();
+        }
       },
     };
     const proof = new JoinProof({
@@ -233,65 +276,106 @@ export class CallSession {
       remotePeerId: peerId,
       events: proofEvents,
     });
-    this.proofs.set(peerId, { proof, polite });
+    this.proofs.set(peerId, proof);
 
-    link = new PeerLink({
-      polite,
-      localStream: this.localStream,
-      iceServers: this.iceServers,
-      forceRelay: this.forceRelay,
-      sendSignal: (payload) => this.signaling.sendRelay(peerId, payload),
-      e2ee: { mediaKey: this.crypto.keys.mediaKey, api: this.crypto.api },
-      onRemoteStream: (stream) => {
-        if (proof.phase === "proven") ev.onRemoteStream(stream);
-        else stashedStream = stream;
-      },
-      onConnectionState: ev.onConnectionState,
-      onChannelOpen: () => {
-        ev.onChannelOpen();
-        proof.start();
-      },
-      onMessage: (text) => {
-        if (proof.handleMessage(text)) return; // prf/* — consumed, never forwarded
-        if (proof.phase === "proven") ev.onMessage(text);
-        // else: dropped, not queued — an unproven peer's messages never reach the app.
-      },
-      onChannelState: ev.onChannelState,
-      onXferMessage: ev.onXferMessage,
-      onXferDrain: ev.onXferDrain,
-      onE2eeFailure: (detail) => console.error(`[e2ee] ${detail} (peer ${peerId})`),
-    });
+    // Review fix (Minor 8): if PeerLink construction itself throws, mesh's
+    // own construct() evicts the entry (onThrow "evict") or marks it failed
+    // ("keep-failed" on a rebuild) — either way THIS peerId's proof, already
+    // registered above, would otherwise linger in `this.proofs` forever
+    // (nothing else ever disposes/deletes it, short of a "peerLeft"), stuck
+    // "pending" — which silently and permanently disables
+    // checkCountersignFailed's `every(...)` for the rest of the session.
+    try {
+      link = new PeerLink({
+        polite,
+        localStream: this.localStream,
+        iceServers: this.iceServers,
+        forceRelay: this.forceRelay,
+        sendSignal: (payload) => this.signaling.sendRelay(peerId, payload),
+        e2ee: { mediaKey: this.crypto.keys.mediaKey, api: this.crypto.api },
+        onRemoteStream: (stream) => {
+          if (proof.phase === "proven") ev.onRemoteStream(stream);
+          else stashedStream = stream;
+        },
+        onConnectionState: ev.onConnectionState,
+        onChannelOpen: () => {
+          ev.onChannelOpen();
+          proof.start();
+        },
+        onMessage: (text) => {
+          if (proof.handleMessage(text)) return; // prf/* — consumed, never forwarded
+          if (proof.phase === "proven") ev.onMessage(text);
+          // else: dropped, not queued — an unproven peer's messages never reach the app.
+        },
+        onChannelState: ev.onChannelState,
+        // Review fix (Critical 1): D16 names cos-xfer explicitly alongside
+        // cos — "every cos/cos-xfer app message" is gated on proof. Before
+        // this, the xfer channel (negotiated, opens independently of "cos")
+        // let an unproven peer's xfr/* traffic straight through to
+        // useEpisodeExchange's onXferMessage handler, which unconditionally
+        // builds a receiver and commits parts off the wire peerId — none of
+        // that is safe to run before the peer is trusted, envelope
+        // encryption (Task 6) notwithstanding (that protects payload bytes,
+        // not receiver construction / panel state / routing).
+        onXferMessage: (data) => {
+          if (proof.phase === "proven") ev.onXferMessage(data);
+        },
+        onXferDrain: () => {
+          if (proof.phase === "proven") ev.onXferDrain();
+        },
+        onE2eeFailure: (detail) => console.error(`[e2ee] ${detail} (peer ${peerId})`),
+      });
+    } catch (err) {
+      proof.dispose();
+      this.proofs.delete(peerId);
+      throw err; // mesh.construct()'s own catch handles eviction/keep-failed
+    }
     return link;
   }
 
   /**
-   * D18: the REFUSED side (wrong secret) surfaces "countersign-failed"; the
-   * REFUSING side (right secret) never does. Both sides get a symmetric
+   * D18/D24: the REFUSED side (wrong secret) surfaces "countersign-failed";
+   * the REFUSING side (right secret) never does. Both sides get a symmetric
    * bad-mac failure from JoinProof itself (it can't tell which of the two
    * differing secrets is "wrong"), so the asymmetry has to come from
-   * something else purely local: `polite`. We are polite toward a peer only
-   * when WE joined an already-populated room (addExistingPeers) — that is
-   * the shape of "presenting an invitation to enter." Being joined BY a
-   * newcomer (impolite) is not our own join attempt, so a stranger failing
-   * proof against us there says nothing about our own secret.
+   * something else purely local.
    *
-   * So: only once EVERY polite (joined) relationship we currently hold has
-   * failed do we conclude our own invitation was refused. A host with zero
-   * polite relationships (it never joined anyone — every peer joined it)
-   * never reaches this at all, matching "a right-secret host whose single
-   * stranger fails proof just never sees them." A wrong-secret joiner's
-   * polite relationships are ALL it has (every peer looked already-present
-   * to it), so this fires as soon as the last of them fails.
+   * Review fix (Critical 2): the original discriminator was live `polite`
+   * (joined vs. joined-by), which is unstable across a signaling reconnect
+   * — see `joinedPopulatedRoom`'s doc for the exact attacker-triggerable
+   * scenario that broke. `joinedPopulatedRoom` replaces it: latched once,
+   * from the FIRST "entered" event only, and never recomputed. Only once
+   * EVERY currently-tracked proof has failed, AND we ourselves originally
+   * joined a populated room, do we conclude our own invitation was refused.
+   * A host whose first entry was an empty room can never reach this, no
+   * matter how the peer list churns afterward (rejoins, squatters,
+   * reconnects) — matching "a right-secret host whose single stranger fails
+   * proof just never sees them." A wrong-secret joiner's first (and every)
+   * entered event finds the room already populated, so this fires as soon
+   * as the last of its peers fails. A legitimate joiner who has since proven
+   * at least one peer is safe too: `every(...)` is false the moment any
+   * proof succeeds (analyzed for 3-4 party rooms — benign).
    */
   private checkCountersignFailed(): void {
-    const polite = [...this.proofs.values()].filter((e) => e.polite);
-    if (polite.length > 0 && polite.every((e) => e.proof.phase === "failed")) {
+    if (!this.joinedPopulatedRoom) return;
+    const proofs = [...this.proofs.values()];
+    if (proofs.length > 0 && proofs.every((p) => p.phase === "failed")) {
+      // Review fix (Important 3): countersign-failed is self-inflicted —
+      // unlike every other terminal CallStatus (room-full, room-not-found,
+      // etc.), which SignalingClient itself already stops/closes on before
+      // ever emitting "refused" — nothing tells the signaling socket to
+      // stop here. Left alone, this client keeps its server seat and live
+      // socket, so a LATER peerJoined would build a fresh link/proof and,
+      // if that one succeeds, onRoster's "≥1 stream ⇒ connected" would
+      // silently dissolve this terminal card back into a live call (the
+      // exact resurrection-squatting shape 5D exists to close).
+      this.signaling.stop();
       this.dropAll("countersign-failed");
     }
   }
 
   private disposeAllProofs(): void {
-    for (const { proof } of this.proofs.values()) proof.dispose();
+    for (const proof of this.proofs.values()) proof.dispose();
     this.proofs.clear();
   }
 
