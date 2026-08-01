@@ -6,10 +6,18 @@
 // down to this module's much simpler two-message protocol); keys come from
 // the real deriveRoomKeys (Task 1), not mocks — this state machine is only as
 // trustworthy as the HMACs it actually verifies.
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoomKeys } from "@/lib/roomLink";
 import { deriveRoomKeys } from "@/lib/crypto/derive";
 import { JoinProof, parseProofMsg, type ProofEvents, type ProofPhase } from "@/lib/webrtc/joinProof";
+import {
+  Mesh,
+  RESTART_RECOVERY_MS,
+  STAGGER_MS,
+  type LinkEvents,
+  type MeshLink,
+  type RemotePeer,
+} from "@/lib/webrtc/mesh";
 
 // ---------------------------------------------------------------------------
 // harness
@@ -664,5 +672,392 @@ describe("JoinProof", () => {
       await waitFor(() => a.phase !== "pending");
       expect(a.phase).toBe<ProofPhase>("proven");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 5: proof gating wired at the Mesh/session layer
+// ---------------------------------------------------------------------------
+// The security property under test: until a peer is proven, NOTHING from it
+// reaches the app — no messages in or out, no remote stream, not visible in
+// the roster/participant count. The harness below (FakeLink + GatingHarness)
+// mirrors lib/webrtc/session.ts's CallSession.buildLink/checkCountersignFailed
+// wiring against a REAL Mesh with real JoinProof instances (real HMAC, same
+// as every other test in this file) — the mesh/session fakes idiom, scaled
+// up from mesh.test.ts's FakeLink harness. Keep this wiring in sync with
+// session.ts if that shape ever changes; it is deliberately a close mirror,
+// not an abstraction session.ts itself imports (session.ts has to interleave
+// this with real SignalingClient/PeerLink/Worker wiring the mesh-only
+// harness here doesn't need).
+//
+// Mesh's own construction/recovery timers (STAGGER_MS, RESTART_RECOVERY_MS)
+// are NOT injectable, so the rebuild test needs real fake timers — but the
+// join-proof handshake underneath is genuine crypto.subtle HMAC (same as
+// every other test above), which resolves via Node's real async machinery,
+// not a fake-timer tick. vitest 4's *Async timer APIs are built for exactly
+// this mix: they yield to the microtask queue between each virtual tick, so
+// a real pending crypto.subtle promise still gets to resolve.
+describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  class FakeLink implements MeshLink {
+    sent: string[] = [];
+    closeCalls = 0;
+    /** Set by GatingHarness#wireTo — stands in for the real cos channel
+     *  carrying this link's outbound bytes to the other side's inbound feed. */
+    onSendHook: ((text: string) => void) | null = null;
+    handleSignal = vi.fn(async (_payload: string) => {});
+    replaceStream = vi.fn(async (_stream: MediaStream) => {});
+    restartIce = vi.fn();
+    close = vi.fn(() => {
+      this.closeCalls += 1;
+    });
+    send = vi.fn((text: string) => {
+      this.sent.push(text);
+      this.onSendHook?.(text);
+      return true;
+    });
+    sendXfer = vi.fn(() => true);
+    xferBufferedAmount = vi.fn(() => 0);
+  }
+
+  interface PeerHandle {
+    link: FakeLink;
+    proof: JoinProof;
+    polite: boolean;
+    openChannel: () => void;
+    deliverMessage: (text: string) => void;
+    deliverStream: (stream: MediaStream) => void;
+    setConnectionState: (state: RTCPeerConnectionState) => void;
+  }
+
+  class GatingHarness {
+    readonly mesh: Mesh;
+    readonly deliveredMessages: Array<[string, string]> = [];
+    countersignFailedCount = 0;
+    private readonly rosters: RemotePeer[][] = [];
+    private readonly peers = new Map<string, PeerHandle>();
+
+    constructor(
+      private readonly selfPeerId: string,
+      private readonly proofKeyFor: (peerId: string) => CryptoKey,
+    ) {
+      this.mesh = new Mesh(
+        (peerId, polite, ev) => this.buildLink(peerId, polite, ev),
+        {
+          onRoster: (r) => this.rosters.push(r),
+          onChannelOpen: () => {},
+          onChannelClosed: () => {},
+          onMessage: (peerId, text) => this.deliveredMessages.push([peerId, text]),
+          onChannelState: () => {},
+          onXferMessage: () => {},
+          onXferDrain: () => {},
+        },
+      );
+    }
+
+    /** Latest roster snapshot — [] before the first emit, same as a fresh CallSession. */
+    get roster(): RemotePeer[] {
+      return this.rosters.at(-1) ?? [];
+    }
+
+    linkFor(peerId: string): FakeLink {
+      return this.peers.get(peerId)!.link;
+    }
+
+    proofPhaseOf(peerId: string): ProofPhase {
+      return this.peers.get(peerId)!.proof.phase;
+    }
+
+    /** Cos-channel-open rising edge — starts (or, on a fresh post-rebuild
+     *  link, restarts) the join-proof, exactly like session.ts's onChannelOpen. */
+    openChannel(peerId: string): void {
+      this.peers.get(peerId)!.openChannel();
+    }
+
+    /** Feeds one inbound wire message exactly like a real "cos" onmessage. */
+    deliverMessage(peerId: string, text: string): void {
+      this.peers.get(peerId)!.deliverMessage(text);
+    }
+
+    deliverStream(peerId: string, stream: MediaStream): void {
+      this.peers.get(peerId)!.deliverStream(stream);
+    }
+
+    setConnectionState(peerId: string, state: RTCPeerConnectionState): void {
+      this.peers.get(peerId)!.setConnectionState(state);
+    }
+
+    /** Wires this peer's outbound sends straight into `other`'s inbound feed
+     *  for `otherSideId` — the two-harness loopback standing in for a real
+     *  cos channel between two CallSessions. Re-call after a rebuild: the
+     *  fresh FakeLink is a new object, so the hook needs re-attaching (a
+     *  real cos channel doesn't have this problem — it's the same wire). */
+    wireTo(peerId: string, other: GatingHarness, otherSideId: string): void {
+      this.linkFor(peerId).onSendHook = (text) => other.deliverMessage(otherSideId, text);
+    }
+
+    /** Mirrors CallSession.leave()/dropAll's proof cleanup. */
+    disposeAllProofs(): void {
+      for (const p of this.peers.values()) p.proof.dispose();
+    }
+
+    // Mirrors lib/webrtc/session.ts's CallSession.buildLink almost verbatim
+    // (see this describe block's header comment) — one JoinProof per remote
+    // peer, fresh every time this runs (initial construction AND every 4C
+    // rebuild), gating onMessage/onRemoteStream/roster via mesh.setProven.
+    private buildLink(peerId: string, polite: boolean, ev: LinkEvents): FakeLink {
+      this.peers.get(peerId)?.proof.dispose(); // a prior proof for this SAME peerId (rebuild) must not linger
+      this.mesh.setProven(peerId, false); // fresh link ⇒ fresh rising edge, re-arm unconditionally
+
+      const link = new FakeLink();
+      let stashedStream: MediaStream | null = null;
+      const proofEvents: ProofEvents = {
+        onSend: (text) => {
+          link.send(text);
+        },
+        onProven: () => {
+          this.mesh.setProven(peerId, true);
+          if (stashedStream) {
+            const stream = stashedStream;
+            stashedStream = null;
+            ev.onRemoteStream(stream);
+          }
+        },
+        onFailed: () => {
+          this.mesh.setProven(peerId, false);
+          link.close();
+          this.checkCountersignFailed();
+        },
+      };
+      const proof = new JoinProof({
+        proofKey: this.proofKeyFor(peerId),
+        selfPeerId: this.selfPeerId,
+        remotePeerId: peerId,
+        events: proofEvents,
+      });
+      this.peers.set(peerId, {
+        link,
+        proof,
+        polite,
+        openChannel: () => {
+          ev.onChannelOpen();
+          proof.start();
+        },
+        deliverMessage: (text) => {
+          if (proof.handleMessage(text)) return; // prf/* — consumed, never forwarded
+          if (proof.phase === "proven") ev.onMessage(text);
+          // else: dropped, not queued.
+        },
+        deliverStream: (stream) => {
+          if (proof.phase === "proven") ev.onRemoteStream(stream);
+          else stashedStream = stream;
+        },
+        setConnectionState: (state) => ev.onConnectionState(state),
+      });
+      return link;
+    }
+
+    // D18's asymmetry, purely from local information — see session.ts's
+    // checkCountersignFailed for the full rationale: only "polite" (peers WE
+    // joined) relationships count toward "every link failed."
+    private checkCountersignFailed(): void {
+      const polite = [...this.peers.values()].filter((p) => p.polite);
+      if (polite.length > 0 && polite.every((p) => p.proof.phase === "failed")) {
+        this.countersignFailedCount += 1;
+      }
+    }
+  }
+
+  /** Advances the fake clock in small async-aware steps until `predicate`
+   *  holds, yielding to the microtask queue each step so a real in-flight
+   *  crypto.subtle promise gets a chance to settle (see the describe header). */
+  async function waitForFake(predicate: () => boolean, maxTicks = 200): Promise<void> {
+    for (let i = 0; i < maxTicks; i++) {
+      if (predicate()) return;
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    throw new Error("waitForFake: condition not met within maxTicks");
+  }
+
+  it("honest pair: messages dropped and a stream withheld until proven; both surface once proven", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const a = new GatingHarness("peer-a", () => proofKey);
+    const b = new GatingHarness("peer-b", () => proofKey);
+
+    // A joins a room where B already exists (A polite toward B, matching
+    // addExistingPeers); B sees A as a newcomer (impolite, addNewcomer) —
+    // the same shape session.ts wires off the signaling events.
+    a.mesh.addExistingPeers(["peer-b"], false);
+    b.mesh.addNewcomer("peer-a", false);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS);
+    a.wireTo("peer-b", b, "peer-a");
+    b.wireTo("peer-a", a, "peer-b");
+
+    expect(a.roster).toEqual([]); // invisible before any proof even starts
+
+    a.openChannel("peer-b");
+    b.openChannel("peer-a");
+
+    // A stream arrives on B's side (from A) while the proof is still
+    // pending, and A broadcasts too early — both must be silently withheld,
+    // not queued for later delivery.
+    const stream = {} as MediaStream;
+    b.deliverStream("peer-a", stream);
+    a.mesh.sendAll("too-early");
+    expect(b.roster).toEqual([]); // still unproven — stream not surfaced, peer invisible
+    expect(b.deliveredMessages).toEqual([]);
+
+    await waitForFake(
+      () => a.proofPhaseOf("peer-b") === "proven" && b.proofPhaseOf("peer-a") === "proven",
+    );
+
+    // Proven: the stashed stream is surfaced and the peer is now visible —
+    // but the earlier broadcast is gone for good (dropped, never queued).
+    expect(b.roster).toEqual([{ peerId: "peer-a", stream, connectionState: "new" }]);
+    expect(a.roster).toEqual([{ peerId: "peer-b", stream: null, connectionState: "new" }]);
+    expect(b.deliveredMessages).toEqual([]);
+
+    a.mesh.sendAll("hello");
+    expect(b.deliveredMessages).toEqual([["peer-a", "hello"]]);
+  });
+
+  it("wrong-secret peer: never surfaces, never counted — joiner reaches countersign-failed, host sees no status change (D18)", async () => {
+    const { secret: secretHost } = createRoomKeys();
+    const { secret: secretStranger } = createRoomKeys();
+    const { proofKey: hostKey } = await deriveRoomKeys(secretHost);
+    const { proofKey: strangerKey } = await deriveRoomKeys(secretStranger);
+
+    const host = new GatingHarness("peer-host", () => hostKey);
+    const stranger = new GatingHarness("peer-stranger", () => strangerKey);
+
+    // The stranger joins the host's already-populated room: stranger is
+    // polite toward host (addExistingPeers); host sees a newcomer, impolite
+    // (addNewcomer) — this asymmetry is exactly what checkCountersignFailed
+    // keys off (see its doc in session.ts).
+    stranger.mesh.addExistingPeers(["peer-host"], false);
+    host.mesh.addNewcomer("peer-stranger", false);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS);
+    host.wireTo("peer-stranger", stranger, "peer-host");
+    stranger.wireTo("peer-host", host, "peer-stranger");
+
+    host.openChannel("peer-stranger");
+    stranger.openChannel("peer-host");
+
+    await waitForFake(
+      () => host.proofPhaseOf("peer-stranger") === "failed" && stranger.proofPhaseOf("peer-host") === "failed",
+    );
+
+    expect(host.roster).toEqual([]); // never counted, on either side
+    expect(stranger.roster).toEqual([]);
+    expect(host.deliveredMessages).toEqual([]);
+    expect(stranger.deliveredMessages).toEqual([]);
+    expect(host.linkFor("peer-stranger").closeCalls).toBe(1); // "this side closes the link" on failure
+    expect(stranger.linkFor("peer-host").closeCalls).toBe(1);
+
+    expect(stranger.countersignFailedCount).toBe(1); // the wrong-secret joiner's own view
+    expect(host.countersignFailedCount).toBe(0); // D18 — right-secret host: no status change
+  });
+
+  it("sendAll and sendTo skip an unproven peer but still reach an already-proven one", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const a = new GatingHarness("peer-a", () => proofKey);
+    const b = new GatingHarness("peer-b", () => proofKey);
+
+    a.mesh.addExistingPeers(["peer-b", "peer-c"], false);
+    b.mesh.addNewcomer("peer-a", false);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS * 2);
+    a.wireTo("peer-b", b, "peer-a");
+    b.wireTo("peer-a", a, "peer-b");
+
+    a.openChannel("peer-b");
+    b.openChannel("peer-a");
+    // peer-c's channel never opens — its proof never even starts, stays
+    // pending forever, exactly like a link stuck mid-negotiation.
+    await waitForFake(
+      () => a.proofPhaseOf("peer-b") === "proven" && b.proofPhaseOf("peer-a") === "proven",
+    );
+    expect(a.proofPhaseOf("peer-c")).toBe("pending");
+    expect(a.roster.map((p) => p.peerId)).toEqual(["peer-b"]); // peer-c invisible
+
+    a.mesh.sendAll("broadcast");
+    expect(a.linkFor("peer-b").sent).toContain("broadcast");
+    expect(a.linkFor("peer-c").sent).not.toContain("broadcast"); // unproven — skipped
+
+    expect(a.mesh.sendTo("peer-b", "direct")).toBe(true);
+    expect(a.mesh.sendTo("peer-c", "direct")).toBe(false); // unproven — refused, not queued
+  });
+
+  it("a 4C rebuild of a proven peer re-runs the proof: gated during, flows again once re-proven", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const a = new GatingHarness("peer-a", () => proofKey);
+    const b = new GatingHarness("peer-b", () => proofKey);
+
+    a.mesh.addExistingPeers(["peer-b"], false);
+    b.mesh.addNewcomer("peer-a", false);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS);
+    a.wireTo("peer-b", b, "peer-a");
+    b.wireTo("peer-a", a, "peer-b");
+
+    a.openChannel("peer-b");
+    b.openChannel("peer-a");
+    await waitForFake(
+      () => a.proofPhaseOf("peer-b") === "proven" && b.proofPhaseOf("peer-a") === "proven",
+    );
+    expect(a.roster.map((p) => p.peerId)).toEqual(["peer-b"]);
+
+    // A's link to B fails; mesh's own 4C recovery takes over: restartIce
+    // immediately, then (unrecovered) a full rebuild off-tick. B's side is
+    // untouched — an asymmetric rebuild is spec-legal (mesh.ts rebuildLink's
+    // doc) and B's still-proven JoinProof instance answers a fresh incoming
+    // challenge regardless of its own terminal phase (joinProof.ts:
+    // answerChallenge runs "regardless of our OWN phase").
+    a.setConnectionState("peer-b", "failed");
+    await vi.advanceTimersByTimeAsync(RESTART_RECOVERY_MS);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS);
+
+    // A fresh link for the SAME peerId — a fresh rising edge, gating re-armed.
+    expect(a.roster).toEqual([]);
+    expect(a.proofPhaseOf("peer-b")).toBe("pending");
+
+    // Re-hook the loopback onto A's brand-new FakeLink (a real cos channel
+    // has no such seam — it's still the same wire; B's own wireTo call from
+    // before still resolves peer-a's CURRENT handle just-in-time, so it
+    // needs no re-wiring).
+    a.wireTo("peer-b", b, "peer-a");
+
+    a.mesh.sendAll("during-reproof");
+    expect(b.deliveredMessages).toEqual([]); // still gated — the fresh proof hasn't started
+
+    a.openChannel("peer-b"); // the fresh cos channel's own open: the new rising edge
+    await waitForFake(() => a.proofPhaseOf("peer-b") === "proven");
+
+    expect(a.roster.map((p) => p.peerId)).toEqual(["peer-b"]);
+    a.mesh.sendAll("after-reproof");
+    expect(b.deliveredMessages).toEqual([["peer-a", "after-reproof"]]);
+  });
+
+  it("disposing every proof cancels its armed timeout — no stray onFailed after the fact", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const a = new GatingHarness("peer-a", () => proofKey);
+
+    a.mesh.addExistingPeers(["peer-b"], false);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS);
+    a.openChannel("peer-b"); // arms the 5s proof timeout; nobody ever answers it
+
+    a.disposeAllProofs();
+
+    // Advancing well past the proof's own timeout must not fire onFailed —
+    // dispose is a hard stop (mirrors JoinProof.dispose's own contract,
+    // already unit-tested above; this proves CallSession-style cleanup
+    // actually reaches it).
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(a.proofPhaseOf("peer-b")).toBe("pending"); // never moved — the timer was cancelled, not fired
+    expect(a.roster).toEqual([]);
   });
 });

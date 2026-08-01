@@ -1,9 +1,28 @@
 // CallSession integration harness (Phase 4C): fake WebSocket + fake
 // RTCPeerConnection drive the real SignalingClient → CallSession → Mesh →
 // PeerLink stack. Named 4A rider covered here: reconnect-cred-refresh.
+//
+// Phase 5D (Task 5): CallSession now requires a `crypto` dep and always
+// passes `e2ee` into every PeerLink it builds (D15 — every production call
+// is encrypted). FAKE_CRYPTO below is a placeholder (opaque CryptoKey
+// stand-ins, never fed to real crypto.subtle in these tests — no test here
+// ever opens the "cos" channel, so no JoinProof ever starts and proofKey is
+// never actually signed with). FakePC/FakeWorker below grew the minimal
+// surface PeerLink's e2ee wiring touches (getTransceivers, a sender with
+// createEncodedStreams, a global Worker stub) so construction doesn't throw;
+// none of it is otherwise exercised by these tests.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CallSession, type CallStatus, type RemotePeer } from "@/lib/webrtc/session";
+import { CallSession, type CallStatus, type RemotePeer, type SessionCrypto } from "@/lib/webrtc/session";
 import { STAGGER_MS } from "@/lib/webrtc/mesh";
+
+const FAKE_CRYPTO: SessionCrypto = {
+  keys: {
+    mediaKey: {} as CryptoKey,
+    xferKey: {} as CryptoKey,
+    proofKey: {} as CryptoKey,
+  },
+  api: "encoded-streams",
+};
 
 class FakeWS {
   static instances: FakeWS[] = [];
@@ -33,6 +52,27 @@ class FakeWS {
   }
 }
 
+class FakeSender {
+  transform: unknown = null;
+  createEncodedStreams = () => ({ readable: {} as ReadableStream, writable: {} as WritableStream });
+  constructor(public track: MediaStreamTrack) {}
+}
+class FakeTransceiver {
+  setCodecPreferences = vi.fn();
+  constructor(public sender: FakeSender) {}
+}
+class FakeWorker {
+  static instances: FakeWorker[] = [];
+  postMessage = vi.fn();
+  terminate = vi.fn();
+  onerror: ((ev: ErrorEvent) => void) | null = null;
+  onmessageerror: ((ev: MessageEvent) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  constructor(public url: unknown) {
+    FakeWorker.instances.push(this);
+  }
+}
+
 // connectionState is not modeled here — onconnectionstatechange is stored but
 // never invoked, so PeerLink's onConnectionState never fires; a future slice
 // exercising connection-state transitions must add that.
@@ -40,6 +80,8 @@ class FakePC {
   static instances: FakePC[] = [];
   config: RTCConfiguration | undefined;
   addedTracks: MediaStreamTrack[] = [];
+  senders: FakeSender[] = [];
+  transceivers: FakeTransceiver[] = [];
   onnegotiationneeded: (() => void) | null = null;
   onicecandidate: unknown = null;
   ontrack: unknown = null;
@@ -55,9 +97,16 @@ class FakePC {
   }
   addTrack(track: MediaStreamTrack) {
     this.addedTracks.push(track);
+    const sender = new FakeSender(track);
+    this.senders.push(sender);
+    this.transceivers.push(new FakeTransceiver(sender));
+    return sender as unknown as RTCRtpSender;
   }
   getSenders() {
-    return [];
+    return this.senders;
+  }
+  getTransceivers() {
+    return this.transceivers;
   }
   restartIce() {}
   close() {
@@ -92,11 +141,13 @@ beforeEach(() => {
   vi.spyOn(Math, "random").mockReturnValue(0.5); // deterministic backoff
   FakeWS.instances = [];
   FakePC.instances = [];
+  FakeWorker.instances = [];
   vi.stubGlobal("WebSocket", FakeWS);
   vi.stubGlobal("RTCPeerConnection", FakePC);
+  vi.stubGlobal("Worker", FakeWorker);
   statuses = [];
   rosters = [];
-  session = new CallSession(ROOM, streamA, "ws://test/ws");
+  session = new CallSession(ROOM, streamA, FAKE_CRYPTO, "ws://test/ws");
   session.events.on("status", (s) => statuses.push(s));
   session.events.on("roster", (r) => rosters.push(r));
 });
@@ -119,16 +170,23 @@ describe("entry and roster", () => {
     expect(FakePC.instances).toHaveLength(0);
   });
 
-  it("populated room → roster immediately, links deferred off the handler tick", () => {
+  it("populated room → links deferred off the handler tick; roster stays empty until proven (Phase 5D)", () => {
     startAndOpen().serverSays({
       v: 1, t: "joined", selfId: "me",
       peers: [{ peerId: "p1" }, { peerId: "p2" }], ice: ICE_A,
     });
-    expect(rosters.at(-1)?.map((p) => p.peerId)).toEqual(["p1", "p2"]);
+    // Phase 5D (Task 5): peers are invisible to the roster until their own
+    // join-proof succeeds (D16/D18). This harness's FakePC never opens a
+    // "cos" channel, so no proof ever starts — the roster staying empty here
+    // is the correct secure-by-default behavior (pre-5D this asserted
+    // ["p1","p2"] immediately; the gating state machine itself, including
+    // the proven case, is exercised end-to-end in join-proof.test.ts).
+    expect(rosters.at(-1)).toEqual([]);
     expect(FakePC.instances).toHaveLength(0); // 4B rule: none in the handler tick
     vi.advanceTimersByTime(STAGGER_MS * 2);
     expect(FakePC.instances).toHaveLength(2);
     expect(FakePC.instances[0].config?.iceServers).toEqual(ICE_A);
+    expect(rosters.at(-1)).toEqual([]); // still unproven after link construction
   });
 });
 

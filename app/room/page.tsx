@@ -46,7 +46,13 @@ const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
 
 type CallFailure = Extract<
   CallStatus,
-  "room-not-found" | "room-full" | "create-refused" | "signal-lost" | "recovery-failed"
+  | "room-not-found"
+  | "room-full"
+  | "create-refused"
+  | "signal-lost"
+  | "recovery-failed"
+  | "countersign-failed"
+  | "equipment-outdated"
 >;
 
 const CALL_FAILURE_COPY: Record<CallFailure, { kicker: string; title: string; hint: string }> = {
@@ -75,6 +81,16 @@ const CALL_FAILURE_COPY: Record<CallFailure, { kicker: string; title: string; hi
     title: "The Channel Could Not Be Re-Established",
     hint: "The line went down mid-call and patient redialing could not bring it back. Return to the lobby and open a fresh channel — your counterparts will need a new invite.",
   },
+  "countersign-failed": {
+    kicker: "◈ Countersign Rejected",
+    title: "The Room Refused Your Papers",
+    hint: "This invitation's secret does not match the room's. Request a fresh invitation from a host.",
+  },
+  "equipment-outdated": {
+    kicker: "◈ Obsolete Field Kit",
+    title: "Your Browser Cannot Seal the Channel",
+    hint: "Encrypted calls need a current browser — Chrome, Safari, or Firefox. Update and rejoin.",
+  },
 };
 
 function isCallFailure(status: CallStatus): status is CallFailure {
@@ -88,7 +104,7 @@ export default function RoomPage() {
   const [copied, setCopied] = useState(false);
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
-  const call = useCallSession(keys?.roomId ?? null, media.stream, stage === "in-room", forceRelay);
+  const call = useCallSession(keys, media.stream, stage === "in-room", forceRelay);
 
   // Podcast mode is for logged-in hosts only; anonymous guests get the plain
   // call. `authed` is read in an effect so the server render never touches

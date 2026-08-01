@@ -11,6 +11,9 @@ import {
   type ChannelName,
   type RemotePeer,
 } from "@/lib/webrtc/session";
+import { deriveRoomKeys } from "@/lib/crypto/derive";
+import { detectE2eeApi } from "@/lib/webrtc/e2eeSupport";
+import type { RoomKeys } from "@/lib/roomLink";
 
 export interface XferPort {
   send(peerId: string, data: string | ArrayBuffer): boolean;
@@ -35,7 +38,7 @@ export interface CallState {
 }
 
 export function useCallSession(
-  roomId: string | null,
+  keys: RoomKeys | null,
   stream: MediaStream | null,
   active: boolean,
   forceRelay = false,
@@ -90,33 +93,60 @@ export function useCallSession(
 
   useEffect(() => {
     const local = streamRef.current;
-    if (!active || !roomId || !local) return;
-    const session = new CallSession(roomId, local, undefined, { forceRelay });
-    sessionRef.current = session;
-    const offs = [
-      session.events.on("status", setStatus),
-      session.events.on("roster", setPeers),
-      session.events.on("channelOpen", () => setDcOpen(true)),
-      session.events.on("channelClosed", () => setDcOpen(false)),
-      session.events.on("message", (peerId, text) => {
-        for (const fn of listenersRef.current) fn(peerId, text);
-      }),
-      session.events.on("xferMessage", (peerId, data) => {
-        for (const fn of xferMessageListenersRef.current) fn(peerId, data);
-      }),
-      session.events.on("xferDrain", (peerId) => {
-        for (const fn of xferDrainListenersRef.current) fn(peerId);
-      }),
-      // Ordering vs. "channelClosed" above is deliberately unspecified (see
-      // session.ts) — fanned out standalone, with no assumption either way.
-      session.events.on("channelState", (peerId, channel, state) => {
-        for (const fn of xferChannelStateListenersRef.current) fn(peerId, channel, state);
-      }),
-    ];
-    session.start();
+    if (!active || !keys || !local) return;
+    let cancelled = false;
+    let offs: Array<() => void> = [];
+    let session: CallSession | null = null;
+
+    // Phase 5D (Task 5): derive the room's crypto keys ONCE, asynchronously,
+    // before the session is ever constructed. Neither failure path (no
+    // transform API on this browser, or the secret failing to derive) gets a
+    // silent plaintext call — both land on the same themed refusal (D15).
+    void (async () => {
+      const api = detectE2eeApi();
+      let roomKeys: Awaited<ReturnType<typeof deriveRoomKeys>> | null = null;
+      if (api) {
+        try {
+          roomKeys = await deriveRoomKeys(keys.secret);
+        } catch {
+          roomKeys = null;
+        }
+      }
+      if (cancelled) return; // unmounted, or deps changed, while awaiting
+      if (!api || !roomKeys) {
+        setStatus("equipment-outdated");
+        return;
+      }
+      const s = new CallSession(keys.roomId, local, { keys: roomKeys, api }, undefined, { forceRelay });
+      session = s;
+      sessionRef.current = s;
+      offs = [
+        s.events.on("status", setStatus),
+        s.events.on("roster", setPeers),
+        s.events.on("channelOpen", () => setDcOpen(true)),
+        s.events.on("channelClosed", () => setDcOpen(false)),
+        s.events.on("message", (peerId, text) => {
+          for (const fn of listenersRef.current) fn(peerId, text);
+        }),
+        s.events.on("xferMessage", (peerId, data) => {
+          for (const fn of xferMessageListenersRef.current) fn(peerId, data);
+        }),
+        s.events.on("xferDrain", (peerId) => {
+          for (const fn of xferDrainListenersRef.current) fn(peerId);
+        }),
+        // Ordering vs. "channelClosed" above is deliberately unspecified (see
+        // session.ts) — fanned out standalone, with no assumption either way.
+        s.events.on("channelState", (peerId, channel, state) => {
+          for (const fn of xferChannelStateListenersRef.current) fn(peerId, channel, state);
+        }),
+      ];
+      s.start();
+    })();
+
     return () => {
+      cancelled = true;
       offs.forEach((off) => off());
-      session.leave();
+      session?.leave();
       sessionRef.current = null;
       setStatus("connecting");
       setPeers([]);
@@ -125,7 +155,7 @@ export function useCallSession(
     // `stream` is deliberately absent: device switches flow through
     // setLocalStream below instead of rebuilding the whole session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, roomId, forceRelay]);
+  }, [active, keys, forceRelay]);
 
   useEffect(() => {
     // replaceTrack rejects if a link tore down this tick — harmless race

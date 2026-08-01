@@ -125,6 +125,13 @@ interface Entry {
    *  callback suppresses those writes — see construct(), onLinkState(), and
    *  rebuildLink(). */
   recovering: boolean;
+  /** Phase 5D (Task 5), additive: gates roster visibility and app-message
+   *  send/receive. Defaults to true (see add()'s `initiallyProven` param) so
+   *  every pre-5D caller — which never touches proof state at all — sees
+   *  the exact same behavior as before. CallSession (the only production
+   *  caller that cares) adds every peer with initiallyProven=false and
+   *  flips it via setProven() around its own JoinProof lifecycle. */
+  proven: boolean;
 }
 
 export class Mesh {
@@ -139,12 +146,18 @@ export class Mesh {
     return this.entries.size;
   }
 
+  /** Phase 5D (Task 5), additive: an unproven entry is invisible here —
+   *  no roster row, no participant count — until setProven(peerId, true).
+   *  Pre-5D callers never touch proven state, so it's always true for them
+   *  and this filter is a no-op (every entry passes). */
   roster(): RemotePeer[] {
-    return [...this.entries].map(([peerId, e]) => ({
-      peerId,
-      stream: e.stream,
-      connectionState: e.connectionState,
-    }));
+    return [...this.entries]
+      .filter(([, e]) => e.proven)
+      .map(([peerId, e]) => ({
+        peerId,
+        stream: e.stream,
+        connectionState: e.connectionState,
+      }));
   }
 
   /**
@@ -155,9 +168,14 @@ export class Mesh {
    * signaling handler's tick and no two share a tick (see STAGGER_MS). The
    * schedule falls out of add()'s own stagger cursor now (see add()) — no
    * index math needed here.
+   *
+   * `initiallyProven` (Phase 5D, Task 5, additive): defaults to true so
+   * every pre-5D caller is unaffected. CallSession passes false — a room
+   * key'd for join-proof gating starts every peer invisible until its own
+   * JoinProof proves them.
    */
-  addExistingPeers(peerIds: string[]): void {
-    peerIds.forEach((id) => this.add(id, true));
+  addExistingPeers(peerIds: string[], initiallyProven = true): void {
+    peerIds.forEach((id) => this.add(id, true, initiallyProven));
     this.emitRoster();
   }
 
@@ -165,10 +183,21 @@ export class Mesh {
    *  off the peer-joined handler tick like every other construction — the
    *  4B wedge diagnosis was "constructed inside the signaling handler tick",
    *  and with restart+rebuild now underneath, there is no reason to keep
-   *  the one remaining in-tick construction path. */
-  addNewcomer(peerId: string): void {
+   *  the one remaining in-tick construction path. `initiallyProven`: see
+   *  addExistingPeers' doc. */
+  addNewcomer(peerId: string, initiallyProven = true): void {
     if (this.entries.has(peerId)) return; // duplicate announce — ignore
-    this.add(peerId, false);
+    this.add(peerId, false, initiallyProven);
+    this.emitRoster();
+  }
+
+  /** Phase 5D (Task 5), additive: flips one peer's roster/message-gate
+   *  state. No-op on an unknown peer (already torn down) or a redundant
+   *  call (same value) — the latter also skips the roster re-emit. */
+  setProven(peerId: string, proven: boolean): void {
+    const entry = this.entries.get(peerId);
+    if (!entry || entry.proven === proven) return;
+    entry.proven = proven;
     this.emitRoster();
   }
 
@@ -228,14 +257,21 @@ export class Mesh {
     await Promise.all(links.map((l) => l.replaceStream(stream)));
   }
 
-  /** Send to one peer. False if the peer is unknown, linkless, or channel-closed. */
+  /** Send to one peer. False if the peer is unknown, unproven, linkless, or
+   *  channel-closed (Phase 5D, Task 5: an unproven peer is treated exactly
+   *  like an unknown one — see roster()'s doc on the default-true additivity). */
   sendTo(peerId: string, text: string): boolean {
-    return this.entries.get(peerId)?.link?.send(text) ?? false;
+    const entry = this.entries.get(peerId);
+    if (!entry || !entry.proven) return false;
+    return entry.link?.send(text) ?? false;
   }
 
-  /** Best-effort broadcast: linkless/closed entries are skipped, not queued. */
+  /** Best-effort broadcast: linkless/closed/unproven entries are skipped,
+   *  not queued (Phase 5D, Task 5: unproven skip is additive — see sendTo). */
   sendAll(text: string): void {
-    for (const entry of this.entries.values()) entry.link?.send(text);
+    for (const entry of this.entries.values()) {
+      if (entry.proven) entry.link?.send(text);
+    }
   }
 
   /** Send over the xfer channel to one peer. False if unknown, linkless, or channel-closed. */
@@ -270,7 +306,7 @@ export class Mesh {
     this.emitRoster();
   }
 
-  private add(peerId: string, polite: boolean): void {
+  private add(peerId: string, polite: boolean, initiallyProven: boolean): void {
     if (this.entries.has(peerId)) return;
     const entry: Entry = {
       link: null,
@@ -287,6 +323,7 @@ export class Mesh {
       rebuilds: 0,
       pendingCapWarned: false,
       recovering: false,
+      proven: initiallyProven,
     };
     this.entries.set(peerId, entry);
     this.scheduleConstruction(peerId, entry, "evict");

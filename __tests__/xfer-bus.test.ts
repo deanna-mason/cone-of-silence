@@ -13,9 +13,34 @@
 //     mock without losing coverage of the wiring itself.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { CallSession, type ChannelLifecycle, type ChannelName } from "@/lib/webrtc/session";
+import { CallSession, type ChannelLifecycle, type ChannelName, type SessionCrypto } from "@/lib/webrtc/session";
 import { useCallSession } from "@/hooks/useCallSession";
 import { STAGGER_MS } from "@/lib/webrtc/mesh";
+import type { RoomKeys } from "@/lib/roomLink";
+
+// Phase 5D (Task 5): CallSession now requires a `crypto` dep (D15 — every
+// production call is encrypted), and the hook derives its own crypto keys
+// asynchronously before ever constructing a session. None of this file's
+// tests exercise the "cos" channel (only "cos-xfer"), so no join-proof ever
+// starts and no real crypto.subtle call is ever made against these fakes —
+// FAKE_CRYPTO/the mocked deriveRoomKeys+detectE2eeApi below exist purely so
+// construction doesn't throw and the hook's async derivation step resolves
+// deterministically inside these tests' fake-timer runs.
+const FAKE_CRYPTO: SessionCrypto = {
+  keys: {
+    mediaKey: {} as CryptoKey,
+    xferKey: {} as CryptoKey,
+    proofKey: {} as CryptoKey,
+  },
+  api: "encoded-streams",
+};
+
+vi.mock("@/lib/crypto/derive", () => ({
+  deriveRoomKeys: vi.fn(async () => FAKE_CRYPTO.keys),
+}));
+vi.mock("@/lib/webrtc/e2eeSupport", () => ({
+  detectE2eeApi: vi.fn(() => FAKE_CRYPTO.api),
+}));
 
 class FakeWS {
   static instances: FakeWS[] = [];
@@ -65,13 +90,39 @@ class FakeChannel {
   }
 }
 
+class FakeSender {
+  transform: unknown = null;
+  createEncodedStreams = () => ({ readable: {} as ReadableStream, writable: {} as WritableStream });
+  constructor(public track: MediaStreamTrack) {}
+}
+class FakeTransceiver {
+  setCodecPreferences = vi.fn();
+  constructor(public sender: FakeSender) {}
+}
+class FakeWorker {
+  static instances: FakeWorker[] = [];
+  postMessage = vi.fn();
+  terminate = vi.fn();
+  onerror: ((ev: ErrorEvent) => void) | null = null;
+  onmessageerror: ((ev: MessageEvent) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  constructor(public url: unknown) {
+    FakeWorker.instances.push(this);
+  }
+}
+
 // connectionState is not modeled (onconnectionstatechange stored, never
 // invoked) — same scope limit as session.test.ts's FakePC; irrelevant here.
+// getTransceivers/FakeSender/FakeWorker (Phase 5D, Task 5): the minimal
+// surface PeerLink's now-always-on e2ee wiring touches (see FAKE_CRYPTO's
+// doc above) — none of it is otherwise exercised by these tests.
 class FakePC {
   static instances: FakePC[] = [];
   config: RTCConfiguration | undefined;
   addedTracks: MediaStreamTrack[] = [];
   channels: FakeChannel[] = [];
+  senders: FakeSender[] = [];
+  transceivers: FakeTransceiver[] = [];
   onnegotiationneeded: (() => void) | null = null;
   onicecandidate: unknown = null;
   ontrack: unknown = null;
@@ -89,9 +140,16 @@ class FakePC {
   }
   addTrack(track: MediaStreamTrack) {
     this.addedTracks.push(track);
+    const sender = new FakeSender(track);
+    this.senders.push(sender);
+    this.transceivers.push(new FakeTransceiver(sender));
+    return sender as unknown as RTCRtpSender;
   }
   getSenders() {
-    return [];
+    return this.senders;
+  }
+  getTransceivers() {
+    return this.transceivers;
   }
   restartIce() {}
   close() {
@@ -100,6 +158,7 @@ class FakePC {
 }
 
 const ROOM = "r".repeat(22);
+const ROOM_KEYS: RoomKeys = { roomId: ROOM, secret: "s".repeat(22) };
 const track = { kind: "video" } as MediaStreamTrack;
 const stream = { getTracks: () => [track] } as unknown as MediaStream;
 const ICE_A = [{ urls: "stun:a.example:1" }];
@@ -122,8 +181,10 @@ beforeEach(() => {
   vi.spyOn(Math, "random").mockReturnValue(0.5);
   FakeWS.instances = [];
   FakePC.instances = [];
+  FakeWorker.instances = [];
   vi.stubGlobal("WebSocket", FakeWS);
   vi.stubGlobal("RTCPeerConnection", FakePC);
+  vi.stubGlobal("Worker", FakeWorker);
 });
 
 afterEach(() => {
@@ -151,7 +212,7 @@ describe("CallSession xfer events", () => {
   }
 
   it("(a) mesh onChannelState -> session channelState event with all four args", () => {
-    session = new CallSession(ROOM, stream, "ws://test/ws");
+    session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
     const events: [string, ChannelName, ChannelLifecycle, string | undefined][] = [];
     session.events.on("channelState", (peerId, channel, state, detail) =>
       events.push([peerId, channel, state, detail]),
@@ -169,7 +230,7 @@ describe("CallSession xfer events", () => {
   });
 
   it("(b) xferMessage and xferDrain events fire with peerId", () => {
-    session = new CallSession(ROOM, stream, "ws://test/ws");
+    session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
     const messages: [string, string | ArrayBuffer][] = [];
     const drains: string[] = [];
     session.events.on("xferMessage", (peerId, data) => messages.push([peerId, data]));
@@ -190,7 +251,7 @@ describe("CallSession xfer events", () => {
   });
 
   it("(c) sendXferTo/xferBufferedAmount delegate to the mesh", () => {
-    session = new CallSession(ROOM, stream, "ws://test/ws");
+    session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
     const { xfer } = buildLiveLink();
 
     expect(session.sendXferTo("p1", "x")).toBe(false); // not open yet — refused, not queued
@@ -210,7 +271,7 @@ describe("CallSession xfer events", () => {
 
 describe("useCallSession bus.xfer", () => {
   function drive(active: boolean) {
-    return renderHook(({ active }) => useCallSession(ROOM, stream, active), {
+    return renderHook(({ active }) => useCallSession(ROOM_KEYS, stream, active), {
       initialProps: { active },
     });
   }
@@ -230,12 +291,15 @@ describe("useCallSession bus.xfer", () => {
     h.unmount();
   });
 
-  it("(d) a listener registered before any session exists still receives events once the session emits; unsubscribe stops delivery", () => {
+  it("(d) a listener registered before any session exists still receives events once the session emits; unsubscribe stops delivery", async () => {
     const h = drive(false);
     const received: [string, string | ArrayBuffer][] = [];
     const off = h.result.current.bus.xfer.onMessage((peerId, data) => received.push([peerId, data]));
 
-    act(() => {
+    // Phase 5D: the hook derives its crypto keys asynchronously before
+    // constructing the session — await act(async) to flush that microtask
+    // (the mocked deriveRoomKeys above) before any session/WS exists.
+    await act(async () => {
       h.rerender({ active: true });
     });
     const ws = lastWS();
@@ -256,8 +320,11 @@ describe("useCallSession bus.xfer", () => {
     h.unmount();
   });
 
-  it("(d) bus.xfer.onDrain and onChannelState route through the session, and send/bufferedAmount delegate", () => {
+  it("(d) bus.xfer.onDrain and onChannelState route through the session, and send/bufferedAmount delegate", async () => {
     const h = drive(true);
+    // Phase 5D: flush the async key-derivation microtask before the session
+    // (and its WebSocket) exists — see the previous test's comment.
+    await act(async () => {});
     const ws = lastWS();
     act(() => ws.open());
     act(() => enterWithOnePeer(ws));
