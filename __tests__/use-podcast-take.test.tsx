@@ -43,6 +43,12 @@ const H = vi.hoisted(() => {
     // rehearsal's confirmed real-hardware failure mode).
     deferBuild: false,
     resolveDeferredBuild: null as (() => void) | null,
+    // Same idea for openTakeDir: gUM can come back fast while the
+    // IndexedDB-handle/directory-open half of the chain is still the slow
+    // part — a window the shipped mock (always-instant openTakeDir) made
+    // invisible.
+    deferTakeDir: false,
+    resolveDeferredTakeDir: null as (() => void) | null,
   };
   return { log, state };
 });
@@ -67,6 +73,11 @@ vi.mock("@/lib/podcast/vault", () => ({
   openTakeDir: vi.fn(async (takeId: string) => {
     H.state.takeDirIds.push(takeId);
     if (H.state.failTakeDir) throw H.state.failTakeDir;
+    if (H.state.deferTakeDir) {
+      await new Promise<void>((resolve) => {
+        H.state.resolveDeferredTakeDir = resolve;
+      });
+    }
     return { name: takeId };
   }),
   PartWriter: class {
@@ -231,6 +242,8 @@ describe("usePodcastTake", () => {
     H.state.failRecorderStop = null;
     H.state.deferBuild = false;
     H.state.resolveDeferredBuild = null;
+    H.state.deferTakeDir = false;
+    H.state.resolveDeferredTakeDir = null;
     localStorage.clear(); // isolate cos-last-take across tests
     vi.mocked(soundKlaxon).mockClear();
     // Testing Library sets this around its own wrappers and restores it after;
@@ -796,6 +809,37 @@ describe("usePodcastTake", () => {
     // The stalled gUM/dir chain finally resolves.
     await act(async () => {
       H.state.resolveDeferredBuild?.();
+    });
+    await tick(50);
+
+    expect(H.log.filter((l) => l === "graph:mark")).toHaveLength(1);
+    expect(H.log.indexOf("graph:mark")).toBeGreaterThan(H.log.indexOf("recorder:start"));
+    expect(view.result.current.panel.kind).toBe("rolling");
+  });
+
+  // A slow gUM is only half the chain: buildRecordGraph can come back fast
+  // (graphRef.current gets set) while openTakeDir is still the slow part —
+  // a window the shipped mock (always-instant openTakeDir) made invisible,
+  // and where a graphRef-only latch condition plays the mark into a
+  // destination nothing is capturing yet (the drill's exact clip) or, if the
+  // recorder starts mid-tone, captures a deformed shape 5C's matched filter
+  // can't reliably anchor.
+  it("a stalled directory open ALSO defers the start mark, even though the graph is already ready", async () => {
+    H.state.deferTakeDir = true;
+    const { view } = await setup();
+
+    act(() => view.result.current.actions.roll());
+    // Past T-500 (recorders scheduled to start) AND T (the mark's scheduled
+    // instant) — openTakeDir is still stalled mid-await the whole time, even
+    // though buildRecordGraph already resolved.
+    await tick(3_500);
+
+    expect(H.log).not.toContain("recorder:start");
+    expect(H.log).not.toContain("graph:mark");
+
+    // The stalled directory open finally resolves.
+    await act(async () => {
+      H.state.resolveDeferredTakeDir?.();
     });
     await tick(50);
 

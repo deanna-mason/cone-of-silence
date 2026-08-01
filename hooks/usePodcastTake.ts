@@ -198,9 +198,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const remoteRef = useRef<{ at: number; beacon: Beacon | null }>({ at: 0, beacon: null });
   const partnerRolledRef = useRef(false);
   const klaxonArmedRef = useRef(true);
-  // Defer-mark-or-fault: latches when onMark fires while graphRef.current is
-  // still null (the gUM/dir start chain hasn't returned yet). startRecorders
-  // plays it the instant the recorder is rolling — see the comment there.
+  // Defer-mark-or-fault: latches when onMark fires before the recorder is
+  // actually rolling (the gUM/dir start chain — buildRecordGraph AND
+  // openTakeDir — hasn't finished yet). startRecorders plays it the instant
+  // recorder.start() returns — see the comment there.
   const pendingMarkRef = useRef(false);
 
   function goPhase(next: Phase): void {
@@ -358,13 +359,17 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     bytesRef.current = { total: 0, lastChangeAt: now };
     goPhase("rolling");
 
-    // Defer-mark-or-fault: onMark may have fired while graphRef.current was
-    // still null above (the gUM/dir chain slower than ROLL_LEAD_MS — the
-    // common case on real hardware, per the 2026-07-31 dress rehearsal). The
-    // recorder is rolling by this line, so playing the latched mark now still
-    // lands INSIDE the files — just later than startAtMs. 5C: the tone-search
-    // window has to tolerate a trail of the chain's latency — seconds, not
-    // milliseconds.
+    // Defer-mark-or-fault: onMark may have fired before the recorder above
+    // was actually rolling (the gUM/dir chain slower than ROLL_LEAD_MS — the
+    // common case on real hardware, per the 2026-07-31 dress rehearsal).
+    // Playing earlier — once the graph exists but before recorder.start() —
+    // would have played into a destination nothing was capturing yet (a
+    // silent clip) or, worse, mid-start, capturing a deformed tone shape 5C's
+    // matched filter can't reliably anchor. The recorder is rolling by this
+    // line, so playing the latched mark now still lands INSIDE the files —
+    // just later than startAtMs, by up to the FULL start chain (gUM +
+    // IndexedDB handle open + directory create). 5C: the tone-search window
+    // must tolerate that whole bound — seconds, not milliseconds.
     if (pendingMarkRef.current) {
       pendingMarkRef.current = false;
       graphRef.current?.playMark();
@@ -505,12 +510,18 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         void startRecorders(takeId);
       },
       onMark: () => {
-        if (graphRef.current) {
-          graphRef.current.playMark();
+        // Latch until the recorder is ACTUALLY rolling, not merely until the
+        // graph exists: buildRecordGraph resolving fast while openTakeDir is
+        // still the slow half of the chain leaves graphRef.current set but
+        // nothing capturing yet — playing then either misses the tape
+        // entirely or, worse, catches the recorder mid-start and captures a
+        // deformed tone shape 5C's matched filter can't reliably anchor.
+        if (recorderRef.current?.state === "rolling") {
+          graphRef.current?.playMark();
         } else {
           // The gUM/dir start chain is still in flight — latch instead of
-          // dropping the mark. startRecorders plays it the instant the
-          // recorder is rolling (see the comment there).
+          // dropping the mark. startRecorders plays it the instant
+          // recorder.start() returns (see the comment there).
           pendingMarkRef.current = true;
         }
       },
