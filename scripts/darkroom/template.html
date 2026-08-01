@@ -1,0 +1,224 @@
+<!doctype html>
+<!--
+  Cone of Silence — darkroom composite backdrop (DRAFT, D10/D14).
+
+  This is the 1920x1080 canvas headless Chrome renders to a PNG once per
+  episode (scripts/darkroom/composite.mjs's renderBackdrop). The pipeline
+  never draws text or shapes itself — it reads pane geometry back from this
+  live page (getBoundingClientRect on #pane-left / #pane-right), so a full
+  redesign of this file never touches pipeline code.
+
+  Self-contained: inline CSS only, no external fetches, no app imports (the
+  real app's next/font faces aren't available here — the stacks below use
+  the exact same fallback fonts app/globals.css declares for --font-display/
+  --font-type/--font-body, so the look matches without needing the files).
+  Colors are the literal --field/--ink/--sienna/--brass/etc. tokens from
+  app/globals.css (light, "aged-dossier paper" palette — this backdrop is
+  archival paper, so it always renders in the light palette regardless of
+  the viewer's OS theme).
+
+  Zero PII: #label-left / #label-right start empty and are filled in by
+  renderBackdrop's page.evaluate() with the episode's own codenames just
+  before the screenshot — nothing identifying is baked into this file.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Cone of Silence — Darkroom Backdrop</title>
+<style>
+  :root {
+    --field: #e7d9bb;
+    --field-deep: #dccba7;
+    --inset: #f3e9d0;
+    --ink: #17130f;
+    --ink-soft: #4a3f2c;
+    --ink-faint: #6b5c3d;
+    --cream: #f5ecd4;
+    --sienna: #9a5a1f;
+    --vermilion: #d7391f;
+    --brass: #c79a3b;
+    --reveal: #17130f;
+
+    --font-display: "Arial Narrow", sans-serif;
+    --font-type: "Courier New", monospace;
+    --font-body: Georgia, serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+  }
+
+  body {
+    position: relative;
+    width: 1920px;
+    height: 1080px;
+    background-color: var(--field);
+    background-image:
+      radial-gradient(ellipse 90% 60% at 50% -15%, rgba(199, 154, 59, 0.22), transparent 55%),
+      radial-gradient(ellipse 70% 45% at 50% 115%, rgba(74, 63, 44, 0.14), transparent 60%);
+    color: var(--ink);
+    font-family: var(--font-body);
+  }
+
+  /* Film-grain overlay, matching app/globals.css's body::after texture. */
+  body::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    opacity: 0.07;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* Aged file-border frame — a hairline dossier edge, inset from the crop. */
+  .frame {
+    position: absolute;
+    inset: 28px;
+    border: 1px solid color-mix(in srgb, var(--brass) 55%, transparent);
+    z-index: 1;
+    pointer-events: none;
+  }
+  .frame::before {
+    content: "";
+    position: absolute;
+    inset: 6px;
+    border: 1px solid color-mix(in srgb, var(--brass) 30%, transparent);
+  }
+
+  .kicker {
+    position: absolute;
+    top: 56px;
+    left: 0;
+    width: 1920px;
+    text-align: center;
+    font-family: var(--font-type);
+    text-transform: uppercase;
+    letter-spacing: 0.5em;
+    font-size: 22px;
+    color: var(--sienna);
+    z-index: 2;
+  }
+
+  .subkicker {
+    position: absolute;
+    top: 92px;
+    left: 0;
+    width: 1920px;
+    text-align: center;
+    font-family: var(--font-type);
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+    font-size: 13px;
+    color: var(--ink-faint);
+    z-index: 2;
+  }
+
+  /* Pane well — the "negative sleeve" a video pane is composited into.
+     Geometry here (86,180 / 1014,180, 820x615) is the literal contract
+     renderBackdrop reads back via getBoundingClientRect; border-box sizing
+     keeps the reported w/h at exactly 820x615 including the sepia rule. */
+  .pane-well {
+    position: absolute;
+    top: 180px;
+    width: 820px;
+    height: 615px;
+    background: var(--reveal);
+    border: 4px solid var(--sienna);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--brass) 65%, transparent),
+      inset 0 0 60px rgba(0, 0, 0, 0.55),
+      0 18px 40px -18px rgba(23, 19, 15, 0.55);
+    z-index: 1;
+  }
+  #pane-left { left: 86px; }
+  #pane-right { left: 1014px; }
+
+  /* Corner ticks on each well, like a photo-mount corner. */
+  .pane-well::after {
+    content: "";
+    position: absolute;
+    inset: 10px;
+    border: 1px dashed color-mix(in srgb, var(--brass) 40%, transparent);
+    pointer-events: none;
+  }
+
+  /* Codename label plate, mounted under each well. */
+  .label-plate {
+    position: absolute;
+    top: 811px;
+    width: 820px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--field-deep);
+    border: 1px solid color-mix(in srgb, var(--brass) 60%, transparent);
+    z-index: 2;
+  }
+  #label-left { left: 86px; }
+  #label-right { left: 1014px; }
+
+  .label-plate span {
+    font-family: var(--font-display);
+    text-transform: uppercase;
+    letter-spacing: 0.42em;
+    font-size: 30px;
+    color: var(--ink);
+    /* stencil cut-out effect */
+    text-shadow: 0 1px 0 rgba(245, 236, 212, 0.5);
+  }
+
+  .stamp {
+    position: absolute;
+    right: 96px;
+    bottom: 74px;
+    z-index: 2;
+    font-family: var(--font-type);
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    font-size: 20px;
+    color: var(--vermilion);
+    border: 3px solid var(--vermilion);
+    border-radius: 3px;
+    padding: 10px 18px;
+    transform: rotate(-5deg);
+    opacity: 0.88;
+    mix-blend-mode: multiply;
+  }
+
+  .filecode {
+    position: absolute;
+    left: 96px;
+    bottom: 74px;
+    z-index: 2;
+    font-family: var(--font-type);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 13px;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+  <div class="frame"></div>
+  <div class="kicker">&#9672; FIELD RECORDING &mdash; CONE OF SILENCE</div>
+  <div class="subkicker">Two-Chair Session &middot; Archival Transfer</div>
+
+  <div id="pane-left" class="pane-well"></div>
+  <div id="pane-right" class="pane-well"></div>
+
+  <div id="label-left" class="label-plate"><span></span></div>
+  <div id="label-right" class="label-plate"><span></span></div>
+
+  <div class="filecode">DARKROOM &middot; TWO-HOST POST</div>
+  <div class="stamp">DEVELOPED IN THE DARKROOM</div>
+</body>
+</html>
