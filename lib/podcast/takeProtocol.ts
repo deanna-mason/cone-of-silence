@@ -27,18 +27,22 @@ export interface TakeCallbacks {
   onBeacon(b: Beacon): void; // partner's 1 Hz state
 }
 
-// TakeProtocolDeps gains:
-//   canAcceptRoll?: () => boolean;   // default () => true — the hook wires "no transfer in flight" (decision 8)
-// TakeCoordinator internals gain:
-//   private partnerId: string | null = null;
-// Pinning rule (comment this in the code):
+// Partner pinning rule:
 //   - pod/hello: latest hello WINS while no take/proposal is active (re-pin +
-//     codename update — heals a partner swap); while a take or unacked
+//     codename update — heals a partner swap). While a take or unacked
 //     proposal is active the partner is PINNED and a hello from any other
-//     peerId is IGNORED (the ledgered third-host codename-clobber rider).
-//   - pod/roll with partnerId === null pins the proposer (roll can only come
-//     from a host who heard our hello).
-//   - ping/pong/roll/roll-ack/stop/beacon from a peerId !== partnerId are dropped.
+//     peerId is IGNORED — but stashed as pendingHello (latest wins), applied
+//     the instant the take ends (abortTake / scheduleStop's completion
+//     timer). This is the ledgered third-host codename-clobber rider AND the
+//     drill's rejoin heal: a partner who force-quit and relaunched under a
+//     new peerId mid-take is re-pinned the moment Cut lands, not stuck
+//     forever pinned to a ghost.
+//   - pod/roll: a peerId that doesn't match an already-pinned partner is
+//     dropped (roll can only come from a host who heard our hello); with no
+//     partner pinned yet, the roll itself pins the proposer. propose() will
+//     not send with no partner pinned either — it returns null, same as an
+//     already-active slot.
+//   - ping/pong/roll-ack/stop/beacon from a peerId !== partnerId are dropped.
 //   - Sends: hello stays sendAll (discovery); EVERYTHING else goes
 //     bus.sendTo(partnerId, ...) — with four seats, beacons and roll traffic
 //     must never spray the whole room.
@@ -115,6 +119,11 @@ export class TakeCoordinator {
   // The pinned partner's peerId — see the pinning-rule comment above
   // TakeProtocolDeps. null until the first hello or roll is heard.
   private partnerId: string | null = null;
+  // A hello ignored by onHello's mid-take pin (a foreign peerId while
+  // activeTakeId !== null) — latest one wins. Applied by applyPendingHello()
+  // the instant the take ends, healing a partner who rejoined under a new
+  // peerId mid-take instead of leaving partnerId pinned to a ghost forever.
+  private pendingHello: { peerId: string; codename: string } | null = null;
 
   // Hello handshake.
   private helloSent = false;
@@ -290,7 +299,11 @@ export class TakeCoordinator {
    */
   private onHello(peerId: string, msg: HelloMsg): void {
     if (this.partnerId !== null && peerId !== this.partnerId && this.activeTakeId !== null) {
-      return; // pinned mid-take/proposal — a foreign hello cannot clobber partnerCodename
+      // Pinned mid-take/proposal — a foreign hello cannot clobber
+      // partnerCodename, but it isn't discarded either: stash it (latest
+      // wins) so applyPendingHello() can heal the moment the take ends.
+      this.pendingHello = { peerId, codename: msg.codename };
+      return;
     }
     this.partnerId = peerId;
     this.helloReceived = true;
@@ -300,14 +313,34 @@ export class TakeCoordinator {
   }
 
   /**
+   * Applies a hello stashed by onHello's mid-take ignore branch, once the
+   * take actually ends — called from the tail of abortTake() and from
+   * scheduleStop()'s completion timer, the two places activeTakeId returns
+   * to null. A no-op when nothing was stashed. This is the drill's rejoin
+   * heal: a partner who force-quit and relaunched under a new peerId
+   * mid-take is re-pinned here instead of leaving partnerId aimed at a ghost
+   * forever.
+   */
+  private applyPendingHello(): void {
+    if (!this.pendingHello) return;
+    const { peerId, codename } = this.pendingHello;
+    this.pendingHello = null;
+    this.partnerId = peerId;
+    this.helloReceived = true;
+    this.cb.onPartnerCodename(codename);
+    this.ensureHelloSent();
+    this.maybeStartPinging();
+  }
+
+  /**
    * pod/roll pinning: a peerId that doesn't match an already-pinned partner
    * is dropped outright (roll can only come from the host who heard our
-   * hello); with no partner pinned yet, the roll itself pins the proposer.
-   * canAcceptRoll() === false is a deliberate quiet ignore ahead of either
-   * check — no ack, no slot claim, no fault; the proposer's own
-   * abort-if-unacked (5A FIX-2, in propose()) unwinds their countdown. The
-   * mutation-pinned onRoll() below (mutual-propose tie-break, claimTakeSlot)
-   * is untouched past this gate.
+   * hello). canAcceptRoll() === false is checked next — a deliberate quiet
+   * ignore (no ack, no slot claim, no fault); the proposer's own
+   * abort-if-unacked (5A FIX-2, in propose()) unwinds their countdown. Only
+   * then, with no partner pinned yet, does the roll itself pin the proposer.
+   * The mutation-pinned onRoll() below (mutual-propose tie-break,
+   * claimTakeSlot) is untouched past this gate.
    */
   private onRollReceived(peerId: string, msg: RollMsg): void {
     if (this.partnerId !== null && peerId !== this.partnerId) return; // not our pinned partner
@@ -381,6 +414,7 @@ export class TakeCoordinator {
     this.schedule(markLocalMs + MARK_TOTAL_MS + 250 - scheduledAt, () => {
       this.activeTakeId = null;
       this.cb.onStopRecorders(takeId);
+      this.applyPendingHello();
     });
   }
 
@@ -401,6 +435,7 @@ export class TakeCoordinator {
     this.pendingProposal = null;
     this.startFired = false;
     this.cb.onAborted(takeId);
+    this.applyPendingHello();
   }
 
   private onStop(msg: StopMsg): void {
@@ -455,6 +490,7 @@ export class TakeCoordinator {
    */
   propose(): string | null {
     if (this.activeTakeId !== null) return null;
+    if (this.partnerId === null) return null; // nobody pinned yet — avoids a phantom countdown (Task 9 fix #2)
     const startAtMs = this.now() + COUNTDOWN_MS;
     const takeId = takeIdFor(this.now());
     this.claimTakeSlot(takeId);

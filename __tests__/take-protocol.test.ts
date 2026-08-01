@@ -598,8 +598,15 @@ describe("dispose", () => {
 
 describe("an unacked proposal aborts rather than wedging", () => {
   /** A bus whose sends all go on the floor — exactly what mesh.sendAll does
-   *  while the channel is closed (it skips rather than queues). */
-  function deadBus(sent: string[]): CallBus {
+   *  while the channel is closed (it skips rather than queues). Task 9 fix
+   *  round #4: propose() now needs a pinned partner to send anything at all
+   *  (see the "canAcceptRoll" describe block's null-partner test), so this
+   *  fake also exposes deliverHello() — a way to pin a partner straight
+   *  through the coordinator's own subscription, keeping "the bus is dead"
+   *  the actual thing under test here rather than "no partner was ever
+   *  pinned". */
+  function deadBus(sent: string[]): CallBus & { deliverHello(peerId: string, codename: string): void } {
+    let listener: ((peerId: string, text: string) => void) | null = null;
     return {
       sendAll: (text: string) => {
         sent.push(text);
@@ -608,7 +615,15 @@ describe("an unacked proposal aborts rather than wedging", () => {
         sent.push(text);
         return false;
       },
-      onMessage: () => () => {},
+      onMessage: (fn: (peerId: string, text: string) => void) => {
+        listener = fn;
+        return () => {
+          listener = null;
+        };
+      },
+      deliverHello(peerId: string, codename: string) {
+        listener?.(peerId, JSON.stringify({ t: "pod/hello", codename }));
+      },
       // Compiler-forced — see FakeBusPair.bus() above.
       xfer: {
         send: () => false,
@@ -623,10 +638,17 @@ describe("an unacked proposal aborts rather than wedging", () => {
   it("no roll-ack by startAtMs → onAborted, no onStartRecorders/onMark, and the slot is free again", () => {
     const sent: string[] = [];
     const { cb, log } = makeCb();
-    const a = new TakeCoordinator(deadBus(sent), "Alpha", cb);
+    const bus = deadBus(sent);
+    const a = new TakeCoordinator(bus, "Alpha", cb);
+    // Pin a partner straight through the dead bus's own subscription — the
+    // send path (not a missing partner) is what's dead here.
+    bus.deliverHello("peer-b", "Bravo");
+    expect(cb.onPartnerCodename).toHaveBeenCalledWith("Bravo");
 
     const takeId = a.propose();
     expect(takeId).not.toBeNull();
+    // The roll WAS sent (it's the dead bus swallowing it, not a missing partner).
+    expect(sent.some((s) => (JSON.parse(s) as { t: string }).t === "pod/roll")).toBe(true);
 
     // Just short of the start instant: still counting down, nothing aborted.
     vi.advanceTimersByTime(COUNTDOWN_MS - 1);
@@ -857,6 +879,8 @@ describe("peerId scoping (Task 9)", () => {
     expect(cbB.onBeacon).toHaveBeenCalledTimes(1); // the real partner got it
     // hello is sendAll (discovery) — the third peer legitimately hears that.
     // Everything else (ping/pong, roll, roll-ack, beacon) must not reach it.
+    // (length check first — every() on an empty array is vacuously true.)
+    expect(thirdPeerLog.length).toBeGreaterThan(0);
     const thirdPeerTypes = thirdPeerLog.map((text) => (JSON.parse(text) as { t: string }).t);
     expect(thirdPeerTypes.every((t) => t === "pod/hello")).toBe(true);
 
@@ -933,6 +957,147 @@ describe("peerId scoping (Task 9)", () => {
     expect(cbB.onMark).toHaveBeenCalledTimes(1);
     expect(cbA.onStartRecorders).toHaveBeenCalledWith(takeId);
     expect(cbB.onStartRecorders).toHaveBeenCalledWith(takeId);
+
+    a.dispose();
+    b.dispose();
+  });
+});
+
+describe("peerId scoping fix round (Task 9 review)", () => {
+  it("a hello ignored mid-take re-pins the moment the take ends — the drill's rejoin heal", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+    expect(cbA.onPartnerCodename).toHaveBeenCalledWith("MONGOOSE");
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // rolling on both sides
+
+    // p2 force-quits and relaunches under a new peerId ("p3") mid-take — the
+    // drill's rejoin path. The mid-take guard ignores it (no codename change
+    // yet)...
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(1); // still just MONGOOSE
+
+    // ...but the take ending (Cut) applies the stash: re-pinned to p3, and
+    // onPartnerCodename fires with p3's codename.
+    a.requestStop();
+    vi.advanceTimersByTime(1_000 + MARK_TOTAL_MS + 250 + 100); // through the stop
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2);
+    expect(cbA.onPartnerCodename).toHaveBeenLastCalledWith("JACKAL");
+
+    // A subsequent roll targets p3 — not the ghost p2 — proving the re-pin
+    // actually took, not just the callback. Scoped to sends AFTER the heal:
+    // the original (legitimate) take already put p2-targeted pod/roll/ack
+    // traffic in the log.
+    const sentBeforeReroll = pair.sentLog.length;
+    const newTakeId = a.propose()!;
+    expect(newTakeId).not.toBe(takeId);
+    const sentAfterReroll = pair.sentLog.slice(sentBeforeReroll);
+    expect(
+      sentAfterReroll.some((e) => e.from === 0 && e.toPeerId === "p3" && (JSON.parse(e.text) as { t: string }).t === "pod/roll"),
+    ).toBe(true);
+    expect(sentAfterReroll.some((e) => e.from === 0 && e.toPeerId === "p2")).toBe(false);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("pending hello also applies when the take ends via the unacked-proposal abort path", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    const { cb: cbA } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+
+    // Pin p2 without a live partner coordinator — nothing will ever ack.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "MONGOOSE" }), "p2");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledWith("MONGOOSE");
+
+    const takeId = a.propose()!; // targets p2; unacked — nobody is listening as p2
+    expect(takeId).not.toBeNull();
+
+    // p2 rejoins as p3 mid-proposal (activeTakeId is the still-unacked
+    // proposal, so this is "active" too) — ignored + stashed.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(1);
+
+    // No ack ever arrives — the 5A FIX-2 abort-if-unacked fires at
+    // startAtMs, running abortTake(), whose tail applies the stash.
+    vi.advanceTimersByTime(COUNTDOWN_MS);
+    expect(cbA.onAborted).toHaveBeenCalledWith(takeId);
+    expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2);
+    expect(cbA.onPartnerCodename).toHaveBeenLastCalledWith("JACKAL");
+
+    a.dispose();
+  });
+
+  it("propose() returns null and sends nothing when no partner is pinned yet", () => {
+    const pair = new FakeBusPair();
+    const { cb } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cb);
+    // No hello exchanged at all — partnerId is still null.
+
+    const takeId = a.propose();
+    expect(takeId).toBeNull();
+    expect(pair.countSent(0, "pod/roll")).toBe(0);
+
+    // No phantom countdown either.
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+    expect(cb.onCountdown).not.toHaveBeenCalled();
+    expect(cb.onAborted).not.toHaveBeenCalled();
+    expect(cb.onStartRecorders).not.toHaveBeenCalled();
+
+    // Once a partner IS pinned, propose() works normally.
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "Bravo" }), pair.peerIds[1]);
+    const takeId2 = a.propose();
+    expect(takeId2).not.toBeNull();
+    expect(pair.countSent(0, "pod/roll")).toBe(1);
+
+    a.dispose();
+  });
+
+  it("a third peer's pod/roll with a lexicographically-earlier takeId cannot hijack our unacked proposal", () => {
+    // Pre-Task-9 (or with the Task 9 peerId-mismatch guard removed), a
+    // second pod/roll while one is active runs onRoll()'s mutual-propose
+    // tie-break: it concedes OUR slot to any rival takeId that sorts before
+    // ours, no matter who sent it. The mismatch guard added in onRollReceived
+    // must drop a THIRD peer's roll before it ever reaches that tie-break.
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10_000, 10_000]; // the real partner's ack can't land in this test's window
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose()!; // pendingProposal set, unacked (partner's ack is 10s out)
+    expect(takeId).not.toBeNull();
+
+    // A takeId guaranteed to sort BEFORE ours ("!" < every takeId's leading
+    // "t"), from an unpinned third peer, targeting A while our proposal is
+    // still unacked.
+    const hijackTakeId = "!" + takeId;
+    expect(hijackTakeId < takeId).toBe(true);
+    pair.injectRaw(0, JSON.stringify({ t: "pod/roll", takeId: hijackTakeId, startAtMs: Date.now() + 1_000 }), "p3");
+
+    // No ack for the hijack attempt, and it never got a slot/schedule either.
+    expect(pair.sentLog.some((e) => (JSON.parse(e.text) as { t: string }).t === "pod/roll-ack")).toBe(false);
+    vi.advanceTimersByTime(1_500); // past the hijack's own (fake) startAtMs
+    expect(cbA.onStartRecorders).not.toHaveBeenCalled();
+
+    // OUR proposal is still the one pending — proven by the 5A FIX-2 abort
+    // firing for OUR takeId (not the hijack's) once nobody ever acks it.
+    vi.advanceTimersByTime(COUNTDOWN_MS);
+    expect(cbA.onAborted).toHaveBeenCalledWith(takeId);
+    expect(cbA.onAborted).not.toHaveBeenCalledWith(hijackTakeId);
+    expect(cbA.onStartRecorders).not.toHaveBeenCalled();
 
     a.dispose();
     b.dispose();
