@@ -40,6 +40,30 @@ import {
 
 const VP8 = "video/webm;codecs=vp8,opus";
 
+/** localStorage key for the most recent take with tape on disk — zero PII,
+ *  just an id and a timestamp. Survives reload so the operator (and 5C) can
+ *  find the take that was rolling when the page went away. */
+export const LAST_TAKE_KEY = "cos-last-take";
+
+function readLastTakeId(): string | null {
+  try {
+    const raw = localStorage.getItem(LAST_TAKE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { takeId?: unknown };
+    return typeof parsed.takeId === "string" ? parsed.takeId : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastTakeId(takeId: string): void {
+  try {
+    localStorage.setItem(LAST_TAKE_KEY, JSON.stringify({ takeId, at: Date.now() }));
+  } catch {
+    // best-effort — a failed write only costs the reload-recovery convenience
+  }
+}
+
 /**
  * How long after OUR recorders start a partner beacon of "not rolling yet" is
  * ignored.
@@ -69,6 +93,10 @@ export interface PodcastTake {
    *  stalled while the other grows"; this is the room page's debug mirror's
    *  source for exactly that per-stream signal (e2e/phase5a-e2e.js). */
   bytes: { video: number; audio: number };
+  /** Most recent take with tape on disk; survives reload (localStorage,
+   *  LAST_TAKE_KEY). Null until the first take on this browser completes a
+   *  stop. */
+  lastTakeId: string | null;
   actions: {
     chooseVault(): Promise<void>;
     grantVault(): Promise<void>;
@@ -91,6 +119,10 @@ export interface PodcastTakeArgs {
   /** The CALL's video track — the same one the recorder encodes. */
   videoTrack: MediaStreamTrack | null;
   audioDeviceId: string | undefined;
+  /** A transfer is in flight — no take may start (decision 8). Gates both
+   *  the coordinator's acceptance of an inbound proposal and this hook's own
+   *  roll() action. */
+  holdRolls: boolean;
 }
 
 /**
@@ -123,7 +155,7 @@ function detailOf(err: unknown): string {
 }
 
 export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
-  const { enabled, bus, dcOpen, peerIds, videoTrack, audioDeviceId } = args;
+  const { enabled, bus, dcOpen, peerIds, videoTrack, audioDeviceId, holdRolls } = args;
   const peerCount = peerIds.length;
   const peerKey = peerIds.join("|");
 
@@ -139,6 +171,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [meter, setMeter] = useState({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
   const [streamBytes, setStreamBytes] = useState({ video: 0, audio: 0 });
   const [coordinatorGen, setCoordinatorGen] = useState(0);
+  const [lastTakeId, setLastTakeId] = useState<string | null>(null);
 
   // Anything the coordinator callbacks or the 1 Hz tick need to read lives in
   // a ref: both run outside React's render pass and must never see a stale
@@ -146,6 +179,13 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // for rendering (see goPhase).
   const latest = useRef({ videoTrack, audioDeviceId });
   latest.current = { videoTrack, audioDeviceId };
+
+  // Same idiom as `latest`: the coordinator is built once per (enabled, bus,
+  // identity) — see the effect below — so canAcceptRoll has to read the
+  // CURRENT holdRolls through a ref rather than close over the value from
+  // whichever render constructed it.
+  const holdRollsRef = useRef(holdRolls);
+  holdRollsRef.current = holdRolls;
 
   const coordinatorRef = useRef<TakeCoordinator | null>(null);
   const graphRef = useRef<RecordGraph | null>(null);
@@ -158,6 +198,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const remoteRef = useRef<{ at: number; beacon: Beacon | null }>({ at: 0, beacon: null });
   const partnerRolledRef = useRef(false);
   const klaxonArmedRef = useRef(true);
+  // Defer-mark-or-fault: latches when onMark fires while graphRef.current is
+  // still null (the gUM/dir start chain hasn't returned yet). startRecorders
+  // plays it the instant the recorder is rolling — see the comment there.
+  const pendingMarkRef = useRef(false);
 
   function goPhase(next: Phase): void {
     phaseRef.current = next;
@@ -169,6 +213,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // ---------------------------------------------------------------------
   useEffect(() => {
     setUsername(getSession()?.username ?? null);
+    // localStorage only ever runs from inside an effect (client-only, never
+    // during SSR) — readLastTakeId's own try/catch covers a blocked or
+    // corrupt store on top of that.
+    setLastTakeId(readLastTakeId());
   }, []);
 
   useEffect(() => {
@@ -209,6 +257,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     graphRef.current?.close();
     graphRef.current = null;
     recorderFaultRef.current = null;
+    pendingMarkRef.current = false;
   }
 
   function beginTake(): void {
@@ -220,6 +269,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     partnerRolledRef.current = false;
     klaxonArmedRef.current = true;
     recorderFaultRef.current = null;
+    pendingMarkRef.current = false;
     setFaults([]);
     setStartFault(null);
     setDismissedKey("");
@@ -307,9 +357,21 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     rollingSinceRef.current = now;
     bytesRef.current = { total: 0, lastChangeAt: now };
     goPhase("rolling");
+
+    // Defer-mark-or-fault: onMark may have fired while graphRef.current was
+    // still null above (the gUM/dir chain slower than ROLL_LEAD_MS — the
+    // common case on real hardware, per the 2026-07-31 dress rehearsal). The
+    // recorder is rolling by this line, so playing the latched mark now still
+    // lands INSIDE the files — just later than startAtMs. 5C: the tone-search
+    // window has to tolerate a trail of the chain's latency — seconds, not
+    // milliseconds.
+    if (pendingMarkRef.current) {
+      pendingMarkRef.current = false;
+      graphRef.current?.playMark();
+    }
   }
 
-  async function stopRecorders(): Promise<void> {
+  async function stopRecorders(takeId: string): Promise<void> {
     const recorder = recorderRef.current;
     recorderRef.current = null;
     let stopError: unknown = null;
@@ -321,6 +383,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       }
     }
     releaseTake(false);
+    // Committed parts are real tape whether this stop itself errored or not
+    // (decision 11) — recorded on both paths below.
+    setLastTakeId(takeId);
+    writeLastTakeId(takeId);
     if (stopError) {
       // The sidecar/final part didn't land — the operator needs to know the
       // tape may be short before they walk away from it.
@@ -438,19 +504,28 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         if (phaseRef.current === "idle") beginTake();
         void startRecorders(takeId);
       },
-      onMark: () => graphRef.current?.playMark(),
+      onMark: () => {
+        if (graphRef.current) {
+          graphRef.current.playMark();
+        } else {
+          // The gUM/dir start chain is still in flight — latch instead of
+          // dropping the mark. startRecorders plays it the instant the
+          // recorder is rolling (see the comment there).
+          pendingMarkRef.current = true;
+        }
+      },
       onStopMark: () => {
         graphRef.current?.playMark();
         if (phaseRef.current === "rolling" || phaseRef.current === "countdown") {
           goPhase("stopping");
         }
       },
-      onStopRecorders: () => {
+      onStopRecorders: (takeId) => {
         if (phaseRef.current === "failed") {
           releaseTake(true);
           return;
         }
-        void stopRecorders();
+        void stopRecorders(takeId);
       },
       onAborted: () => {
         // Stopped before the recorders ever got going — nothing to keep.
@@ -465,6 +540,12 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         if (b.rolling) partnerRolledRef.current = true;
         remoteRef.current = { at: Date.now(), beacon: b };
       },
+    },
+    {
+      // Roll hold (decision 8): a transfer in flight quiet-ignores an
+      // inbound proposal entirely — no ack, no slot claim, no fault. The
+      // proposer's own abort-if-unacked unwinds their countdown.
+      canAcceptRoll: () => !holdRollsRef.current,
     });
     coordinatorRef.current = coordinator;
     // NOT announced here: at construction the data channel is usually still
@@ -577,6 +658,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     panel,
     partnerCodename,
     bytes: streamBytes,
+    lastTakeId,
     actions: {
       chooseVault: () => refreshVault(chooseVaultFolder),
       grantVault: () => refreshVault(requestVaultAccess),
@@ -584,6 +666,9 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       // rule rather than a fact about which button the panel happens to show.
       roll: () => {
         const coordinator = coordinatorRef.current;
+        // Belt + suspenders: the merged panel already hides the button while
+        // a transfer holds the roll (decision 8), this is the backstop.
+        if (holdRolls) return;
         if (panel.kind !== "armed" || !coordinator) return;
         // A take still draining its stop (the ~1.25 s tail after a Stand Down
         // from a failed start, say) holds the coordinator's slot: propose()

@@ -16,7 +16,7 @@ import { TakeCoordinator, type TakeCallbacks } from "@/lib/podcast/takeProtocol"
 import type { Beacon } from "@/lib/podcast/watchdog";
 import { soundKlaxon } from "@/lib/podcast/klaxon";
 import VideoTile from "@/components/VideoTile";
-import { usePodcastTake } from "@/hooks/usePodcastTake";
+import { LAST_TAKE_KEY, usePodcastTake } from "@/hooks/usePodcastTake";
 
 // ---------------------------------------------------------------------------
 // Hoisted fake state — vi.mock factories are hoisted above the imports, so
@@ -37,6 +37,12 @@ const H = vi.hoisted(() => {
     recorders: [] as { state: string; stop: () => Promise<unknown> }[],
     failBuild: null as Error | null,
     failTakeDir: null as Error | null,
+    failRecorderStop: null as Error | null,
+    // Set true to make buildRecordGraph hang until resolveDeferredBuild() is
+    // called — simulates a slow gUM/dir start chain (the 2026-07-31 dress
+    // rehearsal's confirmed real-hardware failure mode).
+    deferBuild: false,
+    resolveDeferredBuild: null as (() => void) | null,
   };
   return { log, state };
 });
@@ -81,6 +87,11 @@ vi.mock("@/lib/podcast/recordGraph", () => ({
   buildRecordGraph: vi.fn(async (audioDeviceId: string | undefined) => {
     H.state.buildArgs.push(audioDeviceId);
     if (H.state.failBuild) throw H.state.failBuild;
+    if (H.state.deferBuild) {
+      await new Promise<void>((resolve) => {
+        H.state.resolveDeferredBuild = resolve;
+      });
+    }
     H.log.push("graph:build");
     const graph = {
       recordedTrack: { id: "recorded" },
@@ -119,6 +130,7 @@ vi.mock("@/lib/podcast/recorder", () => ({
     async stop() {
       this.state = "stopped";
       H.log.push("recorder:stop");
+      if (H.state.failRecorderStop) throw H.state.failRecorderStop;
       return { video: [], audio: [] };
     }
   },
@@ -216,6 +228,10 @@ describe("usePodcastTake", () => {
     H.state.recorders.length = 0;
     H.state.failBuild = null;
     H.state.failTakeDir = null;
+    H.state.failRecorderStop = null;
+    H.state.deferBuild = false;
+    H.state.resolveDeferredBuild = null;
+    localStorage.clear(); // isolate cos-last-take across tests
     vi.mocked(soundKlaxon).mockClear();
     // Testing Library sets this around its own wrappers and restores it after;
     // the bare `act` in tick()/rerender paths needs it to stay set.
@@ -254,6 +270,7 @@ describe("usePodcastTake", () => {
       peerIds: ["peer-1"],
       videoTrack,
       audioDeviceId: "mic-1",
+      holdRolls: false,
       ...overrides,
     };
 
@@ -489,6 +506,7 @@ describe("usePodcastTake", () => {
       peerIds: ["peer-1"],
       videoTrack: fakeTrack(),
       audioDeviceId: "mic-1",
+      holdRolls: false,
     };
     const view = renderHook((p: Args) => usePodcastTake(p), { initialProps: props });
     await tick(50);
@@ -753,6 +771,122 @@ describe("usePodcastTake", () => {
     expect(view.result.current.panel.kind).toBe("rolling");
     expect(vi.mocked(soundKlaxon)).not.toHaveBeenCalled();
     stopHeartbeat();
+  });
+
+  // -------------------------------------------------------------------
+  // Defer-mark-or-fault: the 2026-07-31 dress rehearsal found the start tone
+  // ABSENT from tape in 5/5 real takes — the gUM/dir start chain is slower
+  // than ROLL_LEAD_MS essentially always on real hardware, so onMark's
+  // scheduled instant routinely passes before graphRef.current exists. The
+  // mark must latch and play the instant the recorder is actually rolling,
+  // not clip silently.
+  // -------------------------------------------------------------------
+  it("a slow gUM start chain defers the start mark instead of clipping it", async () => {
+    H.state.deferBuild = true;
+    const { view } = await setup();
+
+    act(() => view.result.current.actions.roll());
+    // Past T-500 (recorders scheduled to start) AND T (the mark's scheduled
+    // instant) — buildRecordGraph is still stalled mid-await the whole time.
+    await tick(3_500);
+
+    expect(H.log).not.toContain("recorder:start");
+    expect(H.log).not.toContain("graph:mark");
+
+    // The stalled gUM/dir chain finally resolves.
+    await act(async () => {
+      H.state.resolveDeferredBuild?.();
+    });
+    await tick(50);
+
+    expect(H.log.filter((l) => l === "graph:mark")).toHaveLength(1);
+    expect(H.log.indexOf("graph:mark")).toBeGreaterThan(H.log.indexOf("recorder:start"));
+    expect(view.result.current.panel.kind).toBe("rolling");
+  });
+
+  it("the fast path is unchanged: the mark plays exactly once, at mark time", async () => {
+    const { view } = await setup();
+
+    act(() => view.result.current.actions.roll());
+    await tick(3_000); // T-500: recorders start, graph already resolved (fast mock)
+    expect(H.log).not.toContain("graph:mark");
+    expect(H.log).toContain("recorder:start");
+
+    await tick(500); // T: the mark plays
+    expect(H.log.filter((l) => l === "graph:mark")).toHaveLength(1);
+    expect(H.log.indexOf("graph:mark")).toBeGreaterThan(H.log.indexOf("recorder:start"));
+  });
+
+  // -------------------------------------------------------------------
+  // lastTakeId: persists which take has real tape on disk, across reload.
+  // -------------------------------------------------------------------
+  it("lastTakeId starts null, is set after a completed stop, and survives a fresh mount via localStorage", async () => {
+    const { pair, view, props } = await setup();
+    expect(view.result.current.lastTakeId).toBeNull();
+
+    await rollToRolling(view);
+    const rollMsg = pair.sentLog
+      .map((e) => JSON.parse(e.text) as { t: string; takeId?: string })
+      .find((m) => m.t === "pod/roll")!;
+
+    act(() => view.result.current.actions.stop());
+    await tick(1_100); // STOP_LEAD_MS
+    await tick(2_000); // mark + tail
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+    expect(view.result.current.lastTakeId).toBe(rollMsg.takeId);
+
+    const stored = JSON.parse(localStorage.getItem(LAST_TAKE_KEY)!) as { takeId: string };
+    expect(stored.takeId).toBe(rollMsg.takeId);
+
+    // A fresh mount re-reads it from localStorage — survives reload.
+    const fresh = renderHook((p: Args) => usePodcastTake(p), { initialProps: props });
+    await tick(1);
+    expect(fresh.result.current.lastTakeId).toBe(rollMsg.takeId);
+    fresh.unmount();
+  });
+
+  it("lastTakeId is recorded even when recorder.stop() rejects", async () => {
+    const { pair, view } = await setup();
+    await rollToRolling(view);
+    const rollMsg = pair.sentLog
+      .map((e) => JSON.parse(e.text) as { t: string; takeId?: string })
+      .find((m) => m.t === "pod/roll")!;
+
+    H.state.failRecorderStop = new Error("disk write failed");
+    act(() => view.result.current.actions.stop());
+    await tick(1_100);
+    await tick(2_000);
+
+    const panel = view.result.current.panel;
+    if (panel.kind !== "fault") throw new Error(`expected fault, got ${panel.kind}`);
+    expect(panel.faults).toContainEqual({ side: "local", cause: "disk-error" });
+    // Committed parts are real tape either way (decision 11).
+    expect(view.result.current.lastTakeId).toBe(rollMsg.takeId);
+  });
+
+  // -------------------------------------------------------------------
+  // Roll hold: a transfer in flight (decision 8) takes the whole slot
+  // out of play, on both the receiving and proposing side.
+  // -------------------------------------------------------------------
+  it("holdRolls blocks an inbound proposal from ever being acked, and makes roll() a no-op", async () => {
+    const { pair, view, partner, partnerCb } = await setup({ holdRolls: true });
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
+
+    // Partner proposes — our side must quiet-ignore it (no ack, no slot
+    // claim), so the proposer's own abort-if-unacked fires at startAtMs.
+    const takeId = partner.propose();
+    expect(takeId).not.toBeNull();
+    await tick(3_600);
+
+    expect(partnerCb.onAborted).toHaveBeenCalledWith(takeId);
+    expect(pair.countSent(0, "pod/roll-ack")).toBe(0);
+
+    // The local roll() action is a no-op too (belt + suspenders — the merged
+    // panel already hides the button).
+    act(() => view.result.current.actions.roll());
+    await tick(1_000);
+    expect(pair.countSent(0, "pod/roll")).toBe(0);
+    expect(view.result.current.panel).toEqual({ kind: "armed" });
   });
 });
 

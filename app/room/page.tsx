@@ -103,6 +103,9 @@ export default function RoomPage() {
     peerIds: call.peers.map((p) => p.peerId),
     videoTrack: media.stream?.getVideoTracks()[0] ?? null,
     audioDeviceId: media.choice.audioDeviceId,
+    // Temporary: no transfer flow wired yet — Task 11 replaces this with the
+    // real "a transfer is in flight" signal.
+    holdRolls: false,
   });
   // While the tape rolls the recorded tracks are frozen: no device toggles,
   // and the self tile shows the true recorded frame.
