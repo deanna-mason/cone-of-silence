@@ -444,13 +444,135 @@ describe("EpisodeSender", () => {
     expect(cb.lastPhase()).toBe("parked"); // never pulled back to sending
   });
 
-  it("(e) handleChannelClosed while idle/offering-unstarted is a no-op", async () => {
+  it("(e) handleChannelClosed while idle (never started) is a no-op", async () => {
     const store = new FakeStore();
     const cb = new FakeCallbacks();
     const { sender } = makeSender(store, cb);
     sender.handleChannelClosed();
     await flush();
     expect(cb.phases).toEqual([]);
+  });
+
+  // -- review fix round: park()/fault() must supersede pending async
+  // continuations from the SAME synchronous call, not just a future start()
+  // (findings #1's three traces) --------------------------------------------
+  it("(e) handleChannelClosed right after start() (offering, readSendPlan still pending) parks immediately; the plan resolving afterward sends no xfr/offer and arms no timeout", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { sender, link } = makeSender(store, cb);
+    store.plan = [
+      { base: "audio", parts: [entry("audio.part000", 1)] },
+      { base: "video", parts: [entry("video.part000", 1)] },
+    ];
+
+    sender.start("ep-park-race-a", "static-otter");
+    expect(cb.lastPhase()).toBe("offering");
+
+    // races the still-pending readSendPlan().then() — the .then callbacks
+    // are always deferred to a microtask, so this synchronously wins the race
+    sender.handleChannelClosed();
+    expect(cb.lastPhase()).toBe("parked");
+
+    await flush();
+
+    expect(link.frames().some((f) => f.t === "xfr/offer")).toBe(false); // a live peer's have reply would otherwise be dropped on the floor
+    expect(cb.lastPhase()).toBe("parked");
+    expect(cb.phases).toEqual([
+      { phase: "offering", detail: undefined },
+      { phase: "parked", detail: undefined },
+    ]); // no phantom offer-timeout park layered on top
+  });
+
+  it("handleChannelClosed right after start() suppresses a subsequently-rejecting readSendPlan — no fault-after-park, no xfr/fault on the dead channel", async () => {
+    const store = new FakeStore();
+    store.planRejects = "sidecar missing";
+    const cb = new FakeCallbacks();
+    const { sender, link } = makeSender(store, cb);
+
+    sender.start("ep-park-race-b", "static-otter");
+    expect(cb.lastPhase()).toBe("offering");
+
+    sender.handleChannelClosed();
+    expect(cb.lastPhase()).toBe("parked");
+
+    await flush();
+
+    expect(cb.lastPhase()).toBe("parked"); // NOT overwritten to fault by the late rejection
+    expect(link.frames().some((f) => f.t === "xfr/fault")).toBe(false);
+  });
+
+  it("handleChannelClosed right after an xfr/have (sending, openPartReader still pending and about to reject) suppresses the fault — stays parked, no xfr/fault", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { sender, link } = makeSender(store, cb);
+    const audio = entry("audio.part000", 4);
+    store.plan = [{ base: "audio", parts: [audio] }, { base: "video", parts: [] }];
+    store.openRejects.add(audio.name);
+
+    sender.start("ep-park-race-c", "static-otter");
+    await flush(); // plan resolves, offer sent, phase offering
+
+    sender.handleFrame(PEER, haveFrame("ep-park-race-c", [])); // -> onHave (sending) -> announceNextPart -> openPartReader pending
+    // races the still-unsettled rejection — synchronous, before any microtask runs
+    sender.handleChannelClosed();
+    expect(cb.lastPhase()).toBe("parked");
+
+    link.sent = [];
+    await flush(); // let the openPartReader rejection's catch continuation run
+
+    expect(cb.lastPhase()).toBe("parked"); // NOT overwritten to fault (the success path already guarded phase; the error path didn't)
+    expect(link.frames().some((f) => f.t === "xfr/fault")).toBe(false);
+  });
+
+  // -- review fix round: malformed-body validation must be gated on phase
+  // FIRST (finding #2) — a stray garbage frame after done/fault must never
+  // un-complete a finished transfer or fault back to an already-done peer --
+  it("a malformed xfr/have arriving AFTER done is ignored — a garbage frame can't un-complete a finished transfer", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { sender, link } = makeSender(store, cb);
+    const { audio } = await startAndOffer(sender, store, "ep-done-garbage-1", new Uint8Array([1]), new Uint8Array([2]));
+    sender.handleFrame(PEER, haveFrame("ep-done-garbage-1", []));
+    await flush();
+    sender.handleFrame(PEER, partCommittedFrame("ep-done-garbage-1", audio.name));
+    await flush();
+    sender.handleFrame(PEER, partCommittedFrame("ep-done-garbage-1", "video.part000"));
+    await flush();
+    sender.handleFrame(PEER, doneFrame("ep-done-garbage-1"));
+    await flush();
+    expect(cb.lastPhase()).toBe("done");
+    link.sent = [];
+
+    // a garbage `have` (committed not an array) lands late, after done
+    sender.handleFrame(PEER, JSON.stringify({ t: "xfr/have", v: 1, episodeId: "ep-done-garbage-1" }));
+    await flush();
+
+    expect(cb.lastPhase()).toBe("done"); // not un-completed to fault
+    expect(link.frames().some((f) => f.t === "xfr/fault")).toBe(false); // no fault sent to a peer that already wrote its manifest
+  });
+
+  it("a malformed xfr/part-committed arriving AFTER done is ignored the same way", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { sender, link } = makeSender(store, cb);
+    const { audio } = await startAndOffer(sender, store, "ep-done-garbage-2", new Uint8Array([1]), new Uint8Array([2]));
+    sender.handleFrame(PEER, haveFrame("ep-done-garbage-2", []));
+    await flush();
+    sender.handleFrame(PEER, partCommittedFrame("ep-done-garbage-2", audio.name));
+    await flush();
+    sender.handleFrame(PEER, partCommittedFrame("ep-done-garbage-2", "video.part000"));
+    await flush();
+    sender.handleFrame(PEER, doneFrame("ep-done-garbage-2"));
+    await flush();
+    expect(cb.lastPhase()).toBe("done");
+    link.sent = [];
+
+    // a garbage `part-committed` (name missing) lands late, after done
+    sender.handleFrame(PEER, JSON.stringify({ t: "xfr/part-committed", v: 1, episodeId: "ep-done-garbage-2" }));
+    await flush();
+
+    expect(cb.lastPhase()).toBe("done");
+    expect(link.frames().some((f) => f.t === "xfr/fault")).toBe(false);
   });
 
   // -- (f) xfr/fault -> fault phase; start() again re-offers -----------------

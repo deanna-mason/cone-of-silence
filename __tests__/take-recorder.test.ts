@@ -252,6 +252,38 @@ describe("TakeRecorder blob routing", () => {
 
     expect(recorder.bytes()).toEqual({ video: video.appended[0]!.size, audio: audio.appended[0]!.size });
   });
+
+  // -- review fix round (Task 7 cross-task finding #3): browsers emit an
+  // empty final blob on stop() — reachable today because episode-exchange
+  // (5B) turns every appended part's size into a wire xfr/part chunk count
+  // (ceil(size/CHUNK)); a zero-size part means chunks=0, so the receiver's
+  // last-chunk-triggers-commit logic never fires and BOTH sides of an
+  // exchange wait forever with no timeout. Fixed at the source: an empty
+  // blob is dropped before it ever reaches the writer/vault.ts, so no
+  // zero-size part can exist in a sidecar at all. ---------------------------
+  it("drops an empty (size 0) dataavailable blob without appending it", async () => {
+    const { recorder, videoRecorder, video } = buildRecorder({});
+    recorder.start();
+
+    videoRecorder.emitData(new Blob([]));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(video.appended).toEqual([]);
+  });
+
+  it("a real blob delivered right after an empty one still lands normally — the skip is additive, not a restructure", async () => {
+    const { recorder, videoRecorder, video } = buildRecorder({});
+    recorder.start();
+
+    videoRecorder.emitData(new Blob([])); // dropped
+    const real = new Blob([new Uint8Array(5)]);
+    videoRecorder.emitData(real); // still appended
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(video.appended).toEqual([real]);
+  });
 });
 
 describe("TakeRecorder fault mapping", () => {
@@ -322,6 +354,19 @@ describe("TakeRecorder.stop", () => {
     await recorder.stop();
 
     expect(video.appended).toEqual([finalBlob]);
+  });
+
+  it("an empty final dataavailable delivered between stop() and onstop is dropped, not appended, and finish() still completes normally (final-flush-then-finish ordering intact)", async () => {
+    const { recorder, videoRecorder, video } = buildRecorder({});
+    recorder.start();
+
+    videoRecorder.queueFinalBlob(new Blob([])); // the reachable browser bug this fixes: an empty final flush blob
+
+    const result = await recorder.stop();
+
+    expect(video.appended).toEqual([]); // never appended — no zero-size part in the sidecar
+    expect(result.video).toEqual(video.sidecar); // finish() still ran, still awaited after the (dropped) flush
+    expect(recorder.state).toBe("stopped");
   });
 
   it("propagates a finish() rejection and maps it to onFault('disk-error', ...)", async () => {

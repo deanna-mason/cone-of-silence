@@ -612,9 +612,14 @@ export class EpisodeSender {
   }
 
   /** True once a fault/park/restart/dispose has superseded the generation
-   *  `epoch` was pinned to. */
+   *  `epoch` was pinned to. Checks `phase` as well as `epoch` (mirrors
+   *  EpisodeReceiver's `superseded()`) — park()/fault() don't bump `epoch`
+   *  themselves, so a pending continuation from the SAME start() call (not
+   *  just a later one) must still be caught: a park mid-readSendPlan or
+   *  mid-openPartReader must not resurrect an xfr/offer, an offer-timeout
+   *  arm, or an xfr/fault once the channel is already gone. */
   private superseded(epoch: number): boolean {
-    return this.disposed || epoch !== this.epoch;
+    return this.disposed || (this.phase !== "offering" && this.phase !== "sending") || epoch !== this.epoch;
   }
 
   private clearOfferTimer(): void {
@@ -666,11 +671,16 @@ export class EpisodeSender {
   // -- xfr/have ----------------------------------------------------------
 
   private onHave(raw: Record<string, unknown>): void {
+    // Phase gate FIRST, body validation second (mirrors EpisodeReceiver's
+    // onPart) — a `have` outside an active offer is just a stray/late frame,
+    // and a GARBAGE one must never be able to fault a transfer that has
+    // already moved on to sending/parked/done: faulting here would send
+    // xfr/fault to a peer that may have already written its manifest.
+    if (this.phase !== "offering") return;
     if (!isValidHave(raw)) {
       this.fault("malformed have");
       return;
     }
-    if (this.phase !== "offering") return; // stray/late have outside an active offer
     if (raw.episodeId !== this.episodeId) return; // stray for a superseded/foreign episode
     const files = this.files;
     if (!files) return; // have can't legitimately precede our own offer resolving — defensive only
@@ -777,11 +787,12 @@ export class EpisodeSender {
   // -- xfr/part-committed / xfr/fault / xfr/done --------------------------
 
   private onPartCommitted(raw: Record<string, unknown>): void {
+    // Phase gate FIRST — same reasoning as onHave above.
+    if (this.phase !== "sending") return;
     if (!isValidPartCommitted(raw)) {
       this.fault("malformed part-committed");
       return;
     }
-    if (this.phase !== "sending") return;
     if (raw.episodeId !== this.episodeId) return;
     const slot = this.activeSlot;
     if (!slot || raw.name !== slot.entry.name) return; // stray/late ack for a part we're not actively awaiting — ignored defensively

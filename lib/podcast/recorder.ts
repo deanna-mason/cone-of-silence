@@ -111,6 +111,13 @@ export class TakeRecorder {
 
   private wireRecorder(recorder: MediaRecorder, writer: PartWriter): void {
     recorder.ondataavailable = (ev: BlobEvent) => {
+      // Browsers emit an empty final blob on stop() — never a real part.
+      // Skipped before the append even enqueues: a zero-size part survives
+      // all the way to a sidecar entry with size 0, which the episode
+      // exchange (5B) turns into chunks=0 on the wire — the receiver's
+      // last-chunk-triggers-commit logic then never fires and both sides of
+      // a transfer wait forever with no timeout.
+      if (ev.data.size === 0) return;
       writer.append(ev.data).catch((err) => this.fault("disk-error", faultDetail(err)));
     };
     recorder.onerror = (ev: ErrorEvent) => {
