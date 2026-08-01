@@ -1,14 +1,27 @@
 // Episode-exchange engines, driven over the cos-xfer data channel via
-// xferProtocol.ts's frames/envelope. This half (Task 6) is the RECEIVER:
-// EpisodeReceiver. Task 7 adds the sender counterpart to this same file.
+// xferProtocol.ts's frames/envelope. Task 6 is the RECEIVER (EpisodeReceiver,
+// below); Task 7 adds the SENDER counterpart (EpisodeSender, further down)
+// to this same file.
 //
 // scanCommitted() IS the resume state (episodeStore.ts) — `committedNames`
 // below is just an in-memory mirror of it, used to detect "last part of the
 // last file" so the manifest (the 5C darkroom's trigger) writes strictly
-// after every commit.
-import { HashMismatchError, type IncomingPart } from "./episodeStore";
+// after every commit. The sender's mirror image of that resume state is
+// `xfr/have`: it never trusts its own sent-count, only what the receiver
+// reports as committed.
+import { HashMismatchError, type IncomingPart, type PartReader } from "./episodeStore";
 import type { SidecarEntry } from "./vault";
-import { decodeChunk, encodeFrame, parseXferFrame, type FilePlan, type XferFrame } from "./xferProtocol";
+import { XFER_HIGH_WATER } from "../webrtc/peer";
+import {
+  decodeChunk,
+  encodeChunk,
+  encodeFrame,
+  parseXferFrame,
+  OFFER_TIMEOUT_MS,
+  XFER_CHUNK_BYTES,
+  type FilePlan,
+  type XferFrame,
+} from "./xferProtocol";
 
 /** Narrow per-peer slice of the XferPort, injectable for tests. */
 export interface XferLink {
@@ -404,6 +417,400 @@ export class EpisodeReceiver {
     if (this.superseded(epoch)) return;
     this.phase = "done";
     this.send({ t: "xfr/done", v: 1, episodeId });
+    this.cb.onPhase("done");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SENDER (Task 7)
+// ---------------------------------------------------------------------------
+
+export interface SenderStore {
+  readSendPlan(episodeId: string): Promise<FilePlan[]>;
+  openPartReader(episodeId: string, name: string): Promise<PartReader>;
+}
+
+export type SenderPhase = "idle" | "offering" | "sending" | "parked" | "done" | "fault";
+
+export interface SendProgress {
+  file: string;
+  sentBytes: number;
+  totalBytes: number;
+  resumedParts: number;
+}
+
+export interface EpisodeSenderCallbacks {
+  onPhase(phase: SenderPhase, detail?: string): void;
+  onProgress(p: SendProgress): void;
+}
+
+function isValidHave(x: Record<string, unknown>): x is { episodeId: string; committed: string[] } {
+  return typeof x.episodeId === "string" && Array.isArray(x.committed) && x.committed.every((c) => typeof c === "string");
+}
+
+function isValidPartCommitted(x: Record<string, unknown>): x is { episodeId: string; name: string } {
+  return typeof x.episodeId === "string" && typeof x.name === "string";
+}
+
+/** Reorders `files` audio-first — a wire contract, so enforced here rather
+ *  than trusted from the store (readSendPlan already promises this order,
+ *  but defensively). */
+function orderAudioFirst(files: FilePlan[]): FilePlan[] {
+  const audio = files.find((f) => f.base === "audio");
+  const video = files.find((f) => f.base === "video");
+  return [audio, video].filter((f): f is FilePlan => f !== undefined);
+}
+
+/** Every part of every plan file, audio file first, parts in sidecar order —
+ *  the full-episode part list the offer's ordering rule and the send queue
+ *  are both built from. */
+function flattenParts(files: FilePlan[]): SidecarEntry[] {
+  return orderAudioFirst(files).flatMap((f) => f.parts);
+}
+
+interface SenderSlot {
+  entry: SidecarEntry;
+  reader: PartReader;
+  chunksExpected: number;
+  nextSeq: number;
+}
+
+/**
+ * Sends one episode at a time over a peerId-scoped slice of the xfer
+ * channel. Exactly one part is ever in flight: the next `xfr/part` is
+ * announced only after the current one's `xfr/part-committed` ack arrives —
+ * NOT merely after every chunk has been pumped. This is LOAD-BEARING, not
+ * just flow control: EpisodeReceiver suppresses a superseded part's
+ * `part-committed` if a new `xfr/part` arrives before its ack goes out, so
+ * announcing the next part early can silently drop an ack the resume state
+ * depends on.
+ *
+ * The receiver's `have` list is the ONLY resume state (mirrors
+ * EpisodeReceiver's scanCommitted() on the wire) — this class never trusts
+ * its own prior sent-count; every `start()` rebuilds the send queue purely
+ * from whatever `have` comes back.
+ *
+ * Same epoch/identity discipline as EpisodeReceiver: every state transition
+ * nulls or reassigns `activeSlot` in the same synchronous step it changes
+ * `phase`/`epoch`, so `pump()` can check `this.activeSlot === slot` after
+ * an `await` as a complete "was I superseded?" test; episode-level
+ * continuations (no slot to compare) pin `epoch` instead and re-check it
+ * via `superseded()`.
+ */
+export class EpisodeSender {
+  private phase: SenderPhase = "idle";
+  private episodeId: string | null = null;
+  private fromCodename: string | null = null;
+  private files: FilePlan[] | null = null;
+  private queue: SidecarEntry[] = [];
+  private activeSlot: SenderSlot | null = null;
+  private disposed = false;
+  /** Bumped on every start() so an episode-level continuation from a
+   *  superseded generation (a fault/park/restart raced it) can detect it
+   *  and drop itself via superseded(). */
+  private epoch = 0;
+  private offerTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Re-entrancy guard for pump() — see pump()'s own comment. */
+  private pumping = false;
+
+  // Progress accounting: sentBytes = bytes pumped over the wire this
+  // session + committed-part sizes reported via `have` on resume; totalBytes
+  // is the whole episode's size, not just the active part's.
+  private resumedParts = 0;
+  private totalBytes = 0;
+  private baseSentBytes = 0;
+  private sentBytesThisSession = 0;
+
+  /** deps.now parity with other podcast state machines; unused today — the
+   *  offer timeout is a real setTimeout, faked via vi.useFakeTimers. */
+  private readonly nowFn: () => number;
+
+  constructor(
+    private readonly peerId: string,
+    private readonly link: XferLink,
+    private readonly store: SenderStore,
+    private readonly cb: EpisodeSenderCallbacks,
+    deps?: { now?: () => number },
+  ) {
+    this.nowFn = deps?.now ?? Date.now;
+  }
+
+  /** SEND EPISODE. Reads the plan, sends xfr/offer, arms OFFER_TIMEOUT_MS →
+   *  parked if unanswered. Re-invocable from ANY phase — including
+   *  mid-transfer — since bumping `epoch` cleanly supersedes whatever
+   *  generation was active; this is the manual resume ("pressing SEND
+   *  again re-offers", spec verbatim) from parked/done/fault alike. */
+  start(episodeId: string, fromCodename: string | null): void {
+    if (this.disposed) return;
+    const epoch = ++this.epoch;
+    this.clearOfferTimer();
+    this.activeSlot = null; // no disk resource to release on the sender side — just drop the reference
+    this.episodeId = episodeId;
+    this.fromCodename = fromCodename;
+    this.files = null;
+    this.queue = [];
+    this.resumedParts = 0;
+    this.totalBytes = 0;
+    this.baseSentBytes = 0;
+    this.sentBytesThisSession = 0;
+    this.phase = "offering";
+    this.cb.onPhase("offering");
+
+    this.store.readSendPlan(episodeId).then(
+      (files) => {
+        if (this.superseded(epoch)) return;
+        const ordered = orderAudioFirst(files);
+        this.files = ordered;
+        this.send({ t: "xfr/offer", v: 1, episodeId, from: fromCodename, files: ordered });
+        this.armOfferTimeout(epoch);
+      },
+      (err) => {
+        if (this.superseded(epoch)) return;
+        this.fault(`plan:${errMessage(err)}`);
+      },
+    );
+  }
+
+  /** Frames from any OTHER peerId are ignored — mirrors EpisodeReceiver
+   *  (the transfer protocol is peerId-scoped). */
+  handleFrame(fromPeerId: string, data: string | ArrayBuffer): void {
+    if (this.disposed || fromPeerId !== this.peerId) return;
+    if (typeof data !== "string") return; // no binary frame is ever sent TO the sender in 5B — chunks flow sender -> receiver only
+    const frame = parseXferFrame(data);
+    if (!frame) return; // foreign "t" or unparseable JSON — silently ignored, mirrors EpisodeReceiver
+    if (frame.t === "xfr/have") this.onHave(frame as unknown as Record<string, unknown>);
+    else if (frame.t === "xfr/part-committed") this.onPartCommitted(frame as unknown as Record<string, unknown>);
+    else if (frame.t === "xfr/fault") this.onPeerFault(frame as unknown as Record<string, unknown>);
+    else if (frame.t === "xfr/done") this.onDone(frame as unknown as Record<string, unknown>);
+    // xfr/offer, xfr/part are frames THIS class sends, never receives.
+  }
+
+  /** bufferedamountlow -> resume the pump. */
+  handleDrain(): void {
+    void this.pump();
+  }
+
+  /** cos-xfer closed/error mid-transfer -> park (first-class, not an error screen). */
+  handleChannelClosed(): void {
+    if (this.disposed) return;
+    if (this.phase !== "offering" && this.phase !== "sending") return;
+    this.park();
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.clearOfferTimer();
+    this.activeSlot = null;
+  }
+
+  // -- outbound frames / shared helpers --------------------------------------
+
+  private send(frame: XferFrame): void {
+    if (this.disposed) return;
+    this.link.send(encodeFrame(frame));
+  }
+
+  /** True once a fault/park/restart/dispose has superseded the generation
+   *  `epoch` was pinned to. */
+  private superseded(epoch: number): boolean {
+    return this.disposed || epoch !== this.epoch;
+  }
+
+  private clearOfferTimer(): void {
+    if (this.offerTimer !== null) {
+      clearTimeout(this.offerTimer);
+      this.offerTimer = null;
+    }
+  }
+
+  private armOfferTimeout(epoch: number): void {
+    this.offerTimer = setTimeout(() => {
+      this.offerTimer = null;
+      if (this.superseded(epoch) || this.phase !== "offering") return; // xfr/have already arrived
+      this.phase = "parked";
+      this.cb.onPhase("parked", "offer timeout");
+    }, OFFER_TIMEOUT_MS);
+  }
+
+  /** The one path to a SENDER-initiated fault: sends xfr/fault to the peer,
+   *  then enters the fault phase — no in-flight temp to abandon on this
+   *  side (that's the receiver's concern), just drop the active slot. A
+   *  later start() re-offers. */
+  private fault(reason: string): void {
+    if (this.disposed) return;
+    this.clearOfferTimer();
+    this.activeSlot = null;
+    this.phase = "fault";
+    this.send({ t: "xfr/fault", v: 1, episodeId: this.episodeId ?? "", reason });
+    this.cb.onPhase("fault", reason);
+  }
+
+  private park(): void {
+    if (this.disposed) return;
+    this.clearOfferTimer();
+    this.activeSlot = null;
+    this.phase = "parked";
+    this.cb.onPhase("parked");
+  }
+
+  private progressSnapshot(file: string): SendProgress {
+    return {
+      file,
+      sentBytes: this.baseSentBytes + this.sentBytesThisSession,
+      totalBytes: this.totalBytes,
+      resumedParts: this.resumedParts,
+    };
+  }
+
+  // -- xfr/have ----------------------------------------------------------
+
+  private onHave(raw: Record<string, unknown>): void {
+    if (!isValidHave(raw)) {
+      this.fault("malformed have");
+      return;
+    }
+    if (this.phase !== "offering") return; // stray/late have outside an active offer
+    if (raw.episodeId !== this.episodeId) return; // stray for a superseded/foreign episode
+    const files = this.files;
+    if (!files) return; // have can't legitimately precede our own offer resolving — defensive only
+
+    this.clearOfferTimer();
+
+    // Task 5 advisory (binding): treat `have` defensively — send queue =
+    // plan MINUS have via set difference (an unknown name, e.g. a stray
+    // .DS_Store, drops out of the filter below); resumedParts is the
+    // INTERSECTION count (|have ∩ plan|), never have.length.
+    const haveSet = new Set(raw.committed);
+    const flat = flattenParts(files);
+    let resumedParts = 0;
+    let baseSentBytes = 0;
+    for (const part of flat) {
+      if (haveSet.has(part.name)) {
+        resumedParts += 1;
+        baseSentBytes += part.size; // guarded by name — only sizes for parts actually in the plan count
+      }
+    }
+    this.resumedParts = resumedParts;
+    this.baseSentBytes = baseSentBytes;
+    this.totalBytes = flat.reduce((sum, p) => sum + p.size, 0);
+    this.sentBytesThisSession = 0;
+    this.queue = flat.filter((p) => !haveSet.has(p.name));
+
+    this.phase = "sending";
+    this.cb.onPhase("sending");
+    void this.announceNextPart();
+  }
+
+  // -- xfr/part + backpressure pump ---------------------------------------
+
+  private async announceNextPart(): Promise<void> {
+    const epoch = this.epoch;
+    if (this.queue.length === 0) return; // nothing left to send from here — the receiver's own commit-completion sends xfr/done
+    const entry = this.queue.shift()!;
+    const episodeId = this.episodeId;
+    if (episodeId === null) return;
+
+    let reader: PartReader;
+    try {
+      reader = await this.store.openPartReader(episodeId, entry.name);
+    } catch (err) {
+      if (this.superseded(epoch)) return;
+      this.fault(`open:${errMessage(err)}`);
+      return;
+    }
+    if (this.superseded(epoch) || this.phase !== "sending") return;
+
+    const chunksExpected = Math.ceil(entry.size / XFER_CHUNK_BYTES);
+    const slot: SenderSlot = { entry, reader, chunksExpected, nextSeq: 0 };
+    this.activeSlot = slot;
+    this.send({ t: "xfr/part", v: 1, episodeId, name: entry.name, size: entry.size, sha256: entry.sha256, chunks: chunksExpected });
+    this.cb.onProgress(this.progressSnapshot(entry.name));
+    void this.pump();
+  }
+
+  /** Drains as many chunks of the announced part as backpressure allows in
+   *  one go — "loop until blocked". Re-entrancy-safe: `bufferedamountlow`
+   *  (handleDrain) can fire while a PREVIOUS call's `reader.read()` is
+   *  still in flight (both are async DC events), so a second concurrent
+   *  call would otherwise race the first and double-send. The `pumping`
+   *  flag guards that — a re-entrant call just returns; the in-flight loop
+   *  re-checks bufferedAmount()/remaining chunks every iteration, so it
+   *  naturally resumes on its own once unblocked. */
+  private async pump(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      for (;;) {
+        const slot = this.activeSlot;
+        if (!slot || this.phase !== "sending" || this.disposed) return;
+        if (slot.nextSeq >= slot.chunksExpected) return; // part fully sent; now awaiting xfr/part-committed
+        if (this.link.bufferedAmount() >= XFER_HIGH_WATER) return; // handleDrain resumes
+
+        const seq = slot.nextSeq;
+        const offset = seq * XFER_CHUNK_BYTES;
+        const length = Math.min(XFER_CHUNK_BYTES, slot.entry.size - offset);
+        let payload: Uint8Array;
+        try {
+          payload = await slot.reader.read(offset, length);
+        } catch (err) {
+          if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return;
+          this.fault(`read:${errMessage(err)}`);
+          return;
+        }
+        if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while the read was in flight
+
+        const ok = this.link.send(encodeChunk(seq, payload));
+        if (!ok) {
+          this.park(); // the channel died between events
+          return;
+        }
+        slot.nextSeq += 1;
+        this.sentBytesThisSession += payload.length;
+        this.cb.onProgress(this.progressSnapshot(slot.entry.name));
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  // -- xfr/part-committed / xfr/fault / xfr/done --------------------------
+
+  private onPartCommitted(raw: Record<string, unknown>): void {
+    if (!isValidPartCommitted(raw)) {
+      this.fault("malformed part-committed");
+      return;
+    }
+    if (this.phase !== "sending") return;
+    if (raw.episodeId !== this.episodeId) return;
+    const slot = this.activeSlot;
+    if (!slot || raw.name !== slot.entry.name) return; // stray/late ack for a part we're not actively awaiting — ignored defensively
+    if (slot.nextSeq < slot.chunksExpected) return; // ack for a part we haven't finished pumping — protocol anomaly, ignored rather than trusted
+    this.activeSlot = null; // next part announced ONLY now — see the class comment (load-bearing)
+    void this.announceNextPart();
+  }
+
+  /** `xfr/fault` FROM the receiver — reflects their reason into our own
+   *  fault phase and sends nothing back (an internal fault() reply here
+   *  would just ping-pong the two sides). */
+  private onPeerFault(raw: Record<string, unknown>): void {
+    if (this.disposed) return;
+    if (this.phase !== "offering" && this.phase !== "sending") return;
+    if (typeof raw.episodeId === "string" && raw.episodeId !== this.episodeId) return;
+    const reason = typeof raw.reason === "string" ? raw.reason : "peer fault";
+    this.clearOfferTimer();
+    this.activeSlot = null;
+    this.phase = "fault";
+    this.cb.onPhase("fault", reason);
+  }
+
+  private onDone(raw: Record<string, unknown>): void {
+    if (this.disposed) return;
+    if (this.phase !== "sending") return;
+    if (typeof raw.episodeId === "string" && raw.episodeId !== this.episodeId) return;
+    this.clearOfferTimer();
+    this.activeSlot = null;
+    this.phase = "done";
     this.cb.onPhase("done");
   }
 }
