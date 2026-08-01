@@ -11,6 +11,7 @@ import { makeRunner } from "../scripts/darkroom/runner.mjs";
 import { decodePcm, decodeArgs } from "../scripts/darkroom/decode.mjs";
 import { reassemble, remuxArgs } from "../scripts/darkroom/concat.mjs";
 import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment } from "../scripts/darkroom/drift.mjs";
+import { SAMPLE_RATE } from "../scripts/darkroom/tone.mjs";
 
 let tmpRoot: string;
 
@@ -33,12 +34,46 @@ describe("drift.mjs", () => {
     expect(driftRatio(local, remote)).toBeCloseTo(6.0 / 5.9988, 9);
   });
 
-  it("remoteAudioFilter(1.0002) === 'asetrate=48009.600,aresample=48000'", () => {
-    expect(remoteAudioFilter(1.0002)).toBe("asetrate=48009.600,aresample=48000");
+  // D23 (Task 6 review, CRITICAL 2): the plan/brief's pinned literal
+  // "asetrate=48009.600" (SAMPLE_RATE*ratio) was a plan-text defect — it
+  // compresses an already-short remote track further instead of stretching
+  // it to match local, doubling the drift error. The corrected form divides
+  // by ratio: 48000/1.0002 = 47990.40192... -> "47990.402".
+  it("remoteAudioFilter(1.0002) === 'asetrate=47990.402,aresample=48000' (D23: divide by ratio)", () => {
+    expect(remoteAudioFilter(1.0002)).toBe("asetrate=47990.402,aresample=48000");
   });
 
-  it("remoteVideoSetpts(0.999800) === 'setpts=PTS*0.999800000'", () => {
-    expect(remoteVideoSetpts(0.9998)).toBe("setpts=PTS*0.999800000");
+  // Uses the SAME ratio as the remoteAudioFilter test above (1.0002), not
+  // its reciprocal (0.9998) — the original test fed remoteVideoSetpts the
+  // reciprocal of what remoteAudioFilter got, which is exactly how the
+  // CRITICAL 2 direction bug went unnoticed (two formulas each "looked"
+  // internally consistent while silently correcting in opposite real-world
+  // directions). See the direction-pinning test below for the cross-check.
+  it("remoteVideoSetpts(1.0002) === 'setpts=PTS*1.000200000'", () => {
+    expect(remoteVideoSetpts(1.0002)).toBe("setpts=PTS*1.000200000");
+  });
+
+  it("D23 direction pin: remoteAudioFilter and remoteVideoSetpts, given the SAME ratio, correct in the SAME direction — corrected spans converge on local's", () => {
+    const localSpanS = 6.0;
+    const remoteSpanS = 5.9988;
+    const ratio = driftRatio({ start: 0, end: localSpanS }, { start: 0, end: remoteSpanS });
+
+    // asetrate=SAMPLE_RATE/ratio reinterprets N samples at a NEW rate of
+    // SAMPLE_RATE/ratio, giving a new duration of N/(SAMPLE_RATE/ratio) =
+    // originalDuration * ratio.
+    expect(remoteAudioFilter(ratio)).toBe(`asetrate=${(SAMPLE_RATE / ratio).toFixed(3)},aresample=${SAMPLE_RATE}`);
+    const correctedAudioDurationS = remoteSpanS * ratio;
+    expect(correctedAudioDurationS).toBeCloseTo(localSpanS, 6);
+
+    // setpts=PTS*ratio scales every presentation timestamp by ratio, i.e.
+    // the SAME time-stretch factor — video and audio must correct in the
+    // same direction or lip-sync drifts further apart across the episode
+    // instead of converging.
+    expect(remoteVideoSetpts(ratio)).toBe(`setpts=PTS*${ratio.toFixed(9)}`);
+    const correctedVideoDurationS = remoteSpanS * ratio;
+    expect(correctedVideoDurationS).toBeCloseTo(localSpanS, 6);
+
+    expect(correctedAudioDurationS).toBeCloseTo(correctedVideoDurationS, 9);
   });
 
   it("alignment: remote mark earlier by 480 samples → {delayMs: 10, who:'remote'}", () => {

@@ -14,10 +14,12 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import { compositeArgs } from "../scripts/darkroom/composite.mjs";
+import { DarkroomError } from "../scripts/darkroom/errors.mjs";
 import { SAMPLE_RATE, synthesizeMark, findMarks } from "../scripts/darkroom/tone.mjs";
 import { driftRatio, alignment } from "../scripts/darkroom/drift.mjs";
 import { developEpisode } from "../scripts/darkroom/pipeline.mjs";
-import { pollOnce, isDeveloped, developedMp4Path, parseArgs } from "../scripts/darkroom/index.mjs";
+import { pollOnce, isDeveloped, developedMarkerPath, parseArgs } from "../scripts/darkroom/index.mjs";
+import { scanVault } from "../scripts/darkroom/vault.mjs";
 
 const LAYOUT = {
   left: { x: 86, y: 180, w: 820, h: 615 },
@@ -399,7 +401,10 @@ describe("pipeline.mjs — developEpisode", () => {
     const expectedLocalMarks = findMarks(localPcm);
     const expectedRemoteMarks = findMarks(remotePcm);
     const expectedRatio = driftRatio(expectedLocalMarks, expectedRemoteMarks);
-    const expectedRemoteStartCorrected = expectedRemoteMarks.start / expectedRatio;
+    // D23: MULTIPLY by ratio, matching remoteAudioFilter's corrected
+    // timeline (see drift.mjs's doc comment / pipeline.mjs's own comment at
+    // this same computation).
+    const expectedRemoteStartCorrected = expectedRemoteMarks.start * expectedRatio;
     const expectedAlignment = alignment(expectedLocalMarks.start, expectedRemoteStartCorrected);
 
     const { renderBackdrop, calls: backdropCalls } = makeFakeRenderBackdrop();
@@ -466,6 +471,10 @@ describe("pipeline.mjs — developEpisode", () => {
     // copied).
     expect(mp4ExistedBeforeComposite).toBe(false);
     expect(fs.existsSync(workMp4)).toBe(false);
+
+    // --- IMPORTANT 4: work/ (concat temps, backdrop.png) is gone entirely
+    // on success, not just the mp4 that got renamed out of it.
+    expect(fs.existsSync(path.join(episodesRoot, "work"))).toBe(false);
 
     // --- argv sequence ---------------------------------------------------
     const calls = runnerWithHook.calls;
@@ -576,7 +585,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const episodesRoot = path.join(tmpRoot, "episodes", takeId);
     expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "episode.mp4"))).toBe(false);
-    expect(fs.existsSync(path.join(episodesRoot, "work", "episode.mp4"))).toBe(false);
+    expect(fs.existsSync(path.join(episodesRoot, "work"))).toBe(false); // IMPORTANT 4: gone on success too
     expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "NIGHTINGALE.m4a"))).toBe(true);
     expect(fakeRunner.calls.some((c) => c.includes("-loop"))).toBe(false); // no compositeArgs call
@@ -608,6 +617,73 @@ describe("pipeline.mjs — developEpisode", () => {
     expect(fakeRunner.calls.length).toBe(0);
     expect(fs.existsSync(path.join(tmpRoot, "episodes", takeId))).toBe(false);
   });
+
+  it("D22: manifest.episodeId not matching its own take dir name → manifest-invalid refusal (kills the infinite-re-develop-under-a-new-costume risk)", async () => {
+    const takeId = "take-20260101-0000-1234";
+    const { manifestPath } = await buildValidTake(takeId, { video: false });
+
+    // Overwrite the manifest so episodeId disagrees with the dir it lives
+    // in. Without this refusal, developEpisode would happily write products
+    // under episodes/<wrong-id>/ while the watcher keeps checking
+    // episodes/<takeId>/ for the marker — an infinite re-develop loop.
+    const manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+    manifest.episodeId = "take-20260101-0000-9999";
+    await fsp.writeFile(manifestPath, JSON.stringify(manifest));
+
+    const fakeRunner = makeFakeRunner();
+    const deps = {
+      runner: fakeRunner,
+      renderBackdrop: NEVER_CALLED,
+      decodePcm: NEVER_CALLED,
+      now: () => "2026-01-01T00:00:00.000Z",
+    };
+
+    await expect(developEpisode(deps, manifestPath, { ownCodename: "CARDINAL" })).rejects.toMatchObject({
+      code: "manifest-invalid",
+    });
+
+    expect(fakeRunner.calls.length).toBe(0);
+    expect(fs.existsSync(path.join(tmpRoot, "episodes", "take-20260101-0000-9999"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpRoot, "episodes", takeId))).toBe(false);
+  });
+
+  it("IMPORTANT 4: a mid-pipeline ffmpeg failure still cleans up work/ (finally), leaving no develop.json/mp4 marker but real re-runnable partial products", async () => {
+    const takeId = "take-20260101-0000-fa11";
+    const { manifestPath } = await buildValidTake(takeId, { video: false, receivedFrom: "NIGHTINGALE" });
+
+    const localPcm = buildAudioTrack(8, [1.0, 6.5]);
+    const remotePcm = buildAudioTrack(8, [1.0, 6.4988]);
+
+    // Fail on the mix's measure pass (mid-pipeline — well after raw/ and
+    // stems/ have real content, before any receipt or mp4 exists).
+    const fakeRunner = makeFakeRunner({
+      onRun: (args) => {
+        if (args[args.length - 1] === "-" && args.some((a) => typeof a === "string" && a.includes("amix=inputs=2:normalize=0"))) {
+          throw new DarkroomError("ffmpeg-failed", "simulated mix measure failure");
+        }
+      },
+    });
+    const deps = {
+      runner: fakeRunner,
+      renderBackdrop: NEVER_CALLED,
+      decodePcm: makeFakeDecodePcm(localPcm, remotePcm),
+      now: () => "2026-01-01T00:00:00.000Z",
+    };
+
+    await expect(developEpisode(deps, manifestPath, { ownCodename: "CARDINAL" })).rejects.toMatchObject({
+      code: "ffmpeg-failed",
+    });
+
+    const episodesRoot = path.join(tmpRoot, "episodes", takeId);
+    // work/ (concat temporaries, any backdrop.png) is gone even on failure.
+    expect(fs.existsSync(path.join(episodesRoot, "work"))).toBe(false);
+    // No marker, no half-written episode.m4a — the mix apply pass never ran.
+    expect(fs.existsSync(path.join(episodesRoot, "develop.json"))).toBe(false);
+    expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(false);
+    // But the real, already-completed upstream work survives, re-runnable:
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
+  }, 20000);
 });
 
 describe("index.mjs — CLI arg parsing", () => {
@@ -662,35 +738,39 @@ describe("index.mjs — pollOnce watcher pass", () => {
     await fsp.rm(tmpRoot, { recursive: true, force: true });
   });
 
-  it("watcher skips takes with episode.mp4 present; --develop reruns them (direct call bypasses the marker)", async () => {
+  function writeMinimalManifest(takeDir: string, takeId: string): Promise<void> {
+    return fsp.writeFile(
+      path.join(takeDir, "episode.json"),
+      JSON.stringify({
+        version: 1,
+        episodeId: takeId,
+        receivedFrom: null,
+        completedAt: "2026-01-01T00:00:00.000Z",
+        local: null,
+        remote: { audio: [], video: [] },
+      }),
+    );
+  }
+
+  it("watcher skips takes with develop.json present (D22); --develop reruns them (direct call bypasses the marker)", async () => {
     const takeIdA = "take-20260101-0000-aaaa"; // already developed
     const takeIdB = "take-20260101-0000-bbbb"; // needs developing
 
     for (const takeId of [takeIdA, takeIdB]) {
       const takeDir = path.join(tmpRoot, takeId);
       await fsp.mkdir(takeDir, { recursive: true });
-      await fsp.writeFile(
-        path.join(takeDir, "episode.json"),
-        JSON.stringify({
-          version: 1,
-          episodeId: takeId,
-          receivedFrom: null,
-          completedAt: "2026-01-01T00:00:00.000Z",
-          local: null,
-          remote: { audio: [], video: [] },
-        }),
-      );
+      await writeMinimalManifest(takeDir, takeId);
     }
-    // Pre-existing developed marker for A (D11: episode.mp4 present == developed).
-    await fsp.mkdir(path.dirname(developedMp4Path(tmpRoot, takeIdA)), { recursive: true });
-    await fsp.writeFile(developedMp4Path(tmpRoot, takeIdA), "stub");
+    // Pre-existing developed marker for A (D22: develop.json present == developed).
+    await fsp.mkdir(path.dirname(developedMarkerPath(tmpRoot, takeIdA)), { recursive: true });
+    await fsp.writeFile(developedMarkerPath(tmpRoot, takeIdA), "{}");
 
     const develCalls: string[] = [];
     const fakeDevelop = async (_deps: unknown, manifestPath: string) => {
       develCalls.push(manifestPath);
     };
 
-    const results = await pollOnce(fakeDevelop, {}, tmpRoot, {}, { error: () => {} });
+    const results = await pollOnce({ developEpisode: fakeDevelop, scanVault }, {}, tmpRoot, {}, { error: () => {} });
 
     expect(results).toEqual(
       expect.arrayContaining([
@@ -712,21 +792,11 @@ describe("index.mjs — pollOnce watcher pass", () => {
     expect(await isDeveloped(tmpRoot, takeIdA)).toBe(true);
   });
 
-  it("a refusal is logged loudly and does not halt the pass — sources untouched, retried next call", async () => {
+  it("a refusal is logged loudly (single code prefix, no doubling — IMPORTANT 5) and does not halt the pass — sources untouched, retried next call", async () => {
     const takeId = "take-20260101-0000-cccc";
     const takeDir = path.join(tmpRoot, takeId);
     await fsp.mkdir(takeDir, { recursive: true });
-    await fsp.writeFile(
-      path.join(takeDir, "episode.json"),
-      JSON.stringify({
-        version: 1,
-        episodeId: takeId,
-        receivedFrom: null,
-        completedAt: "2026-01-01T00:00:00.000Z",
-        local: null,
-        remote: { audio: [], video: [] },
-      }),
-    );
+    await writeMinimalManifest(takeDir, takeId);
 
     const err = Object.assign(new Error("part-gap: boom"), { code: "part-gap", name: "DarkroomError" });
     Object.setPrototypeOf(err, (await import("../scripts/darkroom/errors.mjs")).DarkroomError.prototype);
@@ -735,14 +805,67 @@ describe("index.mjs — pollOnce watcher pass", () => {
     };
     const logged: string[] = [];
 
-    const results = await pollOnce(fakeDevelop, {}, tmpRoot, {}, { error: (msg: string) => logged.push(msg) });
+    const results = await pollOnce(
+      { developEpisode: fakeDevelop, scanVault },
+      {},
+      tmpRoot,
+      {},
+      { error: (msg: string) => logged.push(msg) },
+    );
 
     expect(results).toEqual([{ takeId, status: "refused", code: "part-gap" }]);
     expect(logged.length).toBe(1);
-    expect(logged[0]).toContain("part-gap");
+    // Exactly one "part-gap:" prefix — err.message ("part-gap: boom") is
+    // used as-is, not prefixed with the code a second time.
+    expect(logged[0]).toBe(`darkroom: part-gap: boom (take ${takeId} — sources untouched, will retry next poll)`);
+    expect(logged[0].match(/part-gap/g)?.length).toBe(1);
 
     // Re-polling retries it (no in-memory state remembers the refusal).
-    const secondPass = await pollOnce(fakeDevelop, {}, tmpRoot, {}, { error: (msg: string) => logged.push(msg) });
+    const secondPass = await pollOnce(
+      { developEpisode: fakeDevelop, scanVault },
+      {},
+      tmpRoot,
+      {},
+      { error: (msg: string) => logged.push(msg) },
+    );
     expect(secondPass).toEqual([{ takeId, status: "refused", code: "part-gap" }]);
+  });
+
+  it("CRITICAL 1: a scanVault failure is logged loudly and swallowed — the watcher keeps polling instead of throwing an unhandled rejection", async () => {
+    let calls = 0;
+    const flakyScanVault = async (dir: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error("EACCES: permission denied, scandir '" + dir + "'");
+      return [];
+    };
+    const logged: string[] = [];
+    const fakeDevelop = async () => {
+      throw new Error("should not be called — nothing to develop in this test");
+    };
+
+    const firstPass = await pollOnce(
+      { developEpisode: fakeDevelop, scanVault: flakyScanVault },
+      {},
+      tmpRoot,
+      {},
+      { error: (msg: string) => logged.push(msg) },
+    );
+    expect(firstPass).toEqual([]);
+    expect(logged.length).toBe(1);
+    expect(logged[0]).toContain("darkroom: scan-failed:");
+    expect(logged[0]).toContain("EACCES");
+
+    // The NEXT call (what the poll loop does every interval) is entirely
+    // unaffected — no crash, no leftover state from the failed scan.
+    const secondPass = await pollOnce(
+      { developEpisode: fakeDevelop, scanVault: flakyScanVault },
+      {},
+      tmpRoot,
+      {},
+      { error: (msg: string) => logged.push(msg) },
+    );
+    expect(secondPass).toEqual([]);
+    expect(calls).toBe(2);
+    expect(logged.length).toBe(1); // no new log entries — the second call succeeded
   });
 });
