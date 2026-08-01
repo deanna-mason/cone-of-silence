@@ -62,6 +62,9 @@ export class CallSession {
           onConnectionState: ev.onConnectionState,
           onChannelOpen: ev.onChannelOpen,
           onMessage: ev.onMessage,
+          onChannelState: ev.onChannelState,
+          onXferMessage: ev.onXferMessage,
+          onXferDrain: ev.onXferDrain,
         }),
       {
         onRoster: (roster) => {
@@ -72,6 +75,11 @@ export class CallSession {
         onChannelOpen: () => this.events.emit("channelOpen"),
         onChannelClosed: () => this.events.emit("channelClosed"),
         onMessage: (peerId, text) => this.events.emit("message", peerId, text),
+        // Compiler-forced by MeshCallbacks' new required members — session's
+        // own event surface for these lands in Task 3, not here.
+        onChannelState: () => {},
+        onXferMessage: () => {},
+        onXferDrain: () => {},
       },
     );
     const ev = this.signaling.events;

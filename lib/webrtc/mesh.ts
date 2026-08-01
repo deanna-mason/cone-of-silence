@@ -5,6 +5,11 @@
 // is polite toward every peer already present; join order arrives as
 // joined.peers (we are the newcomer) vs peer-joined (they are).
 
+// Re-exported so React-free consumers of the Mesh (and its tests) need not
+// import peer.ts directly for these shared vocabulary types (Phase 5B).
+export type { ChannelName, ChannelLifecycle } from "./peer";
+import type { ChannelName, ChannelLifecycle } from "./peer";
+
 export interface RemotePeer {
   peerId: string;
   stream: MediaStream | null;
@@ -18,6 +23,8 @@ export interface MeshLink {
   restartIce(): void;
   close(): void;
   send(text: string): boolean;
+  sendXfer(data: string | ArrayBuffer): boolean;
+  xferBufferedAmount(): number;
 }
 
 /** Per-link callbacks the factory must wire into the real PeerLink. */
@@ -26,6 +33,9 @@ export interface LinkEvents {
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onChannelOpen: () => void;
   onMessage: (text: string) => void;
+  onChannelState: (channel: ChannelName, state: ChannelLifecycle, detail?: string) => void;
+  onXferMessage: (data: string | ArrayBuffer) => void;
+  onXferDrain: () => void;
 }
 
 export type LinkFactory = (peerId: string, polite: boolean, events: LinkEvents) => MeshLink;
@@ -35,6 +45,9 @@ export interface MeshCallbacks {
   onChannelOpen: () => void; // open-channel count went 0 → 1
   onChannelClosed: () => void; // open-channel count returned to 0
   onMessage: (peerId: string, text: string) => void;
+  onChannelState: (peerId: string, channel: ChannelName, state: ChannelLifecycle, detail?: string) => void;
+  onXferMessage: (peerId: string, data: string | ArrayBuffer) => void;
+  onXferDrain: (peerId: string) => void;
 }
 
 /**
@@ -89,6 +102,9 @@ interface Entry {
   stream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
   channelOpen: boolean;
+  /** Xfer (cos-xfer) channel open state — tracked separately from cos:
+   *  channelOpen keeps meaning "cos open" for the aggregate, unchanged. */
+  xferOpen: boolean;
   /** Pending failed/disconnected escalation, cancelled on recovery/removal. */
   recoveryTimer: ReturnType<typeof setTimeout> | null;
   /** What recoveryTimer is currently waiting on — null when none is armed.
@@ -162,7 +178,19 @@ export class Mesh {
     this.entries.delete(peerId);
     this.cancelPending(entry);
     entry.link?.close();
-    if (entry.channelOpen && this.openChannels() === 0) this.cb.onChannelClosed();
+    // Synthesized closes: the mesh killed this link, so the mesh reports the
+    // deaths — a straggling real onclose from the discarded link is eaten by
+    // the identity guard in construct()'s event wiring.
+    const hadChannelOpen = entry.channelOpen;
+    if (entry.channelOpen) {
+      entry.channelOpen = false;
+      this.cb.onChannelState(peerId, "cos", "closed");
+    }
+    if (entry.xferOpen) {
+      entry.xferOpen = false;
+      this.cb.onChannelState(peerId, "xfer", "closed");
+    }
+    if (hadChannelOpen && this.openChannels() === 0) this.cb.onChannelClosed();
     this.emitRoster();
   }
 
@@ -210,13 +238,33 @@ export class Mesh {
     for (const entry of this.entries.values()) entry.link?.send(text);
   }
 
+  /** Send over the xfer channel to one peer. False if unknown, linkless, or channel-closed. */
+  sendXferTo(peerId: string, data: string | ArrayBuffer): boolean {
+    return this.entries.get(peerId)?.link?.sendXfer(data) ?? false;
+  }
+
+  /** -1 when the peer is unknown or its link isn't built yet. */
+  xferBufferedAmount(peerId: string): number {
+    const link = this.entries.get(peerId)?.link;
+    return link ? link.xferBufferedAmount() : -1;
+  }
+
   closeAll(): void {
     const hadOpen = this.openChannels() > 0;
-    const entries = [...this.entries.values()];
+    const entries = [...this.entries];
     this.entries.clear();
-    for (const e of entries) {
+    for (const [peerId, e] of entries) {
       this.cancelPending(e);
       e.link?.close();
+      // Synthesized closes — see remove()'s comment for the rationale.
+      if (e.channelOpen) {
+        e.channelOpen = false;
+        this.cb.onChannelState(peerId, "cos", "closed");
+      }
+      if (e.xferOpen) {
+        e.xferOpen = false;
+        this.cb.onChannelState(peerId, "xfer", "closed");
+      }
     }
     if (hadOpen) this.cb.onChannelClosed();
     this.emitRoster();
@@ -233,6 +281,7 @@ export class Mesh {
       stream: null,
       connectionState: "new",
       channelOpen: false,
+      xferOpen: false,
       recoveryTimer: null,
       recoveryPhase: null,
       rebuilds: 0,
@@ -332,6 +381,41 @@ export class Mesh {
           // (rebuilt-away) link can still fire a trailing message.
           if (this.entries.get(peerId) !== entry || entry.link !== link) return;
           this.cb.onMessage(peerId, text);
+        },
+        onChannelState: (channel, state, detail) => {
+          // Same identity guard as every other link event — a straggling
+          // real close/error from a link the mesh already discarded (rebuild,
+          // remove, closeAll) must not touch the entry now owned by a
+          // replacement link, or double-fire the aggregate below.
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
+          if (state === "open") {
+            if (channel === "cos") {
+              const wasOpen = this.openChannels() > 0;
+              entry.channelOpen = true;
+              if (!wasOpen) this.cb.onChannelOpen();
+            } else {
+              entry.xferOpen = true;
+            }
+          } else if (state === "closed") {
+            if (channel === "cos") {
+              const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
+              entry.channelOpen = false;
+              if (wasOnlyOpen) this.cb.onChannelClosed();
+            } else {
+              entry.xferOpen = false;
+            }
+          }
+          // "error" forwards without flipping the open flag — an error is
+          // often followed by a close, and the close flips it then.
+          this.cb.onChannelState(peerId, channel, state, detail);
+        },
+        onXferMessage: (data) => {
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
+          this.cb.onXferMessage(peerId, data);
+        },
+        onXferDrain: () => {
+          if (this.entries.get(peerId) !== entry || entry.link !== link) return;
+          this.cb.onXferDrain(peerId);
         },
       });
     } catch (err) {
@@ -473,7 +557,14 @@ export class Mesh {
     // "failed"/"disconnected" pass through as honest news.
     entry.recovering = true;
     const wasOnlyOpen = entry.channelOpen && this.openChannels() === 1;
-    entry.channelOpen = false; // old channel died with the old pc
+    if (entry.channelOpen) {
+      entry.channelOpen = false; // old channel died with the old pc
+      this.cb.onChannelState(peerId, "cos", "closed"); // synthesized — see remove()
+    }
+    if (entry.xferOpen) {
+      entry.xferOpen = false;
+      this.cb.onChannelState(peerId, "xfer", "closed");
+    }
     if (wasOnlyOpen) this.cb.onChannelClosed();
     this.emitRoster();
     // Routed through the same stagger cursor as initial bring-up (never

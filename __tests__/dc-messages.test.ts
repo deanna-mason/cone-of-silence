@@ -7,6 +7,8 @@ class FakeLink implements MeshLink {
   restartIce = vi.fn();
   close = vi.fn();
   send = vi.fn((_text: string) => true);
+  sendXfer = vi.fn(() => true);
+  xferBufferedAmount = vi.fn(() => 0);
 }
 
 function harness() {
@@ -23,6 +25,9 @@ function harness() {
       onChannelOpen: () => {},
       onChannelClosed: () => {},
       onMessage: (peerId, text) => messages.push([peerId, text]),
+      onChannelState: () => {},
+      onXferMessage: () => {},
+      onXferDrain: () => {},
     },
   );
   return { mesh, made, messages };

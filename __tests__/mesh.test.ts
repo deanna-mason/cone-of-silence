@@ -17,6 +17,8 @@ class FakeLink implements MeshLink {
   close = vi.fn();
   restartIce = vi.fn();
   send = vi.fn(() => true);
+  sendXfer = vi.fn(() => true);
+  xferBufferedAmount = vi.fn(() => 0);
 }
 
 interface Made {
@@ -34,6 +36,9 @@ function harness() {
     onChannelOpen: vi.fn(),
     onChannelClosed: vi.fn(),
     onMessage: vi.fn(),
+    onChannelState: vi.fn(),
+    onXferMessage: vi.fn(),
+    onXferDrain: vi.fn(),
   };
   const mesh = new Mesh((peerId, polite, events) => {
     const link = new FakeLink();
@@ -58,6 +63,8 @@ class DeferredLink implements MeshLink {
   close = vi.fn();
   restartIce = vi.fn();
   send = vi.fn(() => true);
+  sendXfer = vi.fn(() => true);
+  xferBufferedAmount = vi.fn(() => 0);
   /** Settle the oldest in-flight handleSignal. */
   release(reject = false) {
     this.settlers.shift()?.(reject);
@@ -193,8 +200,18 @@ describe("Mesh pending-signal buffering", () => {
         close: vi.fn(),
         restartIce: vi.fn(),
         send: vi.fn(() => true),
+        sendXfer: vi.fn(() => true),
+        xferBufferedAmount: vi.fn(() => 0),
       }),
-      { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn(), onMessage: vi.fn() },
+      {
+        onRoster: vi.fn(),
+        onChannelOpen: vi.fn(),
+        onChannelClosed: vi.fn(),
+        onMessage: vi.fn(),
+        onChannelState: vi.fn(),
+        onXferMessage: vi.fn(),
+        onXferDrain: vi.fn(),
+      },
     );
     rejecting.addExistingPeers(["p1", "p2"]);
     rejecting.relay("p2", "straggler");
@@ -216,7 +233,15 @@ describe("Mesh pending-signal buffering", () => {
 describe("Mesh signal serialization", () => {
   function deferredHarness() {
     const links: DeferredLink[] = [];
-    const cb = { onRoster: vi.fn(), onChannelOpen: vi.fn(), onChannelClosed: vi.fn(), onMessage: vi.fn() };
+    const cb = {
+      onRoster: vi.fn(),
+      onChannelOpen: vi.fn(),
+      onChannelClosed: vi.fn(),
+      onMessage: vi.fn(),
+      onChannelState: vi.fn(),
+      onXferMessage: vi.fn(),
+      onXferDrain: vi.fn(),
+    };
     const mesh = new Mesh(() => {
       const link = new DeferredLink();
       links.push(link);
@@ -305,6 +330,9 @@ describe("Mesh construction failure", () => {
       onChannelOpen: vi.fn(),
       onChannelClosed: vi.fn(),
       onMessage: vi.fn(),
+      onChannelState: vi.fn(),
+      onXferMessage: vi.fn(),
+      onXferDrain: vi.fn(),
     };
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const mesh = new Mesh(() => {
@@ -637,6 +665,9 @@ describe("Mesh link recovery — fix wave (fallback survives intermediate states
       onChannelOpen: vi.fn(),
       onChannelClosed: vi.fn(),
       onMessage: vi.fn(),
+      onChannelState: vi.fn(),
+      onXferMessage: vi.fn(),
+      onXferDrain: vi.fn(),
     };
     const madeLocal: Array<{ events: LinkEvents; link: FakeLink }> = [];
     let attempts = 0;
