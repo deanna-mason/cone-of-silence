@@ -168,7 +168,14 @@ describe("JoinProof", () => {
     // messages interleave) — but the mac it computes is bound to A's OWN
     // peerId as responder, since A really is the one answering.
     a.handleMessage(JSON.stringify({ t: "prf/challenge", nonce: ownNonce }));
-    await flush();
+    // Finding 4: this used to be a single fixed `await flush()` (one
+    // macrotask tick) before asserting `sent` grew to 2. answerChallenge's
+    // mac is a REAL crypto.subtle.sign call, which does not always resolve
+    // within one tick under Node's genuine async crypto machinery (observed
+    // flaky: 3/5 runs) — the fix is to await the actual dispatched work
+    // settling (sent reaching length 2), not to guess a turn count, exactly
+    // like every phase-transition wait elsewhere in this file already does.
+    await waitFor(() => events.sent.length === 2);
     expect(events.sent).toHaveLength(2);
     const reflectedResponse = parseProofMsg(events.sent[1]!);
     expect(reflectedResponse?.t).toBe("prf/response");
@@ -309,14 +316,21 @@ describe("JoinProof", () => {
   });
 
   describe("parseProofMsg", () => {
+    // 22-char base64url — the real wire format (16 random bytes). "abc"/"def"
+    // used to round-trip here too, back when parseProofMsg didn't validate
+    // nonce shape at all; now that it does (finding 1a), a well-formed test
+    // fixture has to actually look like a wire nonce.
+    const VALID_NONCE = "AAAAAAAAAAAAAAAAAAAAAA";
+    const OTHER_VALID_NONCE = "BBBBBBBBBBBBBBBBBBBBBB";
+
     it("parses well-formed challenge and response messages", () => {
-      expect(parseProofMsg(JSON.stringify({ t: "prf/challenge", nonce: "abc" }))).toEqual({
+      expect(parseProofMsg(JSON.stringify({ t: "prf/challenge", nonce: VALID_NONCE }))).toEqual({
         t: "prf/challenge",
-        nonce: "abc",
+        nonce: VALID_NONCE,
       });
-      expect(parseProofMsg(JSON.stringify({ t: "prf/response", nonce: "abc", mac: "def" }))).toEqual({
+      expect(parseProofMsg(JSON.stringify({ t: "prf/response", nonce: OTHER_VALID_NONCE, mac: "def" }))).toEqual({
         t: "prf/response",
-        nonce: "abc",
+        nonce: OTHER_VALID_NONCE,
         mac: "def",
       });
     });
@@ -326,7 +340,237 @@ describe("JoinProof", () => {
       expect(parseProofMsg("null")).toBeNull();
       expect(parseProofMsg('"a string"')).toBeNull();
       expect(parseProofMsg(JSON.stringify({ t: "prf/unknown" }))).toBeNull();
-      expect(parseProofMsg(JSON.stringify({ nonce: "abc" }))).toBeNull(); // no t at all
+      expect(parseProofMsg(JSON.stringify({ nonce: VALID_NONCE }))).toBeNull(); // no t at all
+    });
+
+    // --- finding 1a: nonce format is itself pre-auth attack surface -------
+    it("rejects a nonce that doesn't match the 22-char base64url wire format (oversized/short/non-charset)", () => {
+      const oversized = "A".repeat(1_000_000); // the DoS-amplification shape from the reviewer's PoC
+      const short = "AAAAAAAAAAAAAAAAAAAAA"; // 21 chars
+      const long22Plus = "AAAAAAAAAAAAAAAAAAAAAAA"; // 23 chars
+      const badCharset = "!!!!!!!!!!!!!!!!!!!!!!"; // 22 chars, wrong charset
+      for (const nonce of [oversized, short, long22Plus, badCharset]) {
+        expect(parseProofMsg(JSON.stringify({ t: "prf/challenge", nonce }))).toBeNull();
+        expect(parseProofMsg(JSON.stringify({ t: "prf/response", nonce, mac: "whatever" }))).toBeNull();
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // finding 1: answerChallenge canonicalization bypass — RED-first regression
+  // ---------------------------------------------------------------------
+  describe("finding 1 — pre-auth signing oracle / canonicalization bypass", () => {
+    it("constructor rejects selfPeerId === remotePeerId (degenerate self-challenge)", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret);
+      const events = new BusEvents();
+      expect(() => new JoinProof({ proofKey, selfPeerId: "same-id", remotePeerId: "same-id", events })).toThrow();
+    });
+
+    it("canonicalization PoC: attacker peerId + crafted nonce must NOT let a victim compute a mac the victim's own verifier would accept", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret);
+      const victimId = "victim-honest-peer-id";
+      const W = "WWWWWWWW"; // attacker-chosen prefix the attacker folds into its own peerId
+      const atkId = W + victimId; // atkId = W ‖ victimId, exactly the PoC's construction
+
+      const victimEvents = new BusEvents();
+      const victim = new JoinProof({ proofKey, selfPeerId: victimId, remotePeerId: atkId, events: victimEvents });
+
+      victim.start();
+      const challengeMsg = parseProofMsg(victimEvents.sent[0]!);
+      expect(challengeMsg?.t).toBe("prf/challenge");
+      const realNonce = (challengeMsg as { nonce: string }).nonce; // this is victim's OWN outstanding-challenge nonce, N
+
+      // The attack: challenge the victim with nonce' = N ‖ W. If macInput
+      // were still a bare, unprefixed concatenation, the victim's answer —
+      // HMAC(nonce' ‖ victimId ‖ "resp") = HMAC(N ‖ W ‖ victimId ‖ "resp")
+      // — would be byte-identical to HMAC(N ‖ atkId ‖ "resp"), which is
+      // exactly what the victim's OWN verifyResponse expects as the answer
+      // to its real challenge N. The attacker would just have to relay the
+      // victim's own crafted-challenge response back as though it were
+      // atkId's answer — full bypass, no key knowledge needed.
+      const craftedNonce = realNonce + W;
+      const consumed = victim.handleMessage(JSON.stringify({ t: "prf/challenge", nonce: craftedNonce }));
+      await flush();
+
+      // Post-fix: craftedNonce is 22 + W.length chars — it fails the 22-char
+      // wire-format check in parseProofMsg outright, so handleMessage never
+      // even reaches answerChallenge. Nothing is forged: sent stays at 1
+      // (just the real challenge), and the (structurally impossible, now)
+      // reflected/forged response is never produced for the attacker to
+      // relay back.
+      expect(consumed).toBe(false);
+      expect(victimEvents.sent).toHaveLength(1);
+      expect(victim.phase).toBe<ProofPhase>("pending");
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // finding 3: the absorbing-state guards are correct today but were
+  // previously untested — a future refactor moving a `_phase` write across
+  // an `await` would have passed all prior tests. These pin the exact
+  // races the reviewer verified by inspection.
+  // ---------------------------------------------------------------------
+  describe("finding 3 — race guards", () => {
+    it("a bad response arriving after proven leaves phase proven, fires no onFailed", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret);
+      const { a, b, aEvents, bEvents } = await makePair(proofKey, proofKey);
+      a.start();
+      b.start();
+      await waitFor(() => a.phase === "proven" && b.phase === "proven");
+      void bEvents; // only needed to drive the handshake to completion
+
+      const provenBefore = aEvents.provenCount;
+      // Well-formed but bogus, arriving after A is already proven.
+      // verifyResponse's very first guard (`_phase !== "pending"`) fires
+      // before it ever touches the nonce or crypto, so this cannot move A
+      // off "proven" regardless of content.
+      a.handleMessage(JSON.stringify({ t: "prf/response", nonce: "AAAAAAAAAAAAAAAAAAAAAA", mac: "bogus" }));
+      await flush();
+
+      expect(a.phase).toBe<ProofPhase>("proven");
+      expect(aEvents.provenCount).toBe(provenBefore);
+      expect(aEvents.failedReasons).toEqual([]);
+    });
+
+    it("a timeout firing while a verification is in flight yields exactly one event, not two", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret);
+      const clock = new FakeClock();
+      const events = new BusEvents();
+      const a = new JoinProof({
+        proofKey,
+        selfPeerId: "peer-a",
+        remotePeerId: "peer-b",
+        events,
+        setTimeoutFn: clock.setTimeoutFn,
+        clearTimeoutFn: clock.clearTimeoutFn,
+      });
+      a.start();
+      const nonce = (parseProofMsg(events.sent[0]!) as { nonce: string }).nonce;
+
+      // A separate, real peer-b instance computes the genuine correct
+      // response to A's challenge (shared proofKey, as it would be
+      // room-wide) — captured on its own events object so the test
+      // controls exactly when it's delivered to `a`.
+      const bEvents = new BusEvents();
+      const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events: bEvents });
+      b.handleMessage(JSON.stringify({ t: "prf/challenge", nonce }));
+      await waitFor(() => bEvents.sent.length === 1);
+      const genuineResponse = bEvents.sent[0]!;
+
+      // Deliver the genuine response — this dispatches verifyResponse,
+      // which starts an in-flight crypto.subtle.sign call but has not yet
+      // resolved.
+      a.handleMessage(genuineResponse);
+      // Fire the timeout SYNCHRONOUSLY, before that sign call can resolve:
+      // FakeClock.fire() invokes the pending callback (fail("timeout"))
+      // immediately, in this same synchronous turn.
+      clock.fire();
+      expect(a.phase).toBe<ProofPhase>("failed");
+      expect(events.failedReasons).toEqual(["timeout"]);
+
+      // Let the in-flight verifyResponse's computeMac actually settle now.
+      // Its post-await guard (`this._phase !== "pending"`) must see
+      // "failed" and return without ever calling onProven.
+      await flush();
+      expect(a.phase).toBe<ProofPhase>("failed");
+      expect(events.provenCount).toBe(0);
+      expect(events.failedReasons).toEqual(["timeout"]);
+    });
+
+    it("a concurrent good and bad response settle exactly once (settle order may vary, event count may not)", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret);
+      const events = new BusEvents();
+      const a = new JoinProof({ proofKey, selfPeerId: "peer-a", remotePeerId: "peer-b", events });
+      a.start();
+      const nonce = (parseProofMsg(events.sent[0]!) as { nonce: string }).nonce;
+
+      const bEvents = new BusEvents();
+      const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events: bEvents });
+      b.handleMessage(JSON.stringify({ t: "prf/challenge", nonce }));
+      await waitFor(() => bEvents.sent.length === 1);
+      const genuineResponse = bEvents.sent[0]!;
+      const badResponse = JSON.stringify({ t: "prf/response", nonce, mac: "definitely-not-the-real-mac" });
+
+      // Dispatch both in the same synchronous turn: both verifyResponse
+      // calls start their own independent computeMac before either
+      // resolves — a genuine race, not a manufactured ordering.
+      a.handleMessage(badResponse);
+      a.handleMessage(genuineResponse);
+      await waitFor(() => a.phase !== "pending");
+      await flush(); // let the loser's computeMac drain too, whichever it is
+
+      // Whichever call settles first wins; the loser's post-await guard is
+      // a no-op either way (a bad mac can only fail to veto trust, never
+      // create it — see the comment in verifyResponse). The invariant is
+      // that EXACTLY one terminal event ever fires: never zero, never two.
+      const totalEvents = events.provenCount + events.failedReasons.length;
+      expect(totalEvents).toBe(1);
+      if (events.provenCount === 1) {
+        expect(a.phase).toBe<ProofPhase>("proven");
+      } else {
+        expect(a.phase).toBe<ProofPhase>("failed");
+        expect(events.failedReasons).toEqual(["bad-mac"]);
+      }
+    });
+
+    it("cross-peer splice: relaying a genuinely-signed response from a THIRD peer to A → bad-mac, never proven", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret); // shared room-wide proofKey, as it would be in practice
+      const aEvents = new BusEvents();
+      const a = new JoinProof({ proofKey, selfPeerId: "peer-a", remotePeerId: "peer-b", events: aEvents });
+      a.start();
+      const nonce = (parseProofMsg(aEvents.sent[0]!) as { nonce: string }).nonce;
+
+      // C is a real, honest THIRD peer that never claims to be B — it just
+      // happens to be fed a (relayed) challenge carrying A's own nonce, and
+      // answers it honestly as itself.
+      const cEvents = new BusEvents();
+      const c = new JoinProof({ proofKey, selfPeerId: "peer-c", remotePeerId: "peer-x", events: cEvents });
+      c.handleMessage(JSON.stringify({ t: "prf/challenge", nonce }));
+      await waitFor(() => cEvents.sent.length === 1);
+      const splicedResponse = cEvents.sent[0]!; // mac is bound to responderPeerId = "peer-c"
+
+      a.handleMessage(splicedResponse);
+      await waitFor(() => a.phase === "failed");
+
+      expect(aEvents.failedReasons).toEqual(["bad-mac"]);
+      expect(aEvents.provenCount).toBe(0);
+    });
+
+    it("start() called twice: no double-send, no double-arm of the timeout", async () => {
+      const { secret } = createRoomKeys();
+      const { proofKey } = await deriveRoomKeys(secret);
+      const events = new BusEvents();
+      const clock = new FakeClock();
+      const a = new JoinProof({
+        proofKey,
+        selfPeerId: "peer-a",
+        remotePeerId: "peer-b",
+        events,
+        setTimeoutFn: clock.setTimeoutFn,
+        clearTimeoutFn: clock.clearTimeoutFn,
+      });
+
+      a.start();
+      expect(events.sent).toHaveLength(1);
+      expect(clock.pendingCount()).toBe(1);
+      const firstNonce = (parseProofMsg(events.sent[0]!) as { nonce: string }).nonce;
+
+      a.start(); // second call — must be a complete no-op
+
+      expect(events.sent).toHaveLength(1);
+      expect(clock.pendingCount()).toBe(1);
+      // Re-issuing the challenge on the second call would invalidate the
+      // nonce an in-flight honest response is answering — confirm the
+      // ORIGINAL nonce (and therefore the original armed timer) is still
+      // the live one.
+      const stillFirstNonce = (parseProofMsg(events.sent[0]!) as { nonce: string }).nonce;
+      expect(stillFirstNonce).toBe(firstNonce);
     });
   });
 });

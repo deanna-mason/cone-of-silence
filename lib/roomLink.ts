@@ -2,6 +2,8 @@
 // Room identity: 128-bit random IDs/secrets, carried in the URL fragment
 // (#r=<id>&s=<secret>) so they never reach any server, stashed per-tab.
 
+import { base64url } from "./base64url";
+
 const ROOM_PATH = "/room";
 const STASH_KEY = "cos-room";
 const TOKEN_BYTES = 16; // 128 bits
@@ -10,12 +12,6 @@ export const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/; // base64url of 16 bytes, no padd
 export interface RoomKeys {
   roomId: string;
   secret: string;
-}
-
-function base64url(bytes: Uint8Array): string {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
 function randomToken(): string {

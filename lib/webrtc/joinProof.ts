@@ -14,7 +14,13 @@
 // ignored, same convention as lib/podcast/takeProtocol.ts:
 //   { t: "prf/challenge", nonce }       — 16 random bytes, base64url (22 chars)
 //   { t: "prf/response",  nonce, mac }  — echoes the challenge nonce;
-//     mac = base64url(HMAC(proofKey, utf8(nonce) ‖ utf8(responderPeerId) ‖ utf8("resp")))
+//     mac = base64url(HMAC(proofKey, len-prefixed(nonce) ‖ len-prefixed(responderPeerId) ‖ utf8("resp")))
+// `nonce` is validated against the exact wire format (22-char base64url) on
+// every inbound message, in BOTH directions — not just for freshness, but
+// because an unvalidated nonce is itself an attack surface (see macInput's
+// doc comment) and an unbounded one is a pre-auth amplification vector: this
+// side echoes the peer's own nonce back inside a real crypto.subtle.sign
+// call before either side is trusted.
 //
 // One instance per remote peer (mirrors every other per-peer protocol object
 // in this codebase). `phase` reflects ONLY whether THIS side's own challenge
@@ -24,9 +30,17 @@
 // timer fire, a replayed response, a duplicate bad mac) can move the phase
 // again.
 
+import { base64url } from "../base64url";
+import { TOKEN_RE } from "../roomLink";
+
 const DEFAULT_TIMEOUT_MS = 5000;
 const NONCE_BYTES = 16;
 const RESPONSE_LABEL = "resp";
+// Wire nonce format, shared with lib/roomLink.ts's room-secret token format:
+// exactly 22-char base64url (16 raw bytes, no padding). Any inbound `nonce`
+// that doesn't match this — wrong length, foreign charset, or (the pre-auth
+// oracle concern) attacker-inflated to megabytes — is malformed, full stop.
+const NONCE_RE = TOKEN_RE;
 
 export type ProofPhase = "pending" | "proven" | "failed";
 
@@ -49,25 +63,41 @@ export interface JoinProofDeps {
   clearTimeoutFn?: typeof clearTimeout;
 }
 
-function base64url(bytes: Uint8Array): string {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
 function randomNonce(): string {
   return base64url(crypto.getRandomValues(new Uint8Array(NONCE_BYTES)));
 }
 
-/** utf8(nonce) ‖ utf8(responderPeerId) ‖ utf8("resp") — the exact byte layout
- * D16 specifies. Concatenating length-prefix-free strings is safe here only
- * because every field is either a fixed-shape random nonce or an opaque
- * peerId neither side can choose to collide with the "resp" suffix in a way
- * that matters: this mac is a liveness/identity proof, not a parser, and
- * there is nothing downstream that re-splits these bytes. */
+/** Big-endian 4-byte length prefix for one field of a length-prefixed
+ * concatenation. 2^32 bytes is far beyond anything this module ever
+ * produces (nonce/peerId are both tiny), so this can never itself overflow
+ * or wrap. */
+function u32be(n: number): Uint8Array {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, n, false);
+  return out;
+}
+
+/** len(nonce) ‖ utf8(nonce) ‖ len(responderPeerId) ‖ utf8(responderPeerId) ‖
+ * utf8("resp") — every variable-length field carries its own byte count, so
+ * the concatenation has exactly one valid parse. That's the actual defense:
+ * WITHOUT length prefixes, a bare `utf8(nonce) ‖ utf8(responderPeerId)`
+ * concatenation is ambiguous — an attacker who controls both its own peerId
+ * and the nonce it sends in a challenge can choose a split point that reads
+ * back as a DIFFERENT, victim-accepted (nonce, peerId) pair (e.g. peerId =
+ * W ‖ victimId, nonce = N ‖ W collapses to the same bytes as nonce = N,
+ * peerId = W ‖ victimId). `nonce` is additionally fixed-length by
+ * `parseProofMsg`'s NONCE_RE check, which independently closes this
+ * specific shape of the attack — but this function does not get to assume
+ * that invariant, or any invariant about peerId shape (that lives in
+ * server/src/rooms/registry.ts today and could change under Task 5
+ * wiring), which is why the length prefix is here regardless. This is NOT
+ * about the "resp" suffix — a fixed trailing constant can never be
+ * confused with a variable-length field that precedes it. */
 function macInput(nonce: string, responderPeerId: string): Uint8Array<ArrayBuffer> {
   const enc = new TextEncoder();
-  const parts = [enc.encode(nonce), enc.encode(responderPeerId), enc.encode(RESPONSE_LABEL)];
+  const nonceBytes = enc.encode(nonce);
+  const idBytes = enc.encode(responderPeerId);
+  const parts = [u32be(nonceBytes.length), nonceBytes, u32be(idBytes.length), idBytes, enc.encode(RESPONSE_LABEL)];
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let offset = 0;
   for (const p of parts) {
@@ -85,7 +115,12 @@ async function computeMac(proofKey: CryptoKey, nonce: string, responderPeerId: s
 /** Parses one wire message. Returns null for unparseable JSON, a non-object,
  * an unrecognized/foreign `t`, or a recognized `t` with a malformed field —
  * every rejection path is silent, never throws, mirroring takeProtocol's
- * parseWireMsg. */
+ * parseWireMsg. `nonce` is checked against the exact wire format (NONCE_RE)
+ * in both message shapes: this is pre-auth input from a not-yet-trusted
+ * peer that this module will feed straight into a real HMAC computation
+ * (see answerChallenge), so an oversized or foreign-charset nonce is
+ * rejected here, before that ever happens, rather than merely failing to
+ * verify afterward. */
 export function parseProofMsg(text: string): ProofMsg | null {
   let msg: unknown;
   try {
@@ -97,13 +132,14 @@ export function parseProofMsg(text: string): ProofMsg | null {
   const t = (msg as { t?: unknown }).t;
   if (t === "prf/challenge") {
     const nonce = (msg as { nonce?: unknown }).nonce;
-    if (typeof nonce !== "string") return null;
+    if (typeof nonce !== "string" || !NONCE_RE.test(nonce)) return null;
     return { t: "prf/challenge", nonce };
   }
   if (t === "prf/response") {
     const nonce = (msg as { nonce?: unknown }).nonce;
     const mac = (msg as { mac?: unknown }).mac;
-    if (typeof nonce !== "string" || typeof mac !== "string") return null;
+    if (typeof nonce !== "string" || !NONCE_RE.test(nonce)) return null;
+    if (typeof mac !== "string") return null;
     return { t: "prf/response", nonce, mac };
   }
   return null;
@@ -129,6 +165,15 @@ export class JoinProof {
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: JoinProofDeps) {
+    // A self-challenge (own id used as both self and remote) makes
+    // reflection succeed by definition — the mac this side computes when
+    // answering its own challenge is, byte-for-byte, the mac its own
+    // verifier expects, with no attacker involvement at all. This can never
+    // be a legitimate wiring (Task 5 constructs one instance per REMOTE
+    // peer), so refuse to construct rather than silently proving nothing.
+    if (deps.selfPeerId === deps.remotePeerId) {
+      throw new Error("JoinProof: selfPeerId and remotePeerId must differ");
+    }
     this.proofKey = deps.proofKey;
     this.selfPeerId = deps.selfPeerId;
     this.remotePeerId = deps.remotePeerId;
@@ -181,7 +226,18 @@ export class JoinProof {
     // Mac binds THIS side as responder — see the module doc's reflection
     // defense: this is the field an attacker cannot choose or copy from
     // elsewhere without it becoming a different, unverifiable mac.
-    const mac = await computeMac(this.proofKey, nonce, this.selfPeerId);
+    let mac: string;
+    try {
+      mac = await computeMac(this.proofKey, nonce, this.selfPeerId);
+    } catch {
+      // House idiom (lib/podcast/transfer.ts's fault()): every inner await
+      // of a void-dispatched async method is caught and routed to a clean
+      // failure, never left to become an unhandled rejection. A
+      // subtle.sign rejection here (non-HMAC key, insecure context) means
+      // this side can't prove anything to the remote either way.
+      this.fail("bad-mac");
+      return;
+    }
     if (this.disposed) return;
     this.events.onSend(JSON.stringify({ t: "prf/response", nonce, mac }));
   }
@@ -189,10 +245,23 @@ export class JoinProof {
   private async verifyResponse(nonce: string, mac: string): Promise<void> {
     if (this._phase !== "pending") return; // terminal — nothing left to prove or fail
     if (this.ownChallengeNonce === null || nonce !== this.ownChallengeNonce) return; // not an answer to OUR outstanding challenge: stale, foreign, or replayed — silently ignored (a real answer, if one is ever coming, still can; otherwise the timeout fails us)
-    const expected = await computeMac(this.proofKey, nonce, this.remotePeerId);
+    let expected: string;
+    try {
+      expected = await computeMac(this.proofKey, nonce, this.remotePeerId);
+    } catch {
+      this.fail("bad-mac"); // same house idiom as answerChallenge above
+      return;
+    }
     // Re-check after the await: two verifyResponse calls can be in flight
-    // concurrently (e.g. a bad-mac replay racing the real answer), and only
-    // whichever the state machine settles on FIRST may act.
+    // concurrently (e.g. a bad-mac reflection racing the real answer, or a
+    // timeout firing mid-verification), and only whichever the state
+    // machine settles on FIRST may act — this guard is what makes the
+    // second one a no-op instead of a double-fire. The settle order between
+    // a concurrent good and bad response is genuinely nondeterministic
+    // (both are independent crypto.subtle.sign calls) but that's benign by
+    // direction: a bad mac can never CREATE trust, it can only fail to veto
+    // it, so whichever loses the race was never going to change the
+    // outcome once the winner has already fired.
     if (this.disposed || this._phase !== "pending") return;
     // Constant-time-ish comparison: both operands are base64url encodings of
     // fixed-length (32-byte HMAC-SHA-256) outputs, never attacker-chosen in

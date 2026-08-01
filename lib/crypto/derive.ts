@@ -8,6 +8,7 @@
 // the others.
 
 import { TOKEN_RE } from "../roomLink";
+import { base64url } from "../base64url";
 
 // Reports which check failed (length vs. charset) without ever touching the
 // secret's own characters.
@@ -23,12 +24,6 @@ export const HKDF_SALT = "cos-5d-v1";
 export const INFO_MEDIA = "cos/media";
 export const INFO_XFER = "cos/xfer";
 export const INFO_PROOF = "cos/proof";
-
-function encodeBase64Url(bytes: Uint8Array): string {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
 
 /** base64url (22 chars, no padding) → 16 raw bytes. Throws TypeError on any
  * length/charset deviation from the room-secret wire format, or on a
@@ -52,7 +47,7 @@ export function decodeSecret(secret: string): Uint8Array {
   // encoding, otherwise multiple distinct strings decode to the same bytes
   // (breaking the secret <-> encoding bijection every caller assumes).
   // Re-encoding and comparing is the simplest correct canonicality check.
-  if (encodeBase64Url(bytes) !== secret) {
+  if (base64url(bytes) !== secret) {
     throw new TypeError("decodeSecret: non-canonical base64url encoding (trailing bits must be zero)");
   }
   return bytes;
