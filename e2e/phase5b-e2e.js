@@ -138,10 +138,15 @@ function figcaption(page, text) {
   return page.locator("figcaption", { hasText: text });
 }
 
-/** A logged-in host: session seeded, AND the Vault picker stub
+/** A logged-in host: session seeded, the Vault picker stub
  *  (window.showDirectoryPicker -> an OPFS subdirectory) — same idiom as
- *  e2e/phase5a-e2e.js's newHostPage. No RTCPeerConnection debug proxy here;
- *  this scenario doesn't need pcDebug. */
+ *  e2e/phase5a-e2e.js's newHostPage — AND a narrow createDataChannel proxy
+ *  that captures every "cos-xfer" channel (lib/webrtc/peer.ts creates it as
+ *  a fixed-id negotiated channel, one per PeerLink) into
+ *  window.__xferChannels. That gives waitXferChannelOpen below a DIRECT,
+ *  provable "is the xfer channel actually open" signal — not the fuller
+ *  RTCPeerConnection proxy phase5a/phase2 use (pcDebug), which this
+ *  scenario doesn't otherwise need. */
 async function newHostPage(browser, codename) {
   const context = await browser.newContext({ permissions: ["camera", "microphone"] });
   await context.addInitScript(
@@ -163,6 +168,13 @@ async function newHostPage(browser, codename) {
           proto.requestPermission = async () => "granted";
         }
       }
+      window.__xferChannels = [];
+      const realCreateDataChannel = RTCPeerConnection.prototype.createDataChannel;
+      RTCPeerConnection.prototype.createDataChannel = function (label, opts) {
+        const channel = realCreateDataChannel.call(this, label, opts);
+        if (label === "cos-xfer") window.__xferChannels.push(channel);
+        return channel;
+      };
     },
     { codename, vaultDirName: VAULT_DIR_NAME },
   );
@@ -282,6 +294,24 @@ function waitXfer(page, value, timeoutMs) {
 
 async function xferDebug(page) {
   return page.evaluate(() => window.__cosCall && window.__cosCall.xfer);
+}
+
+/** True readyState on the MOST RECENTLY created "cos-xfer" channel
+ *  (window.__xferChannels, populated by newHostPage's createDataChannel
+ *  proxy) — a rebuild after the kill+respawn constructs a brand-new
+ *  RTCPeerConnection and channel, so "most recent" is "current". This is
+ *  the direct proof hooks/useEpisodeExchange.ts's `xferOpen` (and therefore
+ *  canSend/canResend) actually needs — not inferred from a timeout or from
+ *  the unrelated main "cos" channel's dcOpen. */
+function waitXferChannelOpen(page, timeoutMs) {
+  return page.waitForFunction(
+    () => {
+      const chans = window.__xferChannels || [];
+      const latest = chans[chans.length - 1];
+      return !!latest && latest.readyState === "open";
+    },
+    { timeout: timeoutMs },
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -575,8 +605,13 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     check(observedInFlight, "check 3: genuinely observed B mid-transfer (non-vacuous), with fewer than all parts committed");
     check(!manifestSeenWhileIncomplete, "check 3: episode.json did NOT exist at any point before every part was committed");
 
-    await waitXfer(pageA, "done", 10000);
-    check(true, "A and B both reach xfer-done for the real take");
+    // pollManifestDuringTransfer only proves B's OPFS state reached "every
+    // part committed + manifest present" — finishEpisode() (transfer.ts)
+    // fires the "done" onPhase callback strictly AFTER that disk write, so
+    // both mirrors still need their own explicit wait to actually verify
+    // "both reach xfer-done", not just infer it from B's disk state.
+    await Promise.all([waitXfer(pageA, "done", 10000), waitXfer(pageB, "done", 10000)]);
+    check(true, "check 2: A and B both reach xfer-done for the real take");
 
     const remote1 = await opfsRemoteEntries(pageB, takeId1);
     check(
@@ -681,11 +716,20 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     await waitRemoteVideosFlowing(pageB, 1, 30000);
     check(true, "check 6: server respawned — both pages recover the call, video flows again");
 
-    await new Promise((r) => setTimeout(r, 1500)); // let the xfer channel's own onopen settle post-rebuild
+    // Proof, not a guess: canResend (hooks/useEpisodeExchange.ts:413) is
+    // `senderPeerRef.current === singlePeerId && xferOpen` — a conjunction.
+    // Without first PROVING xferOpen is true, an absent Resume button could
+    // just as easily mean "the channel hasn't reopened yet", which would
+    // never exercise the stale-peerId guard this check exists to catch.
+    // waitXferChannelOpen reads the rebuilt "cos-xfer" channel's OWN
+    // readyState directly, so by the time it resolves xferOpen is
+    // definitely true — Resume being absent right after that can only be
+    // the peerId mismatch.
+    await waitXferChannelOpen(pageA, 15000);
     const resumeVisible = await pageA.getByRole("button", { name: "Resume Transmission" }).isVisible().catch(() => false);
     check(
       !resumeVisible,
-      "check 6 (deviation note 2): Resume Transmission correctly absent — the recovered peerId is fresh, not the parked sender's bound peer",
+      "check 6 (deviation note 2): Resume Transmission correctly absent while the xfer channel is provably open — the recovered peerId is fresh, not the parked sender's bound peer",
     );
 
     await pageA.getByRole("button", { name: "Stand Down" }).click();
