@@ -407,6 +407,90 @@ describe("JoinProof", () => {
   });
 
   // ---------------------------------------------------------------------
+  // re-review follow-up (Task 3 re-review, item 2): the canonicalization PoC
+  // above never actually reaches macInput — its crafted 30-char nonce dies at
+  // NONCE_RE in parseProofMsg first. That means the length-prefixed layout in
+  // macInput (the actual insurance against a future peerId-shape change in
+  // server/src/rooms/registry.ts) had no test that would break if someone
+  // reverted macInput to a bare, unprefixed concatenation. This pins the
+  // exact wire mac for one fixed (secret, nonce, responderPeerId) triple, so
+  // that layout is now locked byte-for-byte, same methodology as the pinned
+  // HKDF vectors in __tests__/crypto-derive.test.ts: driven only through the
+  // public API (answerChallenge's real crypto.subtle.sign call), compared
+  // against a value computed ONCE, independently, via:
+  //
+  //   node -e '
+  //   const { webcrypto } = require("crypto");
+  //   const subtle = webcrypto.subtle;
+  //   (async () => {
+  //     const ikm = new Uint8Array(16); // decodeSecret("AAAA...AAAA") -> 16 zero bytes
+  //     const hkdfKey = await subtle.importKey("raw", ikm, "HKDF", false, ["deriveKey", "deriveBits"]);
+  //     const salt = new TextEncoder().encode("cos-5d-v1");
+  //     const info = new TextEncoder().encode("cos/proof");
+  //     const proofKey = await subtle.deriveKey(
+  //       { name: "HKDF", hash: "SHA-256", salt, info },
+  //       hkdfKey, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"],
+  //     );
+  //     function u32be(n) {
+  //       const out = new Uint8Array(4);
+  //       new DataView(out.buffer).setUint32(0, n, false);
+  //       return out;
+  //     }
+  //     function base64url(bytes) {
+  //       return Buffer.from(bytes).toString("base64")
+  //         .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  //     }
+  //     const nonce = "B".repeat(22);
+  //     const responderPeerId = "peer-vector-fixed-id";
+  //     const enc = new TextEncoder();
+  //     const nonceBytes = enc.encode(nonce);
+  //     const idBytes = enc.encode(responderPeerId);
+  //     const label = enc.encode("resp");
+  //     const parts = [u32be(nonceBytes.length), nonceBytes, u32be(idBytes.length), idBytes, label];
+  //     const total = parts.reduce((n, p) => n + p.length, 0);
+  //     const macInput = new Uint8Array(total);
+  //     let offset = 0;
+  //     for (const p of parts) { macInput.set(p, offset); offset += p.length; }
+  //     const sig = await subtle.sign("HMAC", proofKey, macInput);
+  //     console.log(base64url(new Uint8Array(sig)));
+  //   })();
+  //   '
+  //
+  // Verified RED/GREEN by hand: temporarily reverting macInput to the old
+  // bare `enc(nonce) ++ enc(responderPeerId) ++ enc("resp")` concatenation
+  // made this test (and only this test) fail; restoring the length-prefixed
+  // version made it pass again, with the rest of the suite unaffected either
+  // way — see task-3-report.md for the transcript.
+  describe("pinned MAC vector — locks the length-prefixed macInput layout", () => {
+    it("fixed secret + fixed nonce + fixed responderPeerId → exact known mac", async () => {
+      const ZERO_SECRET = "AAAAAAAAAAAAAAAAAAAAAA"; // 22 chars -> 16 zero bytes, same fixture as crypto-derive.test.ts
+      const NONCE = "B".repeat(22); // fixed 22-char base64url wire nonce
+      const RESPONDER_ID = "peer-vector-fixed-id";
+      const EXPECTED_MAC = "okI1iW3LE3nMrauSYM4A9JnfOUYwIS1OCkD5XvA-g68";
+
+      const { proofKey } = await deriveRoomKeys(ZERO_SECRET);
+      const events = new BusEvents();
+      // RESPONDER_ID is this instance's OWN id: answerChallenge signs the
+      // mac over `selfPeerId` (the module's responder-id binding), so this
+      // is the side that must be `RESPONDER_ID`, challenged from some other,
+      // arbitrary remote.
+      const responder = new JoinProof({
+        proofKey,
+        selfPeerId: RESPONDER_ID,
+        remotePeerId: "peer-vector-other-id",
+        events,
+      });
+
+      responder.handleMessage(JSON.stringify({ t: "prf/challenge", nonce: NONCE }));
+      await waitFor(() => events.sent.length === 1);
+
+      const response = parseProofMsg(events.sent[0]!);
+      expect(response?.t).toBe("prf/response");
+      expect((response as { mac: string }).mac).toBe(EXPECTED_MAC);
+    });
+  });
+
+  // ---------------------------------------------------------------------
   // finding 3: the absorbing-state guards are correct today but were
   // previously untested — a future refactor moving a `_phase` write across
   // an `await` would have passed all prior tests. These pin the exact
@@ -567,10 +651,18 @@ describe("JoinProof", () => {
       expect(clock.pendingCount()).toBe(1);
       // Re-issuing the challenge on the second call would invalidate the
       // nonce an in-flight honest response is answering — confirm the
-      // ORIGINAL nonce (and therefore the original armed timer) is still
-      // the live one.
-      const stillFirstNonce = (parseProofMsg(events.sent[0]!) as { nonce: string }).nonce;
-      expect(stillFirstNonce).toBe(firstNonce);
+      // ORIGINAL nonce (and therefore the original armed timer) is still the
+      // live one by actually answering it: a genuine peer-b response keyed
+      // to firstNonce must still verify and reach "proven". If the second
+      // start() call had silently re-armed a different nonce, verifyResponse
+      // would reject this as stale/foreign and `a` would instead time out.
+      const bEvents = new BusEvents();
+      const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events: bEvents });
+      b.handleMessage(JSON.stringify({ t: "prf/challenge", nonce: firstNonce }));
+      await waitFor(() => bEvents.sent.length === 1);
+      a.handleMessage(bEvents.sent[0]!);
+      await waitFor(() => a.phase !== "pending");
+      expect(a.phase).toBe<ProofPhase>("proven");
     });
   });
 });

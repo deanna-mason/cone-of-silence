@@ -25,7 +25,12 @@
 // One instance per remote peer (mirrors every other per-peer protocol object
 // in this codebase). `phase` reflects ONLY whether THIS side's own challenge
 // was answered validly — answering the remote's challenge proves something
-// about US to THEM, not the reverse, so it never affects our own phase.
+// about US to THEM, not the reverse, so a VALID answer to the remote's
+// challenge never affects our own phase. The one exception is failure: if
+// answerChallenge's own computeMac call rejects (non-HMAC key, insecure
+// context — always an environmental condition, never attacker-controlled
+// input), that fails THIS side closed via the same fail("bad-mac") path
+// verifyResponse uses, exactly like any other crypto failure on this side.
 // `proven` and `failed` are both terminal: once reached, nothing (a stale
 // timer fire, a replayed response, a duplicate bad mac) can move the phase
 // again.
