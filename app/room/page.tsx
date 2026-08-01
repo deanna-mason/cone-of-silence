@@ -128,6 +128,7 @@ export default function RoomPage() {
     enabled: authed && stage === "in-room" && podcast.panel.kind !== "unsupported",
     xfer: call.bus.xfer,
     peerIds: call.peers.map((p) => p.peerId),
+    myCodename: podcast.myCodename,
     partnerCodename: podcast.partnerCodename,
     lastTakeId: podcast.lastTakeId,
     takeActive: podcastLocked,

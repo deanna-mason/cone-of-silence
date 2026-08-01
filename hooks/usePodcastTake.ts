@@ -88,6 +88,12 @@ type Phase = "idle" | "countdown" | "rolling" | "stopping" | "failed";
 export interface PodcastTake {
   panel: PodcastPanelState;
   partnerCodename: string | null;
+  /** This host's OWN codename — the same value announced via pod/hello.
+   *  Task 11's episode exchange needs it to identify the SENDER on the
+   *  wire (an offer's `from` must be the sender's own identity, not the
+   *  partner's — CONTROLLER RULING D8). Null until the auth session is
+   *  read (client-only effect). */
+  myCodename: string | null;
   /** This side's recorder byte counts, video and audio counted separately —
    *  an aggregate total can't tell "both streams growing" apart from "one
    *  stalled while the other grows"; this is the room page's debug mirror's
@@ -671,6 +677,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   return {
     panel,
     partnerCodename,
+    myCodename: username,
     bytes: streamBytes,
     lastTakeId,
     actions: {

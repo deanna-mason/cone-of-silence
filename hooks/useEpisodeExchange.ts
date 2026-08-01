@@ -59,7 +59,11 @@ export interface EpisodeExchangeArgs {
   enabled: boolean; // authed && in-room && supported (same gate as the take hook)
   xfer: XferPort;
   peerIds: string[];
-  partnerCodename: string | null; // rides the offer's `from` + receiving copy
+  // CONTROLLER RULING D8: the offer's `from` carries the SENDER's OWN
+  // codename (not the partner's) — myCodename feeds sender.start();
+  // partnerCodename only feeds the receiving copy.
+  myCodename: string | null;
+  partnerCodename: string | null; // receiving copy only
   lastTakeId: string | null;
   takeActive: boolean; // panel.kind in countdown|rolling|stopping|fault
 }
@@ -150,14 +154,15 @@ const IDLE_RECEIVER_VIEW: ReceiverView = {
 };
 
 export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
-  const { enabled, xfer, peerIds, partnerCodename, lastTakeId, takeActive } = args;
-  const peerKey = peerIds.join("|");
+  const { enabled, xfer, peerIds, myCodename, partnerCodename, lastTakeId, takeActive } = args;
   const singlePeerId = peerIds.length === 1 ? peerIds[0] : null;
 
   // Same `latest` idiom as usePodcastTake.ts: the wire-subscription effect
   // below is built once per (enabled, xfer) and must read the CURRENT
-  // partnerCodename/lastTakeId at call time, not whatever was in scope when
-  // it was constructed.
+  // myCodename/partnerCodename/lastTakeId at call time, not whatever was in
+  // scope when it was constructed.
+  const myCodenameRef = useRef(myCodename);
+  myCodenameRef.current = myCodename;
   const partnerCodenameRef = useRef(partnerCodename);
   partnerCodenameRef.current = partnerCodename;
   const lastTakeIdRef = useRef(lastTakeId);
@@ -165,7 +170,15 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
 
   const [senderView, setSenderView] = useState<SenderView>(IDLE_SENDER_VIEW);
   const [receiverView, setReceiverView] = useState<ReceiverView>(IDLE_RECEIVER_VIEW);
-  const [xferOpen, setXferOpen] = useState(false);
+  // Per-peer, not a single boolean: a single "current peer" flag reset on
+  // every peerKey change would forget a SURVIVING peer's already-open
+  // channel the moment a third peer transiently joins/leaves ([P1] ->
+  // [P1,P2] -> [P1] must not wedge canSend false forever, since P1's
+  // channel never actually closed). `xferOpenTick` forces a re-render on
+  // every channel-state event; `xferOpen` itself is derived fresh below
+  // from the map for whichever peer is CURRENTLY the single peer.
+  const xferOpenMapRef = useRef<Map<string, boolean>>(new Map());
+  const [, setXferOpenTick] = useState(0);
 
   const senderRef = useRef<EpisodeSender | null>(null);
   const senderPeerRef = useRef<string | null>(null);
@@ -186,8 +199,6 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // already-committed parts) keeps what it already knows.
   const receiverEpisodeIdRef = useRef<string | null>(null);
   const receiverPartTotalsRef = useRef<Map<string, number>>(new Map());
-
-  const currentPeerIdRef = useRef<string | null>(null);
 
   function disposeSender(): void {
     senderRef.current?.dispose();
@@ -273,7 +284,10 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     senderRef.current = sender;
     senderPeerRef.current = peerId;
     senderEpisodeIdRef.current = episodeId;
-    sender.start(episodeId, partnerCodenameRef.current);
+    // D8: the offer's `from` is OUR OWN codename — the receiver persists it
+    // verbatim as manifest.receivedFrom, so it must name the sender, not
+    // the sender's view of the partner.
+    sender.start(episodeId, myCodenameRef.current);
   }
 
   /** ONE EpisodeReceiver, built lazily on the first inbound xfr/offer and
@@ -294,7 +308,19 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     if (!enabled) return;
     const offMessage = xfer.onMessage((peerId, data) => {
       const frame = typeof data === "string" ? parseXferFrame(data) : null;
-      if (!receiverRef.current && frame && frame.t === "xfr/offer") createReceiver(peerId);
+      if (frame && frame.t === "xfr/offer") {
+        if (!receiverRef.current) {
+          createReceiver(peerId);
+        } else if (receiverPeerRef.current !== peerId) {
+          // Peer churn, not a 4C link rebuild (which keeps the peerId and
+          // never reaches this branch): the bound peer left and a DIFFERENT
+          // peer is now offering. The kept receiver belongs to a partner
+          // who is gone — rebind fresh rather than silently dropping every
+          // frame from the new peer forever.
+          disposeReceiver();
+          createReceiver(peerId);
+        }
+      }
       // Each engine's own handleFrame already filters by frame type (a
       // sender ignores xfr/offer/part, a receiver ignores xfr/have/
       // part-committed/fault/done) — safe to forward unconditionally to
@@ -323,7 +349,11 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         if (senderRef.current && senderPeerRef.current === peerId) senderRef.current.handleChannelClosed();
         if (receiverRef.current && receiverPeerRef.current === peerId) receiverRef.current.handleChannelClosed();
       }
-      if (peerId === currentPeerIdRef.current) setXferOpen(state === "open");
+      // Recorded per-peer, unconditionally — a peer not currently "the"
+      // single peer still gets its state tracked, so a later swap back to
+      // it (or a third peer's transient presence) never has to guess.
+      xferOpenMapRef.current.set(peerId, state === "open");
+      setXferOpenTick((n) => n + 1);
     });
     return () => {
       offMessage();
@@ -331,6 +361,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
       offState();
       disposeSender();
       disposeReceiver();
+      xferOpenMapRef.current = new Map();
       setSenderView(IDLE_SENDER_VIEW);
       setReceiverView(IDLE_RECEIVER_VIEW);
     };
@@ -339,14 +370,12 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, xfer]);
 
-  // The current peer's identity changed (or the room moved away from
-  // exactly one peer) — its xfer channel's open/closed state is unknown
-  // again until the next onChannelState event says otherwise.
-  useEffect(() => {
-    currentPeerIdRef.current = singlePeerId;
-    setXferOpen(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [peerKey]);
+  // Derived fresh every render from the per-peer map — no reset-on-churn
+  // effect needed (and none should exist: a surviving peer's already-open
+  // channel emits no further event, so resetting on every peerKey change
+  // would forget it, wedging canSend false through a transient [P1] ->
+  // [P1,P2] -> [P1]).
+  const xferOpen = singlePeerId !== null && (xferOpenMapRef.current.get(singlePeerId) ?? false);
 
   const sendingBusy = senderView.phase === "offering" || senderView.phase === "sending";
   const receivingBusy = receiverView.phase === "receiving";
@@ -374,7 +403,15 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
       };
       break;
     case "parked":
-      state = { kind: "xfer-interrupted", direction: "send", canResend: xferOpen };
+      state = {
+        kind: "xfer-interrupted",
+        direction: "send",
+        // Peer-aware, matching resend()'s own guard below: the parked
+        // sender's peer must still BE the current single peer, not merely
+        // have some peer's channel open — otherwise this button would
+        // render live while resend() silently no-ops behind it.
+        canResend: senderPeerRef.current === singlePeerId && xferOpen,
+      };
       break;
     case "done":
       state = { kind: "xfer-done", direction: "send", totalBytes: senderView.totalBytes };
@@ -399,7 +436,9 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
           // not until the first chunk lands) — this hook already knows who
           // the partner is the moment an offer is adopted, so the receiving
           // copy rides THIS arg rather than flashing null while a transfer
-          // sits offer-received-but-nothing-streamed-yet.
+          // sits offer-received-but-nothing-streamed-yet. Since D8 (above),
+          // this also now AGREES with the wire's own `from` once progress
+          // does start, rather than compensating for a wrong wire value.
           fromCodename: partnerCodename,
         };
         break;
@@ -453,9 +492,22 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         // Belt + suspenders, same idiom as usePodcastTake's roll(): the
         // panel already hides Resume Transmission unless canResend, this is
         // the backstop.
-        const peerId = senderPeerRef.current ?? singlePeerId;
+        const peerId = senderPeerRef.current;
         const episodeId = senderEpisodeIdRef.current ?? lastTakeId;
-        if (senderView.phase !== "parked" || peerId === null || episodeId === null || !xferOpen) return;
+        if (
+          senderView.phase !== "parked" ||
+          peerId === null ||
+          // The parked transfer's peer is no longer THE peer (they left,
+          // possibly replaced by someone else) — re-offering at a departed
+          // peerId would fire into the void and could never be acked.
+          // Honest behavior: bail, don't silently rebind to whoever's here
+          // now under a resume the operator didn't ask for.
+          peerId !== singlePeerId ||
+          episodeId === null ||
+          !xferOpen
+        ) {
+          return;
+        }
         startSender(peerId, episodeId);
       },
       dismiss: () => {

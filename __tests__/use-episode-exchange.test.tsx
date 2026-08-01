@@ -272,6 +272,7 @@ async function makePart(name: string, size: number, seed: number): Promise<{ ent
 // hook harness
 // ---------------------------------------------------------------------------
 const PEER = "peer-1";
+const PEER2 = "peer-2";
 
 function setup(overrides: Partial<EpisodeExchangeArgs> = {}) {
   const port = new FakeXferPort();
@@ -279,6 +280,7 @@ function setup(overrides: Partial<EpisodeExchangeArgs> = {}) {
     enabled: true,
     xfer: port,
     peerIds: [PEER],
+    myCodename: "Nightingale",
     partnerCodename: "Falcon",
     lastTakeId: null,
     takeActive: false,
@@ -375,11 +377,12 @@ describe("useEpisodeExchange", () => {
     expect(farStore.committedNames).toEqual(new Set(["audio.part000", "video.part000"]));
     expect(farStore.manifestCalls).toHaveLength(1);
 
-    // the offer that started all this carried this hook's partnerCodename
-    // arg as `from` — CONTROLLER'S ONLY available codename source (see
-    // hooks/useEpisodeExchange.ts's file comment / this task's report).
+    // (i) D8: the offer's `from` is the SENDER's OWN codename (myCodename),
+    // never the sender's view of the partner — and the receiver persists
+    // that exact value as manifest.receivedFrom.
     const offer = port.framesSentTo(PEER).find((f) => f.t === "xfr/offer");
-    expect(offer?.from).toBe("Falcon");
+    expect(offer?.from).toBe("Nightingale");
+    expect(farStore.manifestCalls[0]?.from).toBe("Nightingale");
   });
 
   test("(c) an inbound offer lazily creates the receiver and shows this hook's own partnerCodename arg; completes to xfer-done", async () => {
@@ -489,6 +492,170 @@ describe("useEpisodeExchange", () => {
 
     expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "receive", canResend: false });
     expect(view.result.current.busy).toBe(false);
+  });
+
+  // -------------------------------------------------------------------
+  // Peer churn (fix round: findings #2/#3/#4). The harness below extends
+  // setup()'s single-peer pin via view.rerender, rather than working
+  // around it, per the review.
+  // -------------------------------------------------------------------
+
+  test("(ii) peer churn: after P1 leaves and P2 joins, P2's offer creates a fresh receiver instead of being dropped forever", async () => {
+    // A signal that can't be faked by the receiving copy's own display
+    // logic (which rides the hook's partnerCodename arg, not engine state):
+    // take-p2's only part is pre-seeded as ALREADY committed on disk, so a
+    // GENUINE rebind+adopt finishes the episode immediately (scanCommitted
+    // -> allPartsCommitted() true -> writeManifest -> "done"). If the
+    // receiver instead stays wedged on P1 (the bug), this can never fire —
+    // scanCommitted for take-p2 is never even called.
+    H.state.committed.set("take-p2", new Set(["audio.part000"]));
+
+    const { port, view } = setup({ lastTakeId: null, peerIds: [PEER], partnerCodename: "P1Name" });
+
+    act(() => {
+      port.deliver(
+        PEER,
+        JSON.stringify({
+          t: "xfr/offer",
+          v: 1,
+          episodeId: "take-p1",
+          from: "P1Name",
+          files: [
+            { base: "audio", parts: [{ name: "audio.part000", size: 100, sha256: "deadbeef" }] },
+            { base: "video", parts: [] },
+          ],
+        }),
+      );
+    });
+    // Adopted, sent xfr/have, and now sits waiting for xfr/part that never
+    // comes in this test — a stable "receiving" window, no gate needed.
+    expect(view.result.current.state).toMatchObject({ kind: "xfer-receiving", fromCodename: "P1Name" });
+
+    // P1 leaves, P2 joins — a genuine roster swap (NOT a 4C link rebuild,
+    // which keeps the same peerId and must never hit the rebind branch).
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER2],
+        myCodename: "Nightingale",
+        partnerCodename: "P2Name",
+        lastTakeId: null,
+        takeActive: false,
+      });
+    });
+
+    act(() => {
+      port.deliver(
+        PEER2,
+        JSON.stringify({
+          t: "xfr/offer",
+          v: 1,
+          episodeId: "take-p2",
+          from: "P2Name",
+          files: [
+            { base: "audio", parts: [{ name: "audio.part000", size: 50, sha256: "cafebabe" }] },
+            { base: "video", parts: [] },
+          ],
+        }),
+      );
+    });
+
+    // Before the fix: the receiver stayed bound to PEER, the peerId guard
+    // on forwarding never matched PEER2, and this frame was silently
+    // dropped forever — take-p2 never reaches "done" because scanCommitted
+    // is never even called for it. After the fix: rebind, adopt, finish.
+    // (totalBytes is 0 here — an all-already-committed episode streams
+    // nothing, so no ReceiveProgress ever fires to report a size; a
+    // pre-existing, orthogonal gap this test isn't about, so not asserted.)
+    await waitFor(() => {
+      expect(view.result.current.state).toMatchObject({ kind: "xfer-done", direction: "receive" });
+    });
+  });
+
+  test("(iii) canSend survives a transient third peer: [P1] -> [P1,P2] -> [P1] with P1's channel open throughout", () => {
+    const { port, view } = setup({ lastTakeId: "take-1", peerIds: [PEER] });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+    expect(view.result.current.canSend).toBe(true);
+
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER, PEER2],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: "take-1",
+        takeActive: false,
+      });
+    });
+    // Not exactly one peer -> false, even though P1's channel is still open.
+    expect(view.result.current.canSend).toBe(false);
+
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: "take-1",
+        takeActive: false,
+      });
+    });
+    // Back to exactly one peer. P1's channel never actually closed — no
+    // fresh onChannelState("open") event fires here — so a single boolean
+    // reset on peerKey change would wedge this false forever. The per-peer
+    // map must remember P1 was already open.
+    expect(view.result.current.canSend).toBe(true);
+  });
+
+  test("(iv) resend() after a peer swap does not fire at the departed peer", async () => {
+    const takeId = "take-iv";
+    const audio = await makePart("audio.part000", 60, 7);
+    H.state.plans.set(takeId, [
+      { base: "audio", parts: [audio.entry] },
+      { base: "video", parts: [] },
+    ]);
+    H.state.partBytes.set(`${takeId}:audio.part000`, audio.bytes);
+
+    const { port, view } = setup({ lastTakeId: takeId, peerIds: [PEER] });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+
+    act(() => {
+      view.result.current.actions.send();
+      port.setChannelState(PEER, "xfer", "closed");
+    });
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
+
+    // PEER (the parked transfer's peer) leaves; PEER2 joins and opens.
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER2],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: takeId,
+        takeActive: false,
+      });
+    });
+    act(() => port.setChannelState(PEER2, "xfer", "open"));
+
+    // canResend stays false — the parked sender's peer isn't the current
+    // single peer, regardless of PEER2's channel being open.
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
+
+    const offersToOldPeerBefore = port.framesSentTo(PEER).filter((f) => f.t === "xfr/offer").length;
+    const offersToNewPeerBefore = port.framesSentTo(PEER2).filter((f) => f.t === "xfr/offer").length;
+
+    act(() => view.result.current.actions.resend());
+
+    expect(port.framesSentTo(PEER).filter((f) => f.t === "xfr/offer").length).toBe(offersToOldPeerBefore);
+    expect(port.framesSentTo(PEER2).filter((f) => f.t === "xfr/offer").length).toBe(offersToNewPeerBefore);
+    // Still parked — resend() was a genuine no-op, not a silent success
+    // into the void.
+    expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: false });
   });
 
   test("(e) dismiss() clears a done card", async () => {
