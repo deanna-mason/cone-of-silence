@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -78,6 +79,33 @@ describe("concat.mjs", () => {
     const result = await fsp.readFile(outPath);
     expect(result).toEqual(Buffer.concat([partA, partB, partC]));
     expect(result.length).toBe(partA.length + partB.length + partC.length);
+  });
+
+  it("reassemble: missing middle part → rejects, outPath absent, write stream destroyed (no leaked fd)", async () => {
+    const srcDir = tmpRoot;
+    const outPath = path.join(tmpRoot, "out-fail.webm");
+    await fsp.writeFile(path.join(srcDir, "audio.part000"), Buffer.from("AAAA"));
+    // audio.part001 deliberately absent from disk (listed but missing).
+    await fsp.writeFile(path.join(srcDir, "audio.part002"), Buffer.from("CC"));
+    const entries = [{ name: "audio.part000" }, { name: "audio.part001" }, { name: "audio.part002" }];
+
+    let capturedStream: fs.WriteStream | null = null;
+    const original = fs.createWriteStream.bind(fs);
+    const spy = vi.spyOn(fs, "createWriteStream").mockImplementation((...args: Parameters<typeof fs.createWriteStream>) => {
+      const stream = (original as (...a: unknown[]) => fs.WriteStream)(...args);
+      capturedStream = stream;
+      return stream;
+    });
+
+    try {
+      await expect(reassemble(entries, srcDir, outPath)).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+
+    await expect(fsp.access(outPath)).rejects.toThrow();
+    expect(capturedStream).not.toBeNull();
+    expect(capturedStream!.destroyed).toBe(true);
   });
 
   it("remuxArgs is exactly the copy-remux argv", () => {
