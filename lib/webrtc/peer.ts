@@ -9,6 +9,14 @@
 
 export const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
+export type ChannelName = "cos" | "xfer";
+export type ChannelLifecycle = "open" | "closed" | "error";
+/** Sender resumes pumping when bufferedAmount drops below this (set as
+ *  bufferedAmountLowThreshold on the xfer channel at construction). */
+export const XFER_LOW_WATER = 1_048_576; // 1 MiB
+/** Sender stops pumping while bufferedAmount is at/above this (Task 7). */
+export const XFER_HIGH_WATER = 4_194_304; // 4 MiB
+
 interface SignalPayload {
   description?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit | null;
@@ -24,10 +32,18 @@ export interface PeerLinkOptions {
   onConnectionState?: (state: RTCPeerConnectionState) => void;
   onChannelOpen?: () => void;
   onMessage?: (text: string) => void;
+  onChannelState?: (channel: ChannelName, state: ChannelLifecycle, detail?: string) => void;
+  onXferMessage?: (data: string | ArrayBuffer) => void;
+  onXferDrain?: () => void;
+}
+
+function errDetail(ev: unknown): string {
+  return (ev as RTCErrorEvent).error?.message ?? "channel error";
 }
 
 export class PeerLink {
   readonly channel: RTCDataChannel;
+  readonly xfer: RTCDataChannel;
   private readonly pc: RTCPeerConnection;
   private makingOffer = false;
   private ignoreOffer = false;
@@ -40,9 +56,28 @@ export class PeerLink {
     this.pc = pc;
 
     this.channel = pc.createDataChannel("cos", { negotiated: true, id: 0 });
-    this.channel.onopen = () => opts.onChannelOpen?.();
+    this.channel.onopen = () => {
+      opts.onChannelOpen?.();
+      opts.onChannelState?.("cos", "open");
+    };
+    this.channel.onclose = () => opts.onChannelState?.("cos", "closed");
+    this.channel.onerror = (ev) => opts.onChannelState?.("cos", "error", errDetail(ev));
     this.channel.onmessage = (ev) => {
       if (typeof ev.data === "string") opts.onMessage?.(ev.data);
+    };
+
+    // The episode-exchange channel (Phase 5B). Negotiated like cos so creation
+    // can't glare, and constructed HERE so a Phase-4C rebuild — which builds a
+    // fresh PeerLink — re-creates both channels automatically (spec §5B).
+    this.xfer = pc.createDataChannel("cos-xfer", { negotiated: true, id: 1 });
+    this.xfer.binaryType = "arraybuffer";
+    this.xfer.bufferedAmountLowThreshold = XFER_LOW_WATER;
+    this.xfer.onopen = () => opts.onChannelState?.("xfer", "open");
+    this.xfer.onclose = () => opts.onChannelState?.("xfer", "closed");
+    this.xfer.onerror = (ev) => opts.onChannelState?.("xfer", "error", errDetail(ev));
+    this.xfer.onbufferedamountlow = () => opts.onXferDrain?.();
+    this.xfer.onmessage = (ev) => {
+      if (typeof ev.data === "string" || ev.data instanceof ArrayBuffer) opts.onXferMessage?.(ev.data);
     };
 
     for (const track of opts.localStream.getTracks()) {
@@ -126,5 +161,17 @@ export class PeerLink {
     if (this.channel.readyState !== "open") return false;
     this.channel.send(text);
     return true;
+  }
+
+  /** Transfer-channel send. False (not queued) unless open — the exchange
+   *  engine treats a refused send as the channel dying under it (parks). */
+  sendXfer(data: string | ArrayBuffer): boolean {
+    if (this.xfer.readyState !== "open") return false;
+    this.xfer.send(data as string); // TS overload appeasement; runtime handles both
+    return true;
+  }
+
+  xferBufferedAmount(): number {
+    return this.xfer.bufferedAmount;
   }
 }
