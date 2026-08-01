@@ -101,13 +101,27 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
  * - remote (RIGHT pane, D14): remoteSetpts (drift-ratio rate correction)
  *   THEN its own tpad delay, both strictly before the contain scale/pad.
  * - Two-stage overlay: local composites onto the backdrop FIRST, with the
- *   overlay filter's own `shortest=1` option (not the global `-shortest`
- *   flag, which is never used) — this bounds the whole filtergraph's length
- *   to local's duration alone, exactly the "pinned to LOCAL, no -shortest"
- *   invariant. Remote composites onto that result with the default
- *   eof_action (repeat), so it never extends or truncates the timeline.
- * - Audio: the already-mixed, already-aligned episode m4a is the SOLE
- *   audio, mapped with `-c:a copy` (no re-encode — it's already final).
+ *   overlay filter's own `shortest=1` option — this bounds the VIDEO half
+ *   of the filtergraph to local's duration alone. Remote composites onto
+ *   that result with the default eof_action (repeat), so it never extends
+ *   or truncates the video timeline.
+ * - Audio (D21, controller ruling on this task's review): the video-side
+ *   `shortest=1` above does NOT bound the audio. The already-mixed,
+ *   already-aligned episode m4a (upstream mixApplyArgs's amix defaults to
+ *   duration=longest) can outlast local on churn/reconnect asymmetries —
+ *   left unchecked, the finished mp4's real container duration would then
+ *   exceed local, violating the "duration pinned to LOCAL" invariant even
+ *   though the video track itself is correctly capped. Fixed with the
+ *   classic exact-pin idiom: the audio is routed through `apad` (infinite
+ *   pad) and the OUTPUT carries `-shortest` — the container then ends
+ *   exactly when the (already local-capped) video ends. This supersedes
+ *   the plan's literal "-shortest NOT used" line; that line's INTENT
+ *   (don't let a short REMOTE truncate the composite) is preserved by the
+ *   video-side `overlay=...:shortest=1` cap, which is unaffected by this
+ *   output-level flag. `apad` requires filtering, so this output's audio
+ *   is re-encoded (`-c:a aac -b:a 192k`) rather than copied — the
+ *   archival `episode.m4a` product itself is untouched; only the
+ *   composite mp4's muxed-in audio track loses the copy fast-path.
  */
 export function compositeArgs(
   backdropPng,
@@ -134,6 +148,10 @@ export function compositeArgs(
     remoteChain,
     `[0:v][lpad]overlay=${layout.left.x}:${layout.left.y}:shortest=1[bg1]`,
     `[bg1][rpad]overlay=${layout.right.x}:${layout.right.y}[outv]`,
+    // D21: infinite-pad the audio so it never ends before the video does —
+    // paired with the output-level `-shortest` below, the container's real
+    // duration is then exactly the (already local-capped) video's.
+    `[${audioIdx}:a]apad[outa]`,
   ].join(";");
 
   return [
@@ -146,7 +164,7 @@ export function compositeArgs(
     "-map",
     "[outv]",
     "-map",
-    `${audioIdx}:a`,
+    "[outa]",
     "-c:v",
     "libx264",
     "-preset",
@@ -158,7 +176,15 @@ export function compositeArgs(
     "-r",
     "30",
     "-c:a",
-    "copy",
+    "aac",
+    "-b:a",
+    "192k",
+    // Output-level exact-pin (D21) — safe here specifically BECAUSE the
+    // audio was just apad'ed to never be the shortest stream; the video
+    // (local-capped via the overlay `shortest=1` above) is what actually
+    // ends first, so this flag can't let a short remote win the way the
+    // plan's original "-shortest NOT used" line was written to prevent.
+    "-shortest",
     "-movflags",
     "+faststart",
     outMp4,

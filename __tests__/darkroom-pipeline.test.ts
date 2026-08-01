@@ -118,7 +118,7 @@ describe("composite.mjs — compositeArgs", () => {
     expect(localSeg.indexOf("tpad=")).toBeLessThan(localSeg.indexOf("scale="));
   });
 
-  it("audio mapped from m4a, -c:a copy, faststart, yuv420p — and duration is pinned to LOCAL, not the global -shortest flag", () => {
+  it("audio mapped from m4a, faststart, yuv420p — and duration is EXACTLY pinned to LOCAL (D21: apad + output -shortest)", () => {
     const args = compositeArgs(
       "/tmp/backdrop.png",
       "/tmp/local.webm",
@@ -130,10 +130,24 @@ describe("composite.mjs — compositeArgs", () => {
     );
     const audioIdx = inputIndexOf(args, "/tmp/episode.m4a");
 
+    // D21 (controller ruling, review of this task): the LOCAL overlay's
+    // per-filter `shortest=1` (below) only pins the VIDEO stream — the
+    // audio (mixApplyArgs's amix defaults to duration=longest upstream)
+    // can still outlast local on churn/reconnect asymmetries, which would
+    // make the finished mp4's real container duration exceed local. Fixed
+    // by routing the audio through `apad` (infinite pad) and adding the
+    // output-level `-shortest` flag: the container then ends exactly when
+    // the video (already local-capped) ends. This supersedes the plan's
+    // literal "-shortest NOT used" line — that line's INTENT (don't let a
+    // short remote truncate the video) is preserved by the video-side
+    // `overlay=...:shortest=1` cap; `-shortest` here is the audio-side
+    // exact-pin idiom, not a reversion to naive shortest-of-everything.
+    // `apad` requires filtering, so this output's audio is re-encoded
+    // (aac 192k) rather than copied — `-c:a copy` is no longer asserted.
+    // The archival episode.m4a itself is untouched; only the composite
+    // mp4's muxed-in audio track is re-encoded.
     expect(args).toEqual(
       expect.arrayContaining([
-        "-map",
-        `${audioIdx}:a`,
         "-c:v",
         "libx264",
         "-preset",
@@ -145,20 +159,35 @@ describe("composite.mjs — compositeArgs", () => {
         "-r",
         "30",
         "-c:a",
-        "copy",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
         "-movflags",
         "+faststart",
       ]),
     );
-    expect(args).not.toContain("-shortest");
+    expect(args).not.toContain("copy");
     expect(args[args.length - 1]).toBe("/tmp/out.mp4");
 
-    // Duration-pin mechanism: the LOCAL overlay stage (only) carries the
-    // per-filter overlay `shortest=1` option — this bounds the whole
-    // filtergraph's length to local's, without using ffmpeg's global
-    // `-shortest` output flag (which would also let audio or remote's
-    // duration win arbitrarily).
+    // apad sits in the audio's own filtergraph node, fed by the m4a input.
     const fc = filterComplexOf(args);
+    expect(fc).toContain(`[${audioIdx}:a]apad`);
+
+    // -shortest is an OUTPUT option: it must come after every -map (the
+    // filtergraph's audio AND video sinks are both mapped by then) and
+    // before the output path.
+    const shortestIdx = args.indexOf("-shortest");
+    const lastMapIdx = args.lastIndexOf("-map");
+    expect(shortestIdx).toBeGreaterThan(lastMapIdx);
+    expect(shortestIdx).toBeLessThan(args.length - 1);
+
+    // Duration-pin mechanism (video side, unchanged): the LOCAL overlay
+    // stage (only) carries the per-filter overlay `shortest=1` option —
+    // this bounds the video half of the filtergraph to local's length,
+    // without using ffmpeg's global `-shortest` output flag for THIS
+    // purpose (which would let a short remote win arbitrarily — the
+    // reason the plan text banned it in the first place, per D21 above).
     expect(fc).toContain(":shortest=1");
     expect((fc.match(/:shortest=1/g) || []).length).toBe(1);
   });
