@@ -369,7 +369,7 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     const receiverStore = new MemoryReceiverStore();
     senderStore.pauseAtReadIndex("audio.part001", 1); // let chunk 0 through; freeze before chunk 1's read
 
-    const { sender, receiver, senderCb, receiverCb } = makeExchange(senderStore, receiverStore);
+    const { sender, receiver, senderCb, receiverCb, toSender } = makeExchange(senderStore, receiverStore);
 
     sender.start("ep-rebuild", "static-otter");
     // audio.part000 fully commits; audio.part001 gets its first chunk
@@ -405,25 +405,41 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     expect(receiverStore.ops.filter((o) => o.startsWith("commit:"))).toEqual(["commit:audio.part000"]);
     expect(receiverStore.ops.filter((o) => o.startsWith("abandon:"))).toEqual(["abandon:audio.part001"]);
 
-    // -- rebuilt channel: fresh XferLink pair. --------------------------
-    // The engines' `link` fields are constructor-bound `readonly` (re-read
-    // both constructors above) — there is no rewire method, so a "rebuilt
-    // channel" cannot mean swapping the link on the SAME engine instances.
-    // It also must not mean starting over with empty in-memory state: the
-    // resume contract is disk-only (scanCommitted() IS the resume state,
-    // `have` is its wire mirror), and Task 11's real wiring already
-    // constructs a fresh EpisodeSender per send()/resend() call and an
-    // EpisodeReceiver lazily per offer — so a rebuild honestly modeled here
-    // is fresh engine instances, wired to fresh links, over the SAME
-    // senderStore/receiverStore (the durable "disk"). That is exactly what
-    // reconstructs correctly from committed-parts-only, same as the real
-    // hook would after a mesh rebuild.
+    // -- rebuilt channel: fresh sender, SAME parked receiver. -----------
+    // A Phase-4C rebuildLink keeps the same peerId — it is a new data
+    // channel between the same two participants, not a new participant.
+    // Task 11 builds EpisodeReceiver lazily on first offer and keeps it for
+    // the room's lifetime, so the real resume path is this SAME parked
+    // receiver instance adopting a fresh offer, not a brand new receiver.
+    // The engines' `link` fields ARE constructor-bound `readonly` (re-read
+    // both constructors above), so the receiver's own link object never
+    // moves — but LoopbackLink.wireTo() (a method on the LINK, not the
+    // engine) is mutable, so the SAME `toSender` link the receiver has
+    // always held is simply re-pointed at the fresh sender below. Only the
+    // sender side is reconstructed: Task 11's real wiring constructs a
+    // fresh EpisodeSender per send()/resend() call, and the OLD sender is
+    // dispose()'d first, mirroring that a superseded sender is done, not
+    // reused.
+    sender.dispose();
+
     const opsBeforeResume = receiverStore.ops.length;
     const readsBeforeResume = senderStore.reads.length;
-    const { sender: sender2, senderCb: senderCb2, receiverCb: receiverCb2 } = makeExchange(senderStore, receiverStore);
+    toSender.sent = []; // isolate the resumed session's frames for the have-frame assertion below
+
+    const freshToReceiver = new LoopbackLink(SENDER_ID);
+    const senderCb2 = new RecordingSenderCallbacks();
+    const sender2 = new EpisodeSender(RECEIVER_ID, freshToReceiver, senderStore, senderCb2);
+    freshToReceiver.wireTo(receiver); // sender2 talks directly to the SAME receiver instance
+    toSender.wireTo(sender2); // the receiver's existing outbound link now targets sender2
 
     sender2.start("ep-rebuild", "static-otter");
-    await waitFor(() => senderCb2.lastPhase() === "done" && receiverCb2.lastPhase() === "done");
+    await waitFor(() => senderCb2.lastPhase() === "done" && receiverCb.lastPhase() === "done");
+
+    // The reused receiver's adopt() rescans its own (stale, from before the
+    // park) committedNames and chain — proving that resume path, not a
+    // fresh scan from empty state, is what reports audio.part000 as done.
+    const haveFrames = toSender.frames().filter((f) => f.t === "xfr/have");
+    expect(haveFrames).toEqual([{ t: "xfr/have", v: 1, episodeId: "ep-rebuild", committed: ["audio.part000"] }]);
 
     // audio.part000 was never touched again — the receiver's `have`
     // authoritatively told the sender it was already committed.
@@ -436,10 +452,10 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     const audio1ResumeReads = newReads.filter((r) => r.name === "audio.part001");
     expect(audio1ResumeReads[0]?.offset).toBe(0);
 
-    // Full completion, manifest written exactly once, at the very end.
+    // Full completion, manifest written exactly once, strictly the last op.
     expect(receiverStore.committedNames).toEqual(new Set(fixture.allNames));
     expect(receiverStore.manifestCalls).toHaveLength(1);
-    expect(receiverStore.ops.at(-1)?.startsWith("manifest:") || receiverStore.ops.indexOf("manifest:ep-rebuild")).toBeTruthy();
+    expect(receiverStore.ops.at(-1)).toBe("manifest:ep-rebuild");
     const manifestIdx = receiverStore.ops.indexOf("manifest:ep-rebuild");
     for (const name of fixture.allNames) {
       expect(manifestIdx).toBeGreaterThan(receiverStore.ops.lastIndexOf(`commit:${name}`));
@@ -464,8 +480,9 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     expect(receiverStore.committedNames.has("audio.part000")).toBe(false);
     expect(receiverStore.ops).toContain("commit-fail:audio.part000");
     expect(receiverStore.ops).not.toContain("commit:audio.part000");
-    const faultFrame = receiverStore.manifestCalls; // manifest must never have been reached
-    expect(faultFrame).toEqual([]);
+    expect(receiverStore.ops).toContain("abandon:audio.part000"); // temp cleaned up, not just left un-renamed
+    const manifestCallsSoFar = receiverStore.manifestCalls; // manifest must never have been reached
+    expect(manifestCallsSoFar).toEqual([]);
 
     // The receiver's xfr/fault reaches the sender. Per the engines as
     // actually shipped (EpisodeSender.onPeerFault sets phase "fault", never
