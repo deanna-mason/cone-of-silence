@@ -6,9 +6,18 @@
 // and by the one-off local hand-check render — not unit-tested here.
 //
 // Task 6 extends this same file with developEpisode/CLI orchestration cases.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
 
 import { compositeArgs } from "../scripts/darkroom/composite.mjs";
+import { SAMPLE_RATE, synthesizeMark, findMarks } from "../scripts/darkroom/tone.mjs";
+import { driftRatio, alignment } from "../scripts/darkroom/drift.mjs";
+import { developEpisode } from "../scripts/darkroom/pipeline.mjs";
+import { pollOnce, isDeveloped, developedMp4Path, parseArgs } from "../scripts/darkroom/index.mjs";
 
 const LAYOUT = {
   left: { x: 86, y: 180, w: 820, h: 615 },
@@ -190,5 +199,550 @@ describe("composite.mjs — compositeArgs", () => {
     // reason the plan text banned it in the first place, per D21 above).
     expect(fc).toContain(":shortest=1");
     expect((fc.match(/:shortest=1/g) || []).length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 6: developEpisode orchestration + index.mjs CLI/watcher.
+//
+// ALL side effects arrive via one injected deps object ({runner,
+// renderBackdrop, decodePcm, now}) so the whole pipeline is driven with
+// fakes — no real ffmpeg, no real Chrome. `findMarks`/`driftRatio`/
+// `alignment` are the REAL functions (pure DSP, already pinned by Tasks 2-3's
+// own test files) run against synthetic PCM built with the real
+// `synthesizeMark()`, so expectations below are computed from the SAME
+// detector the pipeline itself calls — this is deliberately not a
+// magic-number pin against the brief's illustrative "1.0002" readout (see
+// darkroom-drift.test.ts's own note on why that number isn't the literal
+// ratio).
+describe("pipeline.mjs — developEpisode", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "darkroom-pipeline-"));
+  });
+
+  afterEach(async () => {
+    await fsp.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  interface SidecarEntry {
+    name: string;
+    size: number;
+    sha256: string;
+  }
+
+  async function writePart(dir: string, name: string, bytes: Buffer): Promise<SidecarEntry> {
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, name), bytes);
+    return { name, size: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  }
+
+  function manifestFor(opts: {
+    episodeId: string;
+    receivedFrom?: string | null;
+    local?: { audio: SidecarEntry[]; video: SidecarEntry[] } | null;
+    remote?: { audio: SidecarEntry[]; video: SidecarEntry[] };
+  }) {
+    return {
+      version: 1,
+      episodeId: opts.episodeId,
+      receivedFrom: opts.receivedFrom ?? null,
+      completedAt: "2026-01-01T00:00:00.000Z",
+      local: opts.local === undefined ? null : opts.local,
+      remote: opts.remote ?? { audio: [], video: [] },
+    };
+  }
+
+  async function writeManifest(takeDir: string, manifest: unknown): Promise<void> {
+    await fsp.writeFile(path.join(takeDir, "episode.json"), JSON.stringify(manifest, null, 2));
+  }
+
+  /** A real, hash-valid two-host take dir (one part per stream — content is
+   *  arbitrary bytes; verifyEpisode only checks size/hash, never decodes
+   *  media). `video: false` omits both hosts' video streams entirely
+   *  (audio-only case). */
+  async function buildValidTake(
+    takeId: string,
+    opts: { video: boolean; receivedFrom?: string | null },
+  ): Promise<{ takeDir: string; manifestPath: string }> {
+    const takeDir = path.join(tmpRoot, takeId);
+    const remoteDir = path.join(takeDir, "remote");
+
+    const localAudio = await writePart(takeDir, "audio.part000", Buffer.from("local-audio-bytes"));
+    const remoteAudio = await writePart(remoteDir, "audio.part000", Buffer.from("remote-audio-bytes"));
+    const local: { audio: SidecarEntry[]; video: SidecarEntry[] } = { audio: [localAudio], video: [] };
+    const remote: { audio: SidecarEntry[]; video: SidecarEntry[] } = { audio: [remoteAudio], video: [] };
+
+    if (opts.video) {
+      local.video = [await writePart(takeDir, "video.part000", Buffer.from("local-video-bytes"))];
+      remote.video = [await writePart(remoteDir, "video.part000", Buffer.from("remote-video-bytes"))];
+    }
+
+    const manifest = manifestFor({ episodeId: takeId, receivedFrom: opts.receivedFrom ?? "NIGHTINGALE", local, remote });
+    await writeManifest(takeDir, manifest);
+    return { takeDir, manifestPath: path.join(takeDir, "episode.json") };
+  }
+
+  /** `lengthS` seconds of silence with the real dual-tone mark summed in at
+   *  each of `marks` (seconds from track start) — noise-free by design, so
+   *  the matched-filter's cross-correlation resolves to the exact injected
+   *  sample (see darkroom-tone.test.ts's own noise-free regression cases for
+   *  the same pattern), keeping this test's math independent of any
+   *  detector jitter. */
+  function buildAudioTrack(lengthS: number, marks: number[]): Float32Array {
+    const pcm = new Float32Array(Math.round(lengthS * SAMPLE_RATE));
+    const mark = synthesizeMark();
+    for (const markS of marks) {
+      const at = Math.round(markS * SAMPLE_RATE);
+      for (let i = 0; i < mark.length && at + i < pcm.length; i++) pcm[at + i] += mark[i];
+    }
+    return pcm;
+  }
+
+  const CANNED_LOUDNORM_JSON = `{
+    "input_i" : "-20.00",
+    "input_tp" : "-3.00",
+    "input_lra" : "6.00",
+    "input_thresh" : "-30.00",
+    "output_i" : "-16.00",
+    "output_tp" : "-1.50",
+    "output_lra" : "5.00",
+    "output_thresh" : "-26.00",
+    "normalization_type" : "dynamic",
+    "target_offset" : "0.00"
+}`;
+
+  function cannedLoudnormStderr(): string {
+    return ["[Parsed_loudnorm_0]", CANNED_LOUDNORM_JSON, "frame=1 fps=1 speed=8.0x"].join("\n");
+  }
+
+  type FakeRunnerHooks = { onRun?: (args: string[]) => void };
+
+  /** Records every run()/capture() call (one shared, time-ordered list —
+   *  the "argv sequence" the brief asks for), fakes ffmpeg's -version probe,
+   *  and — since nothing spawns real ffmpeg — writes a stub file at
+   *  whatever path an argv's last element names (mirroring the file ffmpeg
+   *  would have produced), so downstream fs.rename / existence checks have
+   *  something real to observe. */
+  function makeFakeRunner(hooks: FakeRunnerHooks = {}) {
+    const calls: string[][] = [];
+    return {
+      calls,
+      run: async (args: string[]) => {
+        calls.push(args);
+        hooks.onRun?.(args);
+        const last = args[args.length - 1];
+        if (typeof last === "string" && last !== "-" && !last.startsWith("-")) {
+          fs.mkdirSync(path.dirname(last), { recursive: true });
+          fs.writeFileSync(last, "stub");
+        }
+        return { stderr: cannedLoudnormStderr() };
+      },
+      capture: async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === "-version") {
+          return { stdout: Buffer.from("ffmpeg version 8.1.2-static Copyright (c) 2000-2026\n"), stderr: "" };
+        }
+        throw new Error(`fake runner: unexpected capture() call: ${JSON.stringify(args)}`);
+      },
+    };
+  }
+
+  function makeFakeDecodePcm(localPcm: Float32Array, remotePcm: Float32Array) {
+    return async (_runner: unknown, file: string): Promise<Float32Array> => {
+      if (file.includes("local-audio")) return localPcm;
+      if (file.includes("remote-audio")) return remotePcm;
+      throw new Error(`fake decodePcm: unexpected file ${file}`);
+    };
+  }
+
+  function makeFakeRenderBackdrop() {
+    const calls: Array<{ left: string; right: string; outPng: string }> = [];
+    const layout = {
+      left: { x: 86, y: 180, w: 820, h: 615 },
+      right: { x: 1014, y: 180, w: 800, h: 600 },
+    };
+    return {
+      calls,
+      layout,
+      renderBackdrop: async (
+        _chromePath: unknown,
+        _templatePath: unknown,
+        labels: { left: string; right: string },
+        outPng: string,
+      ) => {
+        calls.push({ left: labels.left, right: labels.right, outPng });
+        fs.writeFileSync(outPng, "stubpng");
+        return layout;
+      },
+    };
+  }
+
+  const NEVER_CALLED = async () => {
+    throw new Error("should not have been called on a refusal path");
+  };
+
+  it("develops a fake episode end-to-end: argv sequence, products, receipt fields", async () => {
+    // The matched-filter search (findMarks, real — see the describe-block
+    // header) over a 10s/9s track is the slow part here; generous under
+    // parallel test-file load, still fast in isolation (~3s).
+    const takeId = "take-20260101-0000-fee1";
+    const { manifestPath } = await buildValidTake(takeId, { video: true, receivedFrom: "NIGHTINGALE" });
+
+    const localPcm = buildAudioTrack(10, [1.0, 7.0]); // span 6.000s
+    const remotePcm = buildAudioTrack(9, [1.0, 6.9988]); // span 5.9988s
+
+    // Ground truth computed from the SAME real detector/math the pipeline
+    // calls — see the describe-block header for why this beats a literal
+    // "1.0002" pin.
+    const expectedLocalMarks = findMarks(localPcm);
+    const expectedRemoteMarks = findMarks(remotePcm);
+    const expectedRatio = driftRatio(expectedLocalMarks, expectedRemoteMarks);
+    const expectedRemoteStartCorrected = expectedRemoteMarks.start / expectedRatio;
+    const expectedAlignment = alignment(expectedLocalMarks.start, expectedRemoteStartCorrected);
+
+    const { renderBackdrop, calls: backdropCalls } = makeFakeRenderBackdrop();
+    const episodesRoot = path.join(tmpRoot, "episodes", takeId);
+    const workMp4 = path.join(episodesRoot, "work", "episode.mp4");
+    const finalMp4 = path.join(episodesRoot, "episode.mp4");
+    let mp4ExistedBeforeComposite: boolean | null = null;
+    const runnerWithHook = makeFakeRunner({
+      onRun: (args) => {
+        if (args[args.length - 1] === workMp4) {
+          mp4ExistedBeforeComposite = fs.existsSync(finalMp4);
+        }
+      },
+    });
+
+    const deps = {
+      runner: runnerWithHook,
+      renderBackdrop,
+      decodePcm: makeFakeDecodePcm(localPcm, remotePcm),
+      now: () => "2026-08-01T00:00:00.000Z",
+    };
+    const opts = {
+      ownCodename: "CARDINAL",
+      model: "server/models/std.rnnn",
+      chromePath: "/fake/chrome",
+      templatePath: "/fake/template.html",
+    };
+
+    const receipt = await developEpisode(deps, manifestPath, opts);
+
+    // --- receipt fields -----------------------------------------------
+    expect(receipt.episodeId).toBe(takeId);
+    expect(receipt.completedAt).toBe("2026-08-01T00:00:00.000Z");
+    expect(receipt.marks).toEqual({
+      local: { start: expectedLocalMarks.start, end: expectedLocalMarks.end },
+      remote: { start: expectedRemoteMarks.start, end: expectedRemoteMarks.end },
+    });
+    expect(receipt.ratio).toBeCloseTo(expectedRatio, 9);
+    expect(receipt.delayMs).toBe(expectedAlignment.delayMs);
+    expect(receipt.who).toBe(expectedAlignment.who);
+    expect(receipt.products).toEqual(["m4a", "mp4"]);
+    expect(receipt.toolVersions).toEqual({ node: process.version, ffmpeg: "8.1.2-static" });
+
+    // --- labels (D14: local LEFT as --own-codename, remote RIGHT as receivedFrom) ---
+    expect(backdropCalls).toEqual([{ left: "CARDINAL", right: "NIGHTINGALE", outPng: expect.any(String) }]);
+
+    // --- products on disk ----------------------------------------------
+    expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(true);
+    expect(fs.existsSync(finalMp4)).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "stems", "NIGHTINGALE.m4a"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-video.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "remote-audio.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "remote-video.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "develop.json"))).toBe(true);
+    const onDisk = JSON.parse(await fsp.readFile(path.join(episodesRoot, "develop.json"), "utf8"));
+    expect(onDisk).toEqual(receipt);
+
+    // --- rename-LAST discipline (D11): work/episode.mp4 must NOT exist yet
+    // at the moment the composite ffmpeg call fires (it's created by that
+    // very call and only renamed into place afterward); by the time
+    // developEpisode resolves it must be gone from work/ (renamed, not
+    // copied).
+    expect(mp4ExistedBeforeComposite).toBe(false);
+    expect(fs.existsSync(workMp4)).toBe(false);
+
+    // --- argv sequence ---------------------------------------------------
+    const calls = runnerWithHook.calls;
+    const rawDir = path.join(episodesRoot, "raw");
+    const stemsDir = path.join(episodesRoot, "stems");
+    const lastArg = (call: string[]) => call[call.length - 1];
+
+    expect(calls.length).toBe(12);
+    expect(calls[0]).toEqual(["-version"]);
+    expect(lastArg(calls[1])).toBe(path.join(rawDir, "local-audio.webm"));
+    expect(lastArg(calls[2])).toBe(path.join(rawDir, "local-video.webm"));
+    expect(lastArg(calls[3])).toBe(path.join(rawDir, "remote-audio.webm"));
+    expect(lastArg(calls[4])).toBe(path.join(rawDir, "remote-video.webm"));
+    expect(lastArg(calls[5])).toBe("-"); // measureStem(local)
+    expect(lastArg(calls[6])).toBe(path.join(stemsDir, "CARDINAL.m4a")); // applyStemArgs(local)
+    expect(lastArg(calls[7])).toBe("-"); // measureStem(remote)
+    expect(lastArg(calls[8])).toBe(path.join(stemsDir, "NIGHTINGALE.m4a")); // applyStemArgs(remote)
+    expect(lastArg(calls[9])).toBe("-"); // mixMeasureArgs
+    expect(lastArg(calls[10])).toBe(path.join(episodesRoot, "episode.m4a")); // mixApplyArgs
+    expect(lastArg(calls[11])).toBe(workMp4); // compositeArgs
+
+    // Remote's chain carried the drift filter; local's did not.
+    expect(calls[7][calls[7].indexOf("-af") + 1]).toMatch(/^asetrate=/);
+    expect(calls[5][calls[5].indexOf("-af") + 1]).not.toMatch(/^asetrate=/);
+  }, 20000);
+
+  it("gap in remote parts → part-gap refusal, episodes/<id>/ has NO episode.mp4 and raw/ empty or absent", async () => {
+    const takeId = "take-20260101-0000-9a91";
+    const takeDir = path.join(tmpRoot, takeId);
+    const remoteDir = path.join(takeDir, "remote");
+
+    const localAudio = await writePart(takeDir, "audio.part000", Buffer.from("local-audio"));
+    const remotePart000 = await writePart(remoteDir, "audio.part000", Buffer.from("remote-a"));
+    const remotePart002 = await writePart(remoteDir, "audio.part002", Buffer.from("remote-c")); // 001 never listed
+
+    await writeManifest(
+      takeDir,
+      manifestFor({
+        episodeId: takeId,
+        local: { audio: [localAudio], video: [] },
+        remote: { audio: [remotePart000, remotePart002], video: [] },
+      }),
+    );
+
+    const fakeRunner = makeFakeRunner();
+    const deps = {
+      runner: fakeRunner,
+      renderBackdrop: NEVER_CALLED,
+      decodePcm: NEVER_CALLED,
+      now: () => "2026-01-01T00:00:00.000Z",
+    };
+
+    await expect(
+      developEpisode(deps, path.join(takeDir, "episode.json"), { ownCodename: "CARDINAL" }),
+    ).rejects.toMatchObject({ code: "part-gap" });
+
+    expect(fakeRunner.calls.length).toBe(0);
+    const episodesRoot = path.join(tmpRoot, "episodes", takeId);
+    expect(fs.existsSync(path.join(episodesRoot, "episode.mp4"))).toBe(false);
+    const rawDir = path.join(episodesRoot, "raw");
+    const rawEntries = fs.existsSync(rawDir) ? await fsp.readdir(rawDir) : [];
+    expect(rawEntries).toEqual([]);
+  });
+
+  it("hash mismatch → refusal BEFORE any ffmpeg call (runner never invoked)", async () => {
+    const takeId = "take-20260101-0000-9a92";
+    const { takeDir, manifestPath } = await buildValidTake(takeId, { video: false });
+    const filePath = path.join(takeDir, "audio.part000");
+    const bytes = await fsp.readFile(filePath);
+    bytes[0] ^= 0xff;
+    await fsp.writeFile(filePath, bytes);
+
+    const fakeRunner = makeFakeRunner();
+    const deps = {
+      runner: fakeRunner,
+      renderBackdrop: NEVER_CALLED,
+      decodePcm: NEVER_CALLED,
+      now: () => "2026-01-01T00:00:00.000Z",
+    };
+
+    await expect(developEpisode(deps, manifestPath, { ownCodename: "CARDINAL" })).rejects.toMatchObject({
+      code: "hash-mismatch",
+    });
+    expect(fakeRunner.calls.length).toBe(0);
+  });
+
+  it("audio-only both sides (video lists [] on both) → episode.m4a + stems, NO mp4, receipt says products:[m4a]", async () => {
+    const takeId = "take-20260101-0000-a0d1";
+    const { manifestPath } = await buildValidTake(takeId, { video: false, receivedFrom: "NIGHTINGALE" });
+
+    const localPcm = buildAudioTrack(8, [1.0, 6.5]);
+    const remotePcm = buildAudioTrack(8, [1.0, 6.4988]);
+
+    const fakeRunner = makeFakeRunner();
+    const { renderBackdrop, calls: backdropCalls } = makeFakeRenderBackdrop();
+    const deps = {
+      runner: fakeRunner,
+      renderBackdrop,
+      decodePcm: makeFakeDecodePcm(localPcm, remotePcm),
+      now: () => "2026-01-01T00:00:00.000Z",
+    };
+
+    const receipt = await developEpisode(deps, manifestPath, { ownCodename: "CARDINAL" });
+
+    expect(receipt.products).toEqual(["m4a"]);
+    expect(backdropCalls.length).toBe(0);
+
+    const episodesRoot = path.join(tmpRoot, "episodes", takeId);
+    expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "episode.mp4"))).toBe(false);
+    expect(fs.existsSync(path.join(episodesRoot, "work", "episode.mp4"))).toBe(false);
+    expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "stems", "NIGHTINGALE.m4a"))).toBe(true);
+    expect(fakeRunner.calls.some((c) => c.includes("-loop"))).toBe(false); // no compositeArgs call
+  }, 20000);
+
+  it("local null → manifest-invalid refusal (needs both hosts' audio)", async () => {
+    const takeId = "take-20260101-0000-0e11";
+    const takeDir = path.join(tmpRoot, takeId);
+    const remoteDir = path.join(takeDir, "remote");
+    const remoteAudio = await writePart(remoteDir, "audio.part000", Buffer.from("remote-audio"));
+
+    await writeManifest(
+      takeDir,
+      manifestFor({ episodeId: takeId, local: null, remote: { audio: [remoteAudio], video: [] } }),
+    );
+
+    const fakeRunner = makeFakeRunner();
+    const deps = {
+      runner: fakeRunner,
+      renderBackdrop: NEVER_CALLED,
+      decodePcm: NEVER_CALLED,
+      now: () => "2026-01-01T00:00:00.000Z",
+    };
+
+    await expect(
+      developEpisode(deps, path.join(takeDir, "episode.json"), { ownCodename: "CARDINAL" }),
+    ).rejects.toMatchObject({ code: "manifest-invalid" });
+
+    expect(fakeRunner.calls.length).toBe(0);
+    expect(fs.existsSync(path.join(tmpRoot, "episodes", takeId))).toBe(false);
+  });
+});
+
+describe("index.mjs — CLI arg parsing", () => {
+  it("parses all flags, applying D12's defaults for the ones omitted", () => {
+    const opts = parseArgs(["--vault", "/tmp/vault", "--develop", "/tmp/vault/take-x/episode.json"]);
+    expect(opts).toEqual({
+      vault: "/tmp/vault",
+      ownCodename: "HOST",
+      model: "server/models/std.rnnn",
+      develop: "/tmp/vault/take-x/episode.json",
+      pollMs: 5000,
+    });
+  });
+
+  it("overrides every default when given explicitly", () => {
+    const opts = parseArgs([
+      "--vault",
+      "/tmp/vault",
+      "--own-codename",
+      "CARDINAL",
+      "--model",
+      "/models/custom.rnnn",
+      "--poll-ms",
+      "1500",
+    ]);
+    expect(opts).toEqual({
+      vault: "/tmp/vault",
+      ownCodename: "CARDINAL",
+      model: "/models/custom.rnnn",
+      develop: null,
+      pollMs: 1500,
+    });
+  });
+
+  it("missing --vault is a cli-invalid refusal", () => {
+    expect(() => parseArgs(["--poll-ms", "1000"])).toThrow(/cli-invalid/);
+  });
+
+  it("unknown flag is a cli-invalid refusal", () => {
+    expect(() => parseArgs(["--vault", "/tmp/vault", "--bogus"])).toThrow(/cli-invalid/);
+  });
+});
+
+describe("index.mjs — pollOnce watcher pass", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "darkroom-watch-"));
+  });
+
+  afterEach(async () => {
+    await fsp.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("watcher skips takes with episode.mp4 present; --develop reruns them (direct call bypasses the marker)", async () => {
+    const takeIdA = "take-20260101-0000-aaaa"; // already developed
+    const takeIdB = "take-20260101-0000-bbbb"; // needs developing
+
+    for (const takeId of [takeIdA, takeIdB]) {
+      const takeDir = path.join(tmpRoot, takeId);
+      await fsp.mkdir(takeDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(takeDir, "episode.json"),
+        JSON.stringify({
+          version: 1,
+          episodeId: takeId,
+          receivedFrom: null,
+          completedAt: "2026-01-01T00:00:00.000Z",
+          local: null,
+          remote: { audio: [], video: [] },
+        }),
+      );
+    }
+    // Pre-existing developed marker for A (D11: episode.mp4 present == developed).
+    await fsp.mkdir(path.dirname(developedMp4Path(tmpRoot, takeIdA)), { recursive: true });
+    await fsp.writeFile(developedMp4Path(tmpRoot, takeIdA), "stub");
+
+    const develCalls: string[] = [];
+    const fakeDevelop = async (_deps: unknown, manifestPath: string) => {
+      develCalls.push(manifestPath);
+    };
+
+    const results = await pollOnce(fakeDevelop, {}, tmpRoot, {}, { error: () => {} });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        { takeId: takeIdA, status: "skipped" },
+        { takeId: takeIdB, status: "developed" },
+      ]),
+    );
+    // The watcher never even calls developEpisode for the already-developed take.
+    expect(develCalls).toEqual([path.join(tmpRoot, takeIdB, "episode.json")]);
+
+    // --develop bypasses the marker entirely — index.mjs's one-shot path
+    // calls developEpisode directly, never consulting isDeveloped/pollOnce.
+    // A direct call on A's manifest (already "developed") still runs.
+    await fakeDevelop({}, path.join(tmpRoot, takeIdA, "episode.json"));
+    expect(develCalls).toEqual([
+      path.join(tmpRoot, takeIdB, "episode.json"),
+      path.join(tmpRoot, takeIdA, "episode.json"),
+    ]);
+    expect(await isDeveloped(tmpRoot, takeIdA)).toBe(true);
+  });
+
+  it("a refusal is logged loudly and does not halt the pass — sources untouched, retried next call", async () => {
+    const takeId = "take-20260101-0000-cccc";
+    const takeDir = path.join(tmpRoot, takeId);
+    await fsp.mkdir(takeDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(takeDir, "episode.json"),
+      JSON.stringify({
+        version: 1,
+        episodeId: takeId,
+        receivedFrom: null,
+        completedAt: "2026-01-01T00:00:00.000Z",
+        local: null,
+        remote: { audio: [], video: [] },
+      }),
+    );
+
+    const err = Object.assign(new Error("part-gap: boom"), { code: "part-gap", name: "DarkroomError" });
+    Object.setPrototypeOf(err, (await import("../scripts/darkroom/errors.mjs")).DarkroomError.prototype);
+    const fakeDevelop = async () => {
+      throw err;
+    };
+    const logged: string[] = [];
+
+    const results = await pollOnce(fakeDevelop, {}, tmpRoot, {}, { error: (msg: string) => logged.push(msg) });
+
+    expect(results).toEqual([{ takeId, status: "refused", code: "part-gap" }]);
+    expect(logged.length).toBe(1);
+    expect(logged[0]).toContain("part-gap");
+
+    // Re-polling retries it (no in-memory state remembers the refusal).
+    const secondPass = await pollOnce(fakeDevelop, {}, tmpRoot, {}, { error: (msg: string) => logged.push(msg) });
+    expect(secondPass).toEqual([{ takeId, status: "refused", code: "part-gap" }]);
   });
 });

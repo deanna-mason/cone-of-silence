@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "darkroom": "node scripts/darkroom/index.mjs"
   },
   "dependencies": {
     "next": "16.2.9",
