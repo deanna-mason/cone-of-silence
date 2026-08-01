@@ -19,14 +19,15 @@
 // API is in play.
 //
 // Wire protocol for the legacy path (peer.ts is the only caller): a pipe is
-// set up by TWO messages sent back-to-back with no other postMessage to this
-// worker in between — `{op:"init", key, side}` immediately followed by
-// `{op:"pipe", readable, writable}`. postMessage delivery is FIFO, so the
-// worker can just remember the most recent uncombined "init" and consume it
-// on the next "pipe"; peer.ts is responsible for never interleaving two
-// pipes' setup messages (each attach call does both sends synchronously,
-// with no other e2ee attach call — and therefore no other postMessage to
-// this worker — able to run in between).
+// set up by a SINGLE message — `{op:"pipe", key, side, readable, writable}`.
+// Every field the pipe needs travels together, so there is no ordering
+// invariant between messages left for a comment to enforce.
+//
+// Failure reporting: a pipe that fails (readable/writable torn down under
+// us, or an encrypt/decrypt rejection that escapes frameCipher's own
+// fail-closed handling) posts `{op:"error", detail}` back to the main
+// thread instead of failing silently — peer.ts relays that to
+// `PeerLinkOptions.onE2eeFailure`.
 //
 // Nonce rule (load-bearing — see the plan's Global Constraints): each call
 // to attachPipe with side "encrypt" constructs exactly ONE fresh IvState,
@@ -40,9 +41,15 @@ import { IvState, decryptFrame, encryptFrame } from "../crypto/frameCipher";
 type Side = "encrypt" | "decrypt";
 type Frame = RTCEncodedAudioFrame | RTCEncodedVideoFrame;
 
-type WorkerInMsg =
-  | { op: "init"; key: CryptoKey; side: Side }
-  | { op: "pipe"; readable: ReadableStream<Frame>; writable: WritableStream<Frame> };
+type WorkerInMsg = {
+  op: "pipe";
+  key: CryptoKey;
+  side: Side;
+  readable: ReadableStream<Frame>;
+  writable: WritableStream<Frame>;
+};
+
+type WorkerOutMsg = { op: "error"; detail: string };
 
 // TypeScript's DOM lib (this repo has no separate "webworker" lib config —
 // see AGENTS.md's Next.js-version caveat, this is genuinely new ground) types
@@ -62,6 +69,7 @@ interface RTCTransformEvent extends Event {
 interface E2eeWorkerScope {
   onmessage: ((ev: MessageEvent<WorkerInMsg>) => void) | null;
   onrtctransform: ((ev: RTCTransformEvent) => void) | null;
+  postMessage(message: WorkerOutMsg): void;
 }
 const scope = self as unknown as E2eeWorkerScope;
 
@@ -86,28 +94,27 @@ function makeDecryptTransform(key: CryptoKey): TransformStream<Frame, Frame> {
   });
 }
 
-function attachPipe(key: CryptoKey, side: Side, readable: ReadableStream<Frame>, writable: WritableStream<Frame>): void {
-  const transform = side === "encrypt" ? makeEncryptTransform(key) : makeDecryptTransform(key);
-  // Fire-and-forget: this pipe runs for the lifetime of the pc/worker. A
-  // rejection here (pipe torn down under us) is expected teardown noise, not
-  // a crash — mirrors frameCipher's own fail-closed philosophy.
-  readable.pipeThrough(transform).pipeTo(writable).catch(() => {});
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
-let pendingInit: { key: CryptoKey; side: Side } | null = null;
+function attachPipe(key: CryptoKey, side: Side, readable: ReadableStream<Frame>, writable: WritableStream<Frame>): void {
+  const transform = side === "encrypt" ? makeEncryptTransform(key) : makeDecryptTransform(key);
+  // This pipe runs for the lifetime of the pc/worker. A rejection here (pipe
+  // torn down under us, or an encrypt/decrypt call that itself rejects) is
+  // surfaced to the main thread rather than swallowed — silent pipe death
+  // otherwise means permanent, undiagnosable media loss on that track.
+  readable
+    .pipeThrough(transform)
+    .pipeTo(writable)
+    .catch((err) => {
+      scope.postMessage({ op: "error", detail: `e2ee pipe failed (${side}): ${errMessage(err)}` });
+    });
+}
 
 scope.onmessage = (ev) => {
-  const msg = ev.data;
-  if (msg.op === "init") {
-    pendingInit = { key: msg.key, side: msg.side };
-    return;
-  }
-  // msg.op === "pipe": consumes the immediately-preceding "init" (see the
-  // module doc's wire-protocol note on why no correlation id is needed).
-  if (!pendingInit) return; // malformed sequence — defensive, should never happen
-  const { key, side } = pendingInit;
-  pendingInit = null;
-  attachPipe(key, side, msg.readable, msg.writable);
+  const { key, side, readable, writable } = ev.data;
+  attachPipe(key, side, readable, writable);
 };
 
 scope.onrtctransform = (ev) => {

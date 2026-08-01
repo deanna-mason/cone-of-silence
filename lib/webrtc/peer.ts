@@ -37,6 +37,13 @@ export interface PeerLinkOptions {
   onChannelState?: (channel: ChannelName, state: ChannelLifecycle, detail?: string) => void;
   onXferMessage?: (data: string | ArrayBuffer) => void;
   onXferDrain?: () => void;
+  /** Phase 5D hardening: the ONLY signal that e2ee media is silently dead —
+   *  a crashed worker, an undeliverable postMessage, a pipe that rejected
+   *  under it, or a VP9 pin that got skipped (E2EE on + no VP9 means the
+   *  H.264 packetizer can't packetize encrypted frames). Optional so
+   *  additivity holds: nothing calls this when opts.e2ee is absent, and no
+   *  predating caller needs to supply it. */
+  onE2eeFailure?: (detail: string) => void;
   /** Phase 5D (D15): every room key is present in production — the SESSION
    *  always supplies this. Absent ONLY in tests that predate 5D, where its
    *  absence must mean zero behavior change (no worker, no transform, no
@@ -60,6 +67,16 @@ interface LegacyEncodedStreams {
 type SenderWithStreams = RTCRtpSender & { createEncodedStreams(): LegacyEncodedStreams };
 type ReceiverWithStreams = RTCRtpReceiver & { createEncodedStreams(): LegacyEncodedStreams };
 
+/** The worker's only outbound message shape (lib/webrtc/e2ee.worker.ts) —
+ *  a pipe failure it can't recover from, relayed here to onE2eeFailure. */
+interface WorkerErrorMsg {
+  op: "error";
+  detail: string;
+}
+function isWorkerErrorMsg(data: unknown): data is WorkerErrorMsg {
+  return typeof data === "object" && data !== null && (data as { op?: unknown }).op === "error";
+}
+
 export class PeerLink {
   readonly channel: RTCDataChannel;
   readonly xfer: RTCDataChannel;
@@ -68,6 +85,13 @@ export class PeerLink {
    *  Created here, terminated in close() — a 4C rebuild always constructs a
    *  fresh PeerLink, so this is never reused across rebuilds either. */
   private readonly worker: Worker | null;
+  /** Guards against a second `track` event for a receiver already wired
+   *  (spec-legal: a transceiver's fired direction can go non-receiving →
+   *  receiving again). Without this, a second attach would call
+   *  `createEncodedStreams()` twice on the same receiver — which throws —
+   *  and since that throw happens inside `ontrack` BEFORE the
+   *  `onRemoteStream` call below it, the tile would silently never appear. */
+  private readonly attachedReceivers = new WeakSet<RTCRtpReceiver>();
   private makingOffer = false;
   private ignoreOffer = false;
 
@@ -80,74 +104,105 @@ export class PeerLink {
       ...(e2ee?.api === "encoded-streams" ? { encodedInsertableStreams: true } : {}),
     });
     this.pc = pc;
-    this.worker = e2ee ? new Worker(new URL("./e2ee.worker.ts", import.meta.url)) : null;
+    const worker = e2ee ? new Worker(new URL("./e2ee.worker.ts", import.meta.url)) : null;
+    this.worker = worker;
 
-    this.channel = pc.createDataChannel("cos", { negotiated: true, id: 0 });
-    this.channel.onopen = () => {
-      opts.onChannelOpen?.();
-      opts.onChannelState?.("cos", "open");
-    };
-    this.channel.onclose = () => opts.onChannelState?.("cos", "closed");
-    this.channel.onerror = (ev) => opts.onChannelState?.("cos", "error", errDetail(ev));
-    this.channel.onmessage = (ev) => {
-      if (typeof ev.data === "string") opts.onMessage?.(ev.data);
-    };
-
-    // The episode-exchange channel (Phase 5B). Negotiated like cos so creation
-    // can't glare, and constructed HERE so a Phase-4C rebuild — which builds a
-    // fresh PeerLink — re-creates both channels automatically (spec §5B).
-    this.xfer = pc.createDataChannel("cos-xfer", { negotiated: true, id: 1 });
-    this.xfer.binaryType = "arraybuffer";
-    this.xfer.bufferedAmountLowThreshold = XFER_LOW_WATER;
-    this.xfer.onopen = () => opts.onChannelState?.("xfer", "open");
-    this.xfer.onclose = () => opts.onChannelState?.("xfer", "closed");
-    this.xfer.onerror = (ev) => opts.onChannelState?.("xfer", "error", errDetail(ev));
-    this.xfer.onbufferedamountlow = () => opts.onXferDrain?.();
-    this.xfer.onmessage = (ev) => {
-      if (typeof ev.data === "string" || ev.data instanceof ArrayBuffer) opts.onXferMessage?.(ev.data);
-    };
-
-    for (const track of opts.localStream.getTracks()) {
-      const sender = pc.addTrack(track, opts.localStream);
-      // Additivity (D15): when e2ee is absent, this loop body is IDENTICAL
-      // to pre-5D — no getTransceivers() call, no transform, no pin — so a
-      // pre-5D fake pc (no getTransceivers/setCodecPreferences) never sees
-      // these calls and every predating test stays green unchanged.
-      if (e2ee) {
-        this.attachSenderTransform(sender);
-        const transceiver = pc.getTransceivers().find((t) => t.sender === sender);
-        if (transceiver) this.applyVp9Pin(transceiver);
+    // Everything below can throw (createEncodedStreams, setCodecPreferences,
+    // ...) before the constructor finishes. If it does, `worker` — created
+    // above — would otherwise leak with no reference anywhere for close()
+    // to terminate later. Catch, terminate, rethrow.
+    try {
+      if (worker) {
+        worker.onerror = (ev) => {
+          this.reportE2eeFailure(`e2ee worker error: ${ev.message || "unknown"}`);
+        };
+        worker.onmessageerror = () => {
+          this.reportE2eeFailure("e2ee worker received an unstructured-clonable message it could not deserialize");
+        };
+        worker.onmessage = (ev) => {
+          if (isWorkerErrorMsg(ev.data)) this.reportE2eeFailure(ev.data.detail);
+        };
       }
-    }
 
-    pc.onnegotiationneeded = async () => {
-      try {
-        this.makingOffer = true;
-        // Re-pin every transceiver ahead of each offer (spec: Codec pin) —
-        // catches any transceiver the addTrack-time pin above didn't see.
+      this.channel = pc.createDataChannel("cos", { negotiated: true, id: 0 });
+      this.channel.onopen = () => {
+        opts.onChannelOpen?.();
+        opts.onChannelState?.("cos", "open");
+      };
+      this.channel.onclose = () => opts.onChannelState?.("cos", "closed");
+      this.channel.onerror = (ev) => opts.onChannelState?.("cos", "error", errDetail(ev));
+      this.channel.onmessage = (ev) => {
+        if (typeof ev.data === "string") opts.onMessage?.(ev.data);
+      };
+
+      // The episode-exchange channel (Phase 5B). Negotiated like cos so creation
+      // can't glare, and constructed HERE so a Phase-4C rebuild — which builds a
+      // fresh PeerLink — re-creates both channels automatically (spec §5B).
+      this.xfer = pc.createDataChannel("cos-xfer", { negotiated: true, id: 1 });
+      this.xfer.binaryType = "arraybuffer";
+      this.xfer.bufferedAmountLowThreshold = XFER_LOW_WATER;
+      this.xfer.onopen = () => opts.onChannelState?.("xfer", "open");
+      this.xfer.onclose = () => opts.onChannelState?.("xfer", "closed");
+      this.xfer.onerror = (ev) => opts.onChannelState?.("xfer", "error", errDetail(ev));
+      this.xfer.onbufferedamountlow = () => opts.onXferDrain?.();
+      this.xfer.onmessage = (ev) => {
+        if (typeof ev.data === "string" || ev.data instanceof ArrayBuffer) opts.onXferMessage?.(ev.data);
+      };
+
+      for (const track of opts.localStream.getTracks()) {
+        const sender = pc.addTrack(track, opts.localStream);
+        // Additivity (D15): when e2ee is absent, this loop body is IDENTICAL
+        // to pre-5D — no getTransceivers() call, no transform, no pin — so a
+        // pre-5D fake pc (no getTransceivers/setCodecPreferences) never sees
+        // these calls and every predating test stays green unchanged.
         if (e2ee) {
-          for (const transceiver of pc.getTransceivers()) this.applyVp9Pin(transceiver);
+          this.attachSenderTransform(sender);
+          const transceiver = pc.getTransceivers().find((t) => t.sender === sender);
+          if (transceiver) this.applyVp9Pin(transceiver);
         }
-        await pc.setLocalDescription();
-        opts.sendSignal(JSON.stringify({ description: pc.localDescription }));
-      } catch {
-        // a failed negotiation is recovered by session teardown/rebuild
-      } finally {
-        this.makingOffer = false;
       }
-    };
 
-    pc.onicecandidate = (ev) => {
-      opts.sendSignal(JSON.stringify({ candidate: ev.candidate }));
-    };
+      pc.onnegotiationneeded = async () => {
+        try {
+          this.makingOffer = true;
+          // Re-pin every transceiver ahead of each offer (spec: Codec pin) —
+          // catches any transceiver the addTrack-time pin above didn't see.
+          if (e2ee) {
+            for (const transceiver of pc.getTransceivers()) this.applyVp9Pin(transceiver);
+          }
+          await pc.setLocalDescription();
+          opts.sendSignal(JSON.stringify({ description: pc.localDescription }));
+        } catch {
+          // a failed negotiation is recovered by session teardown/rebuild
+        } finally {
+          this.makingOffer = false;
+        }
+      };
 
-    pc.ontrack = (ev) => {
-      this.attachReceiverTransform(ev.receiver);
-      const stream = ev.streams[0];
-      if (stream) opts.onRemoteStream(stream);
-    };
+      pc.onicecandidate = (ev) => {
+        opts.sendSignal(JSON.stringify({ candidate: ev.candidate }));
+      };
 
-    pc.onconnectionstatechange = () => opts.onConnectionState?.(pc.connectionState);
+      pc.ontrack = (ev) => {
+        this.attachReceiverTransform(ev.receiver);
+        const stream = ev.streams[0];
+        if (stream) opts.onRemoteStream(stream);
+      };
+
+      pc.onconnectionstatechange = () => opts.onConnectionState?.(pc.connectionState);
+    } catch (err) {
+      worker?.terminate();
+      throw err;
+    }
+  }
+
+  /** The single funnel for every e2ee robustness signal (Phase 5D hardening):
+   *  a dead worker, an unrelayable pipe failure, or a skipped VP9 pin. Logs
+   *  via this directory's existing `console.error("[tag] ...")` idiom
+   *  (mesh.ts, media.ts) and forwards to the optional app-level callback. */
+  private reportE2eeFailure(detail: string): void {
+    console.error(`[e2ee] ${detail}`);
+    this.opts.onE2eeFailure?.(detail);
   }
 
   /** Feed a relayed payload (SDP or ICE) into the state machine. */
@@ -213,22 +268,33 @@ export class PeerLink {
       sender.transform = new RTCRtpScriptTransform(this.worker, { key: e2ee.mediaKey, side: "encrypt" });
     } else {
       const { readable, writable } = (sender as SenderWithStreams).createEncodedStreams();
-      this.worker.postMessage({ op: "init", key: e2ee.mediaKey, side: "encrypt" });
-      this.worker.postMessage({ op: "pipe", readable, writable }, [readable, writable]);
+      this.worker.postMessage({ op: "pipe", key: e2ee.mediaKey, side: "encrypt", readable, writable }, [
+        readable,
+        writable,
+      ]);
     }
   }
 
   /** Attaches a decrypt transform to a remote receiver — called from
-   *  `ontrack`, off `ev.receiver`, per pipe-per-track like the sender side. */
+   *  `ontrack`, off `ev.receiver`, per pipe-per-track like the sender side.
+   *  Guarded by `attachedReceivers`: a second `track` event for a receiver
+   *  already wired is spec-legal (a transceiver's fired direction can go
+   *  non-receiving → receiving again) but `createEncodedStreams()` throws on
+   *  a receiver that already has an active pipe — this makes that
+   *  unreachable rather than relying on it never happening in practice. */
   private attachReceiverTransform(receiver: RTCRtpReceiver): void {
     const e2ee = this.opts.e2ee;
     if (!e2ee || !this.worker) return;
+    if (this.attachedReceivers.has(receiver)) return;
+    this.attachedReceivers.add(receiver);
     if (e2ee.api === "script-transform") {
       receiver.transform = new RTCRtpScriptTransform(this.worker, { key: e2ee.mediaKey, side: "decrypt" });
     } else {
       const { readable, writable } = (receiver as ReceiverWithStreams).createEncodedStreams();
-      this.worker.postMessage({ op: "init", key: e2ee.mediaKey, side: "decrypt" });
-      this.worker.postMessage({ op: "pipe", readable, writable }, [readable, writable]);
+      this.worker.postMessage({ op: "pipe", key: e2ee.mediaKey, side: "decrypt", readable, writable }, [
+        readable,
+        writable,
+      ]);
     }
   }
 
@@ -248,8 +314,19 @@ export class PeerLink {
     // rather than crash the constructor.
     const rtpSender = (globalThis as { RTCRtpSender?: { getCapabilities(kind: string): RTCRtpCapabilities | null } })
       .RTCRtpSender;
-    const prefs = rtpSender ? vp9Preferences(rtpSender.getCapabilities("video")) : null;
-    if (prefs) transceiver.setCodecPreferences(prefs);
+    if (!rtpSender) {
+      // E2EE on, video track, but nothing to pin against — not "no
+      // preference," a broken call: with E2EE on, an unpinned H.264
+      // packetizer cannot packetize the now-opaque frames.
+      this.reportE2eeFailure("e2ee: VP9 pin skipped for a video track — RTCRtpSender.getCapabilities unavailable");
+      return;
+    }
+    const prefs = vp9Preferences(rtpSender.getCapabilities("video"));
+    if (!prefs) {
+      this.reportE2eeFailure("e2ee: VP9 pin skipped for a video track — platform has no VP9 codec");
+      return;
+    }
+    transceiver.setCodecPreferences(prefs);
   }
 
   /** App-message send over the cos channel. False (not queued) unless open. */

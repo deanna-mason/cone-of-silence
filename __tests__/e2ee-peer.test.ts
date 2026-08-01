@@ -123,6 +123,9 @@ class FakeWorker {
   static instances: FakeWorker[] = [];
   postMessage = vi.fn();
   terminate = vi.fn();
+  onerror: ((ev: ErrorEvent) => void) | null = null;
+  onmessageerror: ((ev: MessageEvent) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
   constructor(public url: unknown) {
     FakeWorker.instances.push(this);
   }
@@ -220,7 +223,7 @@ describe("PeerLink e2ee wiring — legacy encoded-streams api", () => {
     expect(FakeWorker.instances).toHaveLength(1);
   });
 
-  it("attaches a sender transform (createEncodedStreams + worker init/pipe) per local track", () => {
+  it("attaches a sender transform (createEncodedStreams + a single worker pipe message) per local track", () => {
     new PeerLink({
       ...base,
       localStream: trackStream(["audio", "video"]),
@@ -230,8 +233,12 @@ describe("PeerLink e2ee wiring — legacy encoded-streams api", () => {
     expect(pc.senders).toHaveLength(2);
     for (const s of pc.senders) expect(s.createEncodedStreams).toHaveBeenCalledOnce();
     const worker = FakeWorker.instances[0];
-    expect(worker.postMessage).toHaveBeenCalledTimes(4); // (init + pipe) * 2 tracks
-    expect(worker.postMessage).toHaveBeenNthCalledWith(1, { op: "init", key: mediaKey, side: "encrypt" });
+    expect(worker.postMessage).toHaveBeenCalledTimes(2); // one pipe message per track — no separate init
+    expect(worker.postMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ op: "pipe", key: mediaKey, side: "encrypt" }),
+      expect.anything(),
+    );
   });
 
   it("attaches a receiver transform off ev.receiver in ontrack", () => {
@@ -241,7 +248,22 @@ describe("PeerLink e2ee wiring — legacy encoded-streams api", () => {
     pc.ontrack!({ streams: [{} as MediaStream], receiver });
     expect(receiver.createEncodedStreams).toHaveBeenCalledOnce();
     const worker = FakeWorker.instances[0];
-    expect(worker.postMessage).toHaveBeenCalledWith({ op: "init", key: mediaKey, side: "decrypt" });
+    expect(worker.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "pipe", key: mediaKey, side: "decrypt" }),
+      expect.anything(),
+    );
+  });
+
+  it("second track event for the SAME receiver does not throw, does not double-attach, and does not block onRemoteStream", () => {
+    const onRemoteStream = vi.fn();
+    new PeerLink({ ...base, e2ee: { mediaKey, api: "encoded-streams" }, onRemoteStream });
+    const pc = FakePC.lastInstance!;
+    const receiver = new FakeReceiver();
+    const stream = {} as MediaStream;
+    expect(() => pc.ontrack!({ streams: [stream], receiver })).not.toThrow();
+    expect(() => pc.ontrack!({ streams: [stream], receiver })).not.toThrow();
+    expect(receiver.createEncodedStreams).toHaveBeenCalledOnce(); // second attach is a no-op
+    expect(onRemoteStream).toHaveBeenCalledTimes(2); // but the tile-surfacing call still fires both times
   });
 
   it("close() terminates the worker", () => {
@@ -291,6 +313,16 @@ describe("PeerLink e2ee wiring — script-transform api", () => {
     link.close();
     expect(FakeWorker.instances[0].terminate).toHaveBeenCalledOnce();
   });
+
+  it("second track event for the SAME receiver does not re-attach a transform", () => {
+    new PeerLink({ ...base, e2ee: { mediaKey, api: "script-transform" } });
+    const pc = FakePC.lastInstance!;
+    const receiver = new FakeReceiver();
+    pc.ontrack!({ streams: [{} as MediaStream], receiver });
+    const firstTransform = receiver.transform;
+    pc.ontrack!({ streams: [{} as MediaStream], receiver });
+    expect(receiver.transform).toBe(firstTransform); // untouched by the second event
+  });
 });
 
 describe("PeerLink e2ee wiring — VP9 codec pin", () => {
@@ -309,12 +341,37 @@ describe("PeerLink e2ee wiring — VP9 codec pin", () => {
   });
 
   it("skips the pin entirely when vp9Preferences returns null (platform has no VP9)", () => {
+    const onE2eeFailure = vi.fn();
     vi.stubGlobal("RTCRtpSender", {
       getCapabilities: vi.fn(() => ({ codecs: [{ mimeType: "video/H264" }], headerExtensions: [] })),
     });
-    new PeerLink({ ...base, localStream: trackStream(["video"]), e2ee: { mediaKey, api: "encoded-streams" } });
+    new PeerLink({
+      ...base,
+      localStream: trackStream(["video"]),
+      e2ee: { mediaKey, api: "encoded-streams" },
+      onE2eeFailure,
+    });
     const pc = FakePC.lastInstance!;
     expect(pc.transceivers[0].setCodecPreferences).not.toHaveBeenCalled();
+    expect(onE2eeFailure).toHaveBeenCalledWith(expect.stringContaining("platform has no VP9 codec"));
+  });
+
+  it("skips the pin without throwing when RTCRtpSender does not exist on the platform at all", () => {
+    // No vi.stubGlobal("RTCRtpSender", ...) here — jsdom defines no such
+    // global by default (see detectE2eeApi's own "returns null" test), so
+    // this exercises the genuinely-absent case, not just an empty-caps one.
+    const onE2eeFailure = vi.fn();
+    expect(() =>
+      new PeerLink({
+        ...base,
+        localStream: trackStream(["video"]),
+        e2ee: { mediaKey, api: "encoded-streams" },
+        onE2eeFailure,
+      }),
+    ).not.toThrow();
+    const pc = FakePC.lastInstance!;
+    expect(pc.transceivers[0].setCodecPreferences).not.toHaveBeenCalled();
+    expect(onE2eeFailure).toHaveBeenCalledWith(expect.stringContaining("RTCRtpSender.getCapabilities unavailable"));
   });
 
   it("re-pins every transceiver on negotiationneeded", async () => {
@@ -343,5 +400,79 @@ describe("PeerLink e2ee wiring — nonce-rule adjacent (per-pipe isolation)", ()
     ][];
     expect(pipeCalls).toHaveLength(2);
     expect(pipeCalls[0][0].readable).not.toBe(pipeCalls[1][0].readable);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hardening — worker/pipe failures surfaced (Task 4 review item 3)
+// ---------------------------------------------------------------------------
+describe("PeerLink e2ee wiring — worker/pipe failure surfacing", () => {
+  it("a worker onerror surfaces exactly once via onE2eeFailure", () => {
+    const onE2eeFailure = vi.fn();
+    new PeerLink({ ...base, e2ee: { mediaKey, api: "encoded-streams" }, onE2eeFailure });
+    const worker = FakeWorker.instances[0];
+    worker.onerror?.({ message: "worker crashed" } as ErrorEvent);
+    expect(onE2eeFailure).toHaveBeenCalledOnce();
+    expect(onE2eeFailure).toHaveBeenCalledWith(expect.stringContaining("worker crashed"));
+  });
+
+  it("a worker onmessageerror surfaces exactly once via onE2eeFailure", () => {
+    const onE2eeFailure = vi.fn();
+    new PeerLink({ ...base, e2ee: { mediaKey, api: "encoded-streams" }, onE2eeFailure });
+    const worker = FakeWorker.instances[0];
+    worker.onmessageerror?.({} as MessageEvent);
+    expect(onE2eeFailure).toHaveBeenCalledOnce();
+  });
+
+  it("a worker-relayed pipe error ({op:'error'}) surfaces exactly once with the worker's detail", () => {
+    const onE2eeFailure = vi.fn();
+    new PeerLink({ ...base, e2ee: { mediaKey, api: "encoded-streams" }, onE2eeFailure });
+    const worker = FakeWorker.instances[0];
+    worker.onmessage?.({ data: { op: "error", detail: "e2ee pipe failed (encrypt): boom" } } as MessageEvent);
+    expect(onE2eeFailure).toHaveBeenCalledOnce();
+    expect(onE2eeFailure).toHaveBeenCalledWith("e2ee pipe failed (encrypt): boom");
+  });
+
+  it("never calls onE2eeFailure when e2ee is absent (no worker to fail)", () => {
+    const onE2eeFailure = vi.fn();
+    new PeerLink({ ...base, onE2eeFailure });
+    expect(FakeWorker.instances).toHaveLength(0);
+    expect(onE2eeFailure).not.toHaveBeenCalled();
+  });
+
+  it("does not throw when a worker fails and onE2eeFailure was never supplied (still optional)", () => {
+    new PeerLink({ ...base, e2ee: { mediaKey, api: "encoded-streams" } });
+    const worker = FakeWorker.instances[0];
+    expect(() => worker.onerror?.({ message: "x" } as ErrorEvent)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hardening — orphaned worker cleanup (Task 4 review item 4)
+// ---------------------------------------------------------------------------
+describe("PeerLink e2ee wiring — orphaned worker cleanup on constructor throw", () => {
+  it("terminates the worker created by `new Worker` if the rest of the constructor throws", () => {
+    class ThrowingPC extends FakePC {
+      addTrack(): RTCRtpSender {
+        throw new Error("addTrack boom");
+      }
+    }
+    vi.stubGlobal("RTCPeerConnection", ThrowingPC);
+    expect(() =>
+      new PeerLink({ ...base, localStream: trackStream(["video"]), e2ee: { mediaKey, api: "encoded-streams" } }),
+    ).toThrow("addTrack boom");
+    expect(FakeWorker.instances).toHaveLength(1);
+    expect(FakeWorker.instances[0].terminate).toHaveBeenCalledOnce();
+  });
+
+  it("does not attempt to terminate anything when e2ee is absent and construction throws", () => {
+    class ThrowingPC extends FakePC {
+      addTrack(): RTCRtpSender {
+        throw new Error("addTrack boom");
+      }
+    }
+    vi.stubGlobal("RTCPeerConnection", ThrowingPC);
+    expect(() => new PeerLink({ ...base, localStream: trackStream(["video"]) })).toThrow("addTrack boom");
+    expect(FakeWorker.instances).toHaveLength(0); // nothing to leak — no worker was ever created
   });
 });
