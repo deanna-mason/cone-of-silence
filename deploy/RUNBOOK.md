@@ -109,6 +109,7 @@ Expected: 401/allocation failure. From a browser: open a room with
 Note: `?forceTurn=1` does not survive a page refresh (fragment re-entry
 drops the query string) — re-append it to the URL after any refresh.
 Health: `systemctl is-active coturn` alongside the existing checks.
+Episode exchange over a relayed call moves ~3 GB through coturn per episode (DTLS-encrypted, never stored) — ≈3‰ of the droplet's monthly transfer budget.
 
 ## Supabase keepalive
 

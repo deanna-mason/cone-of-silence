@@ -28,6 +28,23 @@ this is the human half of the same acceptance.
 | 8 | Mid-take, force-quit the browser on one host | At most the in-flight part is lost — concatenate that host's committed parts and confirm nothing earlier is missing |
 | 9 | Relaunch, re-open the invite, re-grant the Vault when Chrome prompts | Vault re-grant flow completes; a fresh ROLL TAPE is available |
 
+## Episode exchange drill (Slice 5B acceptance)
+
+Run after `node e2e/phase5b-e2e.js` passes twice headless — this is the
+human half of the same acceptance.
+
+| # | Step | Expect |
+|---|------|--------|
+| 10 | After the take, SEND EPISODE from one Mac | Both sides show a progress row (MB/s + ETA), climbing |
+| 11 | Kill the sender's wifi mid-transfer | Both sides show Transmission Interrupted (parked, not an error card) |
+| 12 | Restore the sender's wifi | The call recovers; a wifi drop hands out fresh peerIds even on the same room, so Resume Transmission is not offered — Stand Down, then SEND EPISODE again |
+| 13 | Watch the resumed transfer | Completes without re-sending any part the receiver already has on disk |
+| 14 | Check the receiver's take folder throughout | `episode.json` appears in it only at the very end, after every part has landed |
+
+Honest-throughput note: the sender's own uplink bounds the whole transfer —
+expect roughly 20 minutes for 3 GB at a 20 Mbps upload, not the LAN speed
+between the two Macs.
+
 ## Full dress rehearsal — 40 minutes (5C-time)
 
 Not run yet — the darkroom (5C) has to exist first to make 40 minutes of
