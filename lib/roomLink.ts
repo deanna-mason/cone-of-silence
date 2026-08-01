@@ -5,7 +5,7 @@
 const ROOM_PATH = "/room";
 const STASH_KEY = "cos-room";
 const TOKEN_BYTES = 16; // 128 bits
-const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/; // base64url of 16 bytes, no padding
+export const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/; // base64url of 16 bytes, no padding — shared with lib/crypto/derive.ts
 
 export interface RoomKeys {
   roomId: string;

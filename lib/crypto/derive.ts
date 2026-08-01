@@ -7,10 +7,11 @@
 // the API anyway, since none of them are extractable) can't be turned into
 // the others.
 
-// Matches lib/roomLink.ts's TOKEN_RE convention (22-char base64url of 16
-// bytes, no padding). Not imported from roomLink.ts because it isn't
-// exported there — this is an independent check of the same wire format.
-const SECRET_RE = /^[A-Za-z0-9_-]{22}$/;
+import { TOKEN_RE } from "../roomLink";
+
+// Reports which check failed (length vs. charset) without ever touching the
+// secret's own characters.
+const CHARSET_RE = /^[A-Za-z0-9_-]*$/;
 
 export interface RoomCryptoKeys {
   mediaKey: CryptoKey; // AES-GCM 256, encrypt|decrypt
@@ -23,18 +24,37 @@ export const INFO_MEDIA = "cos/media";
 export const INFO_XFER = "cos/xfer";
 export const INFO_PROOF = "cos/proof";
 
+function encodeBase64Url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
 /** base64url (22 chars, no padding) → 16 raw bytes. Throws TypeError on any
- * length/charset deviation from the room-secret wire format. */
+ * length/charset deviation from the room-secret wire format, or on a
+ * non-canonical encoding. Error messages never include the secret's value —
+ * it is never-sent key material and this may be surfaced by a caller's
+ * logging or an error boundary. */
 export function decodeSecret(secret: string): Uint8Array {
-  if (!SECRET_RE.test(secret)) {
+  if (!TOKEN_RE.test(secret)) {
     throw new TypeError(
-      `decodeSecret: expected a 22-char base64url room secret, got ${JSON.stringify(secret)}`,
+      `decodeSecret: invalid room secret (length ${secret.length}, charset ${
+        CHARSET_RE.test(secret) ? "ok" : "invalid"
+      }) — expected 22-char base64url`,
     );
   }
   const std = secret.replaceAll("-", "+").replaceAll("_", "/");
   const bin = atob(std);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  // 22 base64url chars carry 132 bits for 128 bits (16 bytes) of real data —
+  // the trailing 4 bits of the last character must be zero for a canonical
+  // encoding, otherwise multiple distinct strings decode to the same bytes
+  // (breaking the secret <-> encoding bijection every caller assumes).
+  // Re-encoding and comparing is the simplest correct canonicality check.
+  if (encodeBase64Url(bytes) !== secret) {
+    throw new TypeError("decodeSecret: non-canonical base64url encoding (trailing bits must be zero)");
+  }
   return bytes;
 }
 

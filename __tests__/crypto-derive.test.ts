@@ -38,6 +38,45 @@ describe("decodeSecret", () => {
       expect(() => decodeSecret(bad)).toThrow(TypeError);
     }
   });
+
+  it("never leaks the secret value in its error message (length/charset failure)", () => {
+    // The room secret is never-sent key material — a thrown error crossing
+    // an error boundary or landing in a log must not carry it. This marker
+    // is deliberately distinctive so a substring leak would be obvious.
+    const marker = "TOTALLY-SECRET-MARKER-VALUE-DO-NOT-LOG";
+    let thrown: unknown;
+    try {
+      decodeSecret(marker);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as Error).message).not.toContain(marker);
+  });
+
+  it("canonicality: rejects a non-canonical 22-char string whose trailing bits are nonzero, accepts its canonical sibling", () => {
+    // Both strings are valid length-22 base64url and decode to the SAME 16
+    // zero bytes (the last char's low 4 bits are unused padding for a
+    // trailing single-byte group) — only the canonical one (trailing bits
+    // all zero) may be accepted, or the secret<->encoding bijection breaks.
+    const canonical = "AAAAAAAAAAAAAAAAAAAAAA"; // last char 'A' (value 0) — trailing bits zero
+    const nonCanonical = "AAAAAAAAAAAAAAAAAAAAAB"; // last char 'B' (value 1) — trailing bits nonzero
+
+    expect(() => decodeSecret(canonical)).not.toThrow();
+    expect(() => decodeSecret(nonCanonical)).toThrow(TypeError);
+  });
+
+  it("never leaks the secret value in its error message (non-canonical failure)", () => {
+    const nonCanonical = "AAAAAAAAAAAAAAAAAAAAAB";
+    let thrown: unknown;
+    try {
+      decodeSecret(nonCanonical);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as Error).message).not.toContain(nonCanonical);
+  });
 });
 
 describe("deriveBitsForTest", () => {
