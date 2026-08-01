@@ -50,6 +50,21 @@ class FakeStore implements ReceiverStore {
   manifestCalls: Array<{ episodeId: string; remote: { video: SidecarEntry[]; audio: SidecarEntry[] }; from: string | null }> =
     [];
   parts = new Map<string, FakePartState>();
+  /** Names whose commit() blocks until releaseCommit(name) is called — lets
+   *  a test deterministically race a park/restart/fault against an
+   *  in-flight commit rather than hoping timing lines up. */
+  private commitGates = new Map<string, Promise<void>>();
+  private commitReleasers = new Map<string, () => void>();
+
+  holdCommit(name: string): void {
+    this.commitGates.set(
+      name,
+      new Promise<void>((resolve) => this.commitReleasers.set(name, resolve)),
+    );
+  }
+  releaseCommit(name: string): void {
+    this.commitReleasers.get(name)?.();
+  }
 
   async scanCommitted(episodeId: string): Promise<string[]> {
     this.ops.push(`scan:${episodeId}`);
@@ -66,6 +81,8 @@ class FakeStore implements ReceiverStore {
         state.chunks.push(bytes);
       },
       commit: async () => {
+        const gate = this.commitGates.get(entry.name);
+        if (gate) await gate;
         if (this.hashMismatchFor.has(entry.name)) {
           this.ops.push(`commit-fail:${entry.name}`);
           throw new HashMismatchError(entry.name);
@@ -390,17 +407,22 @@ describe("EpisodeReceiver", () => {
     expect(link.frames().some((f) => f.t === "xfr/done")).toBe(false);
 
     // Recovery: a re-offer of the same episode, now with both parts already
-    // committed on disk, rescans, finds everything committed, and retries —
-    // this time writeManifest succeeds.
+    // committed on disk, rescans, finds everything committed, and — right
+    // there in the same adopt() — retries the manifest write. This time it
+    // succeeds: a second manifest op, xfr/done, and phase done, all off the
+    // back of the re-offer alone (no third part ever needs to move).
+    const manifestCallsBefore = store.manifestCalls.length;
     store.manifestRejects = null;
     link.sent = [];
     receiver.handleFrame(PEER, offer("ep-6b", files));
     await flush();
 
+    expect(store.manifestCalls.length).toBe(manifestCallsBefore + 1);
     expect(link.frames()).toEqual([
       { t: "xfr/have", v: 1, episodeId: "ep-6b", committed: expect.arrayContaining(["audio.part000", "video.part000"]) },
+      { t: "xfr/done", v: 1, episodeId: "ep-6b" },
     ]);
-    expect(cb.lastPhase()).toBe("receiving");
+    expect(cb.lastPhase()).toBe("done");
   });
 
   // -- (g) handleChannelClosed mid-part -> abandon, parked; resumes on offer -
@@ -442,6 +464,126 @@ describe("EpisodeReceiver", () => {
     receiver.handleChannelClosed();
     await flush();
     expect(cb.phases).toEqual([]);
+  });
+
+  // -- fix round: post-commit continuations must not resurrect a superseded
+  // generation (review findings #1/#2) --------------------------------------
+  it("a channel close racing an in-flight commit parks cleanly: no part-committed/done after park, and the committed part is never abandoned", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { receiver, link } = makeReceiver(store, cb);
+    const a0 = audioEntry("audio.part000", 2);
+    const v0 = videoEntry("video.part000", 2);
+    const files = plan([a0], [v0]);
+    store.holdCommit("audio.part000");
+
+    receiver.handleFrame(PEER, offer("ep-race1", files));
+    await flush();
+    await sendWholePart(receiver, "ep-race1", a0, ["aa"]); // appended; commit() is now blocked on the gate
+    link.sent = [];
+
+    receiver.handleChannelClosed(); // races the still-pending commit
+    await flush();
+    expect(cb.lastPhase()).toBe("parked");
+
+    store.releaseCommit("audio.part000");
+    await flush();
+
+    // the commit itself completed for real (disk truth)...
+    expect(store.ops).toContain("commit:audio.part000");
+    // ...but nothing was sent for it, phase was never pulled back to
+    // receiving/done, and the now-committed part was never abandoned even
+    // though a park was in flight when it landed.
+    expect(link.frames()).toEqual([]);
+    expect(cb.lastPhase()).toBe("parked");
+    expect(store.ops.filter((o) => o.startsWith("abandon:"))).toEqual([]);
+  });
+
+  it("a fault racing an in-flight commit does not resurrect part-committed/done once the commit resolves", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { receiver, link } = makeReceiver(store, cb);
+    const a0 = audioEntry("audio.part000", 2);
+    const v0 = videoEntry("video.part000", 2);
+    const files = plan([a0], [v0]);
+    store.holdCommit("audio.part000");
+
+    receiver.handleFrame(PEER, offer("ep-race2", files));
+    await flush();
+    await sendWholePart(receiver, "ep-race2", a0, ["aa"]); // appended; commit() blocked on the gate
+    link.sent = [];
+
+    // an unrelated protocol fault (malformed xfr/part) lands while the
+    // audio commit is still in flight — this also races an abandon against
+    // the very same in-flight commit, exercising the same guard.
+    receiver.handleFrame(
+      PEER,
+      JSON.stringify({ t: "xfr/part", v: 1, episodeId: "ep-race2", name: "video.part000", size: 2, sha256: "z", chunks: "bad" }),
+    );
+    await flush();
+    expect(cb.lastPhase()).toBe("fault");
+
+    store.releaseCommit("audio.part000");
+    await flush();
+
+    expect(store.ops).toContain("commit:audio.part000");
+    expect(link.frames().some((f) => f.t === "xfr/part-committed")).toBe(false);
+    expect(link.frames().some((f) => f.t === "xfr/done")).toBe(false);
+    expect(cb.lastPhase()).toBe("fault"); // not pulled back to receiving/done
+    expect(store.ops.filter((o) => o.startsWith("abandon:"))).toEqual([]); // committed, never abandoned
+  });
+
+  it("a same-episode restart racing an in-flight commit suppresses the stale generation's part-committed, but the resumed scan still sees the committed part", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { receiver, link } = makeReceiver(store, cb);
+    const a0 = audioEntry("audio.part000", 2);
+    const files = plan([a0], [videoEntry("video.part000")]);
+    store.holdCommit("audio.part000");
+
+    receiver.handleFrame(PEER, offer("ep-race3", files));
+    await flush();
+    await sendWholePart(receiver, "ep-race3", a0, ["aa"]); // appended; commit() blocked on the gate
+    link.sent = [];
+
+    receiver.handleFrame(PEER, offer("ep-race3", files)); // same-episode restart, mid-commit
+    await flush(); // the restart's own scan can't run yet — it's queued behind the still-pending commit
+
+    store.releaseCommit("audio.part000");
+    await flush();
+
+    expect(link.frames().some((f) => f.t === "xfr/part-committed")).toBe(false);
+    const haveFrames = link.frames().filter((f) => f.t === "xfr/have");
+    expect(haveFrames.at(-1)).toEqual({ t: "xfr/have", v: 1, episodeId: "ep-race3", committed: ["audio.part000"] });
+  });
+
+  // -- fix round: a chunk past the announced count must fault immediately,
+  // not depend on timing (review finding #3) --------------------------------
+  it("a chunk past the announced count faults immediately, even while the part's own commit is still in flight", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { receiver, link } = makeReceiver(store, cb);
+    const a0 = audioEntry("audio.part000", 2);
+    const files = plan([a0], [videoEntry("video.part000")]);
+    store.holdCommit("audio.part000");
+
+    receiver.handleFrame(PEER, offer("ep-strag", files));
+    await flush();
+    receiver.handleFrame(PEER, partFrame("ep-strag", a0, 1));
+    receiver.handleFrame(PEER, chunkBuf(0, "aa")); // the only expected chunk; commit() now blocked on the gate
+    await flush();
+    link.sent = [];
+
+    receiver.handleFrame(PEER, chunkBuf(1, "bb")); // straggler: seq === old nextSeq, but past chunksExpected
+    await flush();
+
+    expect(cb.lastPhase()).toBe("fault");
+    expect(link.frames().some((f) => f.t === "xfr/fault")).toBe(true);
+    expect(store.ops.filter((o) => o.startsWith("append:"))).toEqual(["append:audio.part000:2"]); // the straggler never appended
+
+    store.releaseCommit("audio.part000"); // let the original commit resolve too — must not resurrect anything
+    await flush();
+    expect(link.frames().some((f) => f.t === "xfr/part-committed")).toBe(false);
   });
 
   // -- offer while receiving: different episode ignored; same restarts -----

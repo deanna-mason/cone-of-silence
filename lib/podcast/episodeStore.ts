@@ -152,6 +152,10 @@ export async function openIncomingPart(takeId: string, entry: SidecarEntry): Pro
         // best-effort — the writable may already be closed or broken
       }
       try {
+        // Deliberately targets ONLY the temp name, never entry.name — a
+        // cross-module invariant transfer.ts's EpisodeReceiver leans on: a
+        // stale abandon() racing a just-resolved commit() can never touch
+        // the committed file, because by then this name doesn't exist.
         await dir.removeEntry(tempName);
       } catch {
         // best-effort — the temp may already be gone (committed or never opened)

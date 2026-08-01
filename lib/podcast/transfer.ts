@@ -79,6 +79,11 @@ interface ActiveSlot {
   nextSeq: number;
   bytesWritten: number;
   partPromise: Promise<IncomingPart>;
+  /** Set once commit() resolves. Disk truth from then on: commit and
+   *  abandon are mutually exclusive per part (Task 5 advisory) — this flag
+   *  makes that structural instead of an accident of episodeStore's
+   *  abandon() happening to target only the temp name. */
+  committed: boolean;
 }
 
 /**
@@ -90,6 +95,13 @@ interface ActiveSlot {
  * interleave with chunk N's, or a commit could race a park's abandon of the
  * same part. One chain also gives manifest-after-every-commit and
  * abandon-before-rescan ordering for free.
+ *
+ * Every state transition (adopt, park, fault, dispose) nulls or reassigns
+ * `activePart` in the SAME synchronous step it changes `phase`/`epoch` — so
+ * a part-level continuation can check `this.activePart === slot` as a
+ * complete "has anything superseded me?" test. Episode-level continuations
+ * (no slot to compare) instead pin the `epoch` they started under and
+ * re-check it via `superseded()`.
  */
 export class EpisodeReceiver {
   private phase: ReceiverPhase = "idle";
@@ -99,7 +111,9 @@ export class EpisodeReceiver {
   private committedNames = new Set<string>();
   private activePart: ActiveSlot | null = null;
   private disposed = false;
-  /** Bumped on every adopt() so a scan/have from a superseded offer is dropped silently. */
+  /** Bumped on every adopt() so an episode-level continuation from a
+   *  superseded generation (a park/restart/dispose raced it) can detect it
+   *  and drop itself via superseded(). */
   private epoch = 0;
   private chain: Promise<void> = Promise.resolve();
 
@@ -158,6 +172,7 @@ export class EpisodeReceiver {
   private abandonSlot(slot: ActiveSlot | null): void {
     if (!slot) return;
     this.enqueue(async () => {
+      if (slot.committed) return; // commit already won the race — never abandon a committed part
       try {
         const part = await slot.partPromise;
         await part.abandon();
@@ -167,6 +182,12 @@ export class EpisodeReceiver {
     });
   }
 
+  /** True once a park/restart/dispose has superseded the episode-level
+   *  generation `epoch` was pinned to. */
+  private superseded(epoch: number): boolean {
+    return this.disposed || this.phase !== "receiving" || epoch !== this.epoch;
+  }
+
   // -- outbound frames ---------------------------------------------------
 
   private send(frame: XferFrame): void {
@@ -174,21 +195,16 @@ export class EpisodeReceiver {
     this.link.send(encodeFrame(frame));
   }
 
-  private enterFault(episodeId: string, reason: string): void {
+  /** The one path to "fault": sends xfr/fault and abandons whatever part is
+   *  currently in flight — no fault can ever leak an in-flight temp. */
+  private fault(reason: string, episodeId: string = this.episodeId ?? ""): void {
     if (this.disposed) return;
+    const slot = this.activePart;
     this.phase = "fault";
     this.activePart = null;
+    this.abandonSlot(slot);
     this.send({ t: "xfr/fault", v: 1, episodeId, reason });
     this.cb.onPhase("fault", reason);
-  }
-
-  /** A protocol fault tied to the currently in-flight part: sends xfr/fault
-   *  and abandons that part (never re-committed, never mistaken for done). */
-  private faultAbandoningActive(reason: string): void {
-    const slot = this.activePart;
-    const episodeId = this.episodeId ?? "";
-    this.enterFault(episodeId, reason);
-    this.abandonSlot(slot);
   }
 
   // -- xfr/offer -----------------------------------------------------------
@@ -196,7 +212,7 @@ export class EpisodeReceiver {
   private onOffer(raw: Record<string, unknown>): void {
     if (!isValidOffer(raw)) {
       const episodeId = typeof raw.episodeId === "string" ? raw.episodeId : (this.episodeId ?? "");
-      this.enterFault(episodeId, "malformed offer");
+      this.fault("malformed offer", episodeId);
       return;
     }
     const { episodeId, from, files } = raw;
@@ -209,7 +225,11 @@ export class EpisodeReceiver {
   }
 
   /** idle/parked/done/fault -> fresh adopt; receiving the SAME episode ->
-   *  clean restart (abandon in-flight part, rescan, re-have). */
+   *  clean restart (abandon in-flight part, rescan, re-have). A resumed
+   *  episode that turns out to already have every part committed (e.g. a
+   *  prior manifest write faulted after every commit had already landed)
+   *  finishes right here too — allPartsCommitted() isn't only reachable
+   *  from commitPart(). */
   private adopt(episodeId: string, from: string | null, files: FilePlan[]): void {
     const epoch = ++this.epoch;
     const priorSlot = this.activePart;
@@ -223,15 +243,16 @@ export class EpisodeReceiver {
 
     this.abandonSlot(priorSlot);
     this.enqueue(async () => {
-      if (this.disposed || epoch !== this.epoch) return;
+      if (this.superseded(epoch)) return;
       try {
         const committed = await this.store.scanCommitted(episodeId);
-        if (this.disposed || epoch !== this.epoch) return;
+        if (this.superseded(epoch)) return;
         this.committedNames = new Set(committed);
         this.send({ t: "xfr/have", v: 1, episodeId, committed });
+        if (this.allPartsCommitted()) await this.finishEpisode(epoch);
       } catch (err) {
-        if (this.disposed || epoch !== this.epoch) return;
-        this.enterFault(episodeId, `scan:${errMessage(err)}`);
+        if (this.superseded(epoch)) return;
+        this.fault(`scan:${errMessage(err)}`);
       }
     });
   }
@@ -241,7 +262,7 @@ export class EpisodeReceiver {
   private onPart(raw: Record<string, unknown>): void {
     if (this.phase !== "receiving") return; // stray part frame outside an active receive
     if (!isValidPartFrame(raw)) {
-      this.faultAbandoningActive("malformed part frame");
+      this.fault("malformed part frame");
       return;
     }
     if (raw.episodeId !== this.episodeId) return; // stray frame for a superseded/foreign episode
@@ -259,6 +280,7 @@ export class EpisodeReceiver {
       nextSeq: 0,
       bytesWritten: 0,
       partPromise: null as unknown as Promise<IncomingPart>,
+      committed: false,
     };
     slot.partPromise = this.enqueue(() => this.store.openIncomingPart(episodeId, entry));
     this.activePart = slot;
@@ -269,20 +291,30 @@ export class EpisodeReceiver {
 
     const envelope = decodeChunk(buf);
     if (!envelope) {
-      this.faultAbandoningActive("malformed chunk");
+      this.fault("malformed chunk");
       return;
     }
     if (!this.activePart) {
-      this.faultAbandoningActive("chunk with no announced part");
+      this.fault("chunk with no announced part");
       return;
     }
     if (envelope.enc !== 0) {
-      this.faultAbandoningActive(`unexpected enc=${envelope.enc}`); // 5B always plaintext; 5D will accept enc=1
+      this.fault(`unexpected enc=${envelope.enc}`); // 5B always plaintext; 5D will accept enc=1
       return;
     }
     const slot = this.activePart;
+    // Bounded strictly by the announced count, not merely by matching
+    // nextSeq: once every expected chunk has arrived, ANY further chunk
+    // must fault immediately — a straggler whose seq happens to equal
+    // nextSeq must never silently slip through while the commit it trails
+    // is still in flight (it would only be caught by accident, and only
+    // sometimes, depending on how far that commit had gotten).
+    if (slot.nextSeq >= slot.chunksExpected) {
+      this.fault("chunk past announced count");
+      return;
+    }
     if (envelope.seq !== slot.nextSeq) {
-      this.faultAbandoningActive(`chunk seq ${envelope.seq}, expected ${slot.nextSeq}`);
+      this.fault(`chunk seq ${envelope.seq}, expected ${slot.nextSeq}`);
       return;
     }
 
@@ -306,7 +338,7 @@ export class EpisodeReceiver {
         if (isLast) await this.commitPart(slot);
       } catch (err) {
         if (this.activePart !== slot || this.disposed) return;
-        this.faultAbandoningActive(`append:${errMessage(err)}`);
+        this.fault(`append:${errMessage(err)}`);
       }
     });
   }
@@ -316,19 +348,22 @@ export class EpisodeReceiver {
     try {
       await part.commit();
     } catch (err) {
-      if (this.disposed) return;
-      // The store already deleted the temp on a hash mismatch (episodeStore
-      // contract) — no abandon() needed; a future re-offer re-sends it,
-      // that IS the recovery.
+      if (this.activePart !== slot || this.disposed) return; // superseded while the commit was in flight
       const reason = err instanceof HashMismatchError ? `hash-mismatch:${err.partName}` : `commit:${errMessage(err)}`;
-      this.enterFault(this.episodeId ?? "", reason);
+      this.fault(reason);
       return;
     }
-    if (this.activePart === slot) this.activePart = null;
+    // Disk truth from here regardless of what raced it: never abandon this
+    // part again (Task 5 advisory — commit and abandon are mutually
+    // exclusive), set BEFORE the supersession check below so a concurrently
+    // queued abandon (from whatever superseded us) sees it once its turn
+    // on the chain comes up.
+    slot.committed = true;
     this.committedNames.add(slot.entry.name);
-    if (this.disposed) return;
+    if (this.activePart !== slot || this.disposed) return; // a park/restart/dispose raced the commit to the finish line — disk is correct, nothing more to send for this generation
+    this.activePart = null;
     this.send({ t: "xfr/part-committed", v: 1, episodeId: this.episodeId ?? "", name: slot.entry.name });
-    if (this.allPartsCommitted()) await this.finishEpisode();
+    if (this.allPartsCommitted()) await this.finishEpisode(this.epoch);
   }
 
   private allPartsCommitted(): boolean {
@@ -351,19 +386,24 @@ export class EpisodeReceiver {
    *  trigger. A rejection (e.g. a corrupt local sidecar propagating per
    *  episodeStore's writeManifest contract) is a fault, not a crash: a
    *  later re-offer of the same episode rescans, finds all parts already
-   *  committed, and retries the manifest — that IS the recovery. */
-  private async finishEpisode(): Promise<void> {
+   *  committed, and adopt()'s own allPartsCommitted() check retries the
+   *  manifest right there — that IS the recovery. `epoch` pins this call to
+   *  the generation that earned it, so a park/restart racing the
+   *  writeManifest() await can't resurrect a done/fault frame for a
+   *  generation that has already moved on. */
+  private async finishEpisode(epoch: number): Promise<void> {
     const remote = this.buildRemoteLists();
+    const episodeId = this.episodeId ?? "";
     try {
-      await this.store.writeManifest(this.episodeId ?? "", remote, this.fromCodename);
+      await this.store.writeManifest(episodeId, remote, this.fromCodename);
     } catch (err) {
-      if (this.disposed) return;
-      this.enterFault(this.episodeId ?? "", `manifest:${errMessage(err)}`);
+      if (this.superseded(epoch)) return;
+      this.fault(`manifest:${errMessage(err)}`, episodeId);
       return;
     }
-    if (this.disposed) return;
+    if (this.superseded(epoch)) return;
     this.phase = "done";
-    this.send({ t: "xfr/done", v: 1, episodeId: this.episodeId ?? "" });
+    this.send({ t: "xfr/done", v: 1, episodeId });
     this.cb.onPhase("done");
   }
 }
