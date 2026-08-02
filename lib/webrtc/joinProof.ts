@@ -184,8 +184,19 @@ export class JoinProof {
     this.remotePeerId = deps.remotePeerId;
     this.events = deps.events;
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
-    this.clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
+    // Bound to globalThis, not passed bare: every call site below invokes
+    // these as `this.setTimeoutFn(...)`/`this.clearTimeoutFn(...)` (a method
+    // call on THIS JoinProof instance), and real Chromium's WebIDL-branded
+    // setTimeout/clearTimeout throw "Illegal invocation" when called with a
+    // receiver that isn't the global object — confirmed live (e2e/phase5d-
+    // e2e.js's first real-browser run of this class: JoinProof.start() threw
+    // on the very first call, breaking every real E2EE join). jsdom/Node's
+    // setTimeout has no such receiver check, so every prior unit test (which
+    // never overrides these deps) passed anyway and never caught it. Fake
+    // timer injection for tests (deps.setTimeoutFn/clearTimeoutFn) is
+    // unaffected — those are plain functions with no `this` requirement.
+    this.setTimeoutFn = deps.setTimeoutFn ?? setTimeout.bind(globalThis);
+    this.clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout.bind(globalThis);
   }
 
   get phase(): ProofPhase {

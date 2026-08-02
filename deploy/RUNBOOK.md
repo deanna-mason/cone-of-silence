@@ -5,6 +5,10 @@ DigitalOcean droplet behind Caddy (automatic Let's Encrypt TLS) at
 **api.coneofsilence.app**. The frontend stays on Vercel. This file is enough to
 rebuild the box from scratch.
 
+## Encryption
+
+E2EE: media frames and episode chunks are AES-GCM under keys derived from the never-sent URL-fragment secret; the droplet relays ciphertext only.
+
 ## The box
 
 | Item | Value |

@@ -62,3 +62,16 @@ a single 40-minute take, exchange the episode (Slice 5B drill), then:
 Quality-max alternative (rejected for live use): native iPhone 4K capture —
 iOS camera exclusivity means the phone can't feed the call while recording,
 so no live monitoring.
+
+## E2EE drills (Slice 5D acceptance)
+
+Run after `node e2e/phase5d-e2e.js` passes twice headless — this is the human
+half of the same acceptance. Two Macs, both hosts on the SAME invite link.
+
+| # | Step | Expect |
+|---|------|--------|
+| 20 | Hold a call, open `chrome://webrtc-internals` on either Mac | Selected outbound and inbound video codec is VP9 |
+| 21 | Paste the invite link into a THIRD browser/profile, but hand-edit the `s=` fragment to any other 22-character value before opening it | That browser shows "The Room Refused Your Papers" (◈ Countersign Rejected) — never a tile, never counted in "Agents present" |
+| 22 | Watch the two original hosts while step 21 happens | Neither shows any card or interruption — the call continues exactly as before |
+| 23 | Restart the signaling service (or, on a dev box, kill/respawn per the RUNBOOK) mid-call | Both sides show "Signal lost — re-establishing…", then recover: video and audio resume automatically, no fresh invite needed |
+| 24 | Exchange a short episode after the restart in step 23 | Transfer completes; the receiving Mac's part hashes verify (Slice 5B drill) |
