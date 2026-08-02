@@ -71,7 +71,8 @@ half of the same acceptance. Two Macs, both hosts on the SAME invite link.
 | # | Step | Expect |
 |---|------|--------|
 | 20 | Hold a call, open `chrome://webrtc-internals` on either Mac | Selected outbound and inbound video codec is VP9 |
-| 21 | Paste the invite link into a THIRD browser/profile, but hand-edit the `s=` fragment to any other 22-character value before opening it | That browser shows "The Room Refused Your Papers" (◈ Countersign Rejected) — never a tile, never counted in "Agents present" |
-| 22 | Watch the two original hosts while step 21 happens | Neither shows any card or interruption — the call continues exactly as before |
-| 23 | Restart the signaling service (or, on a dev box, kill/respawn per the RUNBOOK) mid-call | Both sides show "Signal lost — re-establishing…", then recover: video and audio resume automatically, no fresh invite needed |
-| 24 | Exchange a short episode after the restart in step 23 | Transfer completes; the receiving Mac's part hashes verify (Slice 5B drill) |
+| 21 | On each Mac, look at the OTHER host's remote video tile, and in `chrome://webrtc-internals` watch the inbound video stream's `framesDecoded` counter for ~10s | The remote tile shows LIVE MOTION (not a frozen or black frame) AND `framesDecoded` is actively CLIMBING — VP9 being selected (step 20) is not enough on its own. A connected call, VP9 selected, but a black/frozen tile with `framesDecoded` stuck means the receiver-side encrypted-media transform is broken on that browser. **This is a slice-blocking finding to report, not a cosmetic nit** — stop and flag it rather than noting it and moving on |
+| 22 | Paste the invite link into a THIRD browser/profile, but hand-edit the `s=` fragment to any OTHER 22-character base64url value (characters A–Z, a–z, 0–9, `-`, `_` only — a non-base64url character sends you down a different, unrelated failure path and is not this drill) before opening it | That browser shows "The Room Refused Your Papers" (◈ Countersign Rejected) — never a tile, never counted in "Agents present" |
+| 23 | Watch the two original hosts while step 22 happens | Neither shows any card or interruption — the call continues exactly as before |
+| 24 | Restart the signaling service (or, on a dev box, kill/respawn per the RUNBOOK) mid-call | Both sides show "Signal lost — re-establishing…", then recover: video and audio resume automatically, no fresh invite needed |
+| 25 | Exchange a short episode after the restart in step 24 | Transfer completes; the receiving Mac's part hashes verify (Slice 5B drill) |

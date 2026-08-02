@@ -335,6 +335,12 @@ async function spawnServer(tokenFile) {
 
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
+      // Review fix (Minor 5): without killing it, a server that never
+      // reported "listening" (but is still alive) leaks past this reject —
+      // an orphan still holding :8787 makes the NEXT run's portInUse()
+      // precheck abort immediately, which is exactly the wrong failure mode
+      // for a gate that must run twice consecutively.
+      child.kill("SIGTERM");
       reject(new Error(`signaling server did not report listening within 15s.\nstdout: ${stdout}\nstderr: ${stderr}`));
     }, 15000);
     const poll = setInterval(() => {
@@ -347,6 +353,10 @@ async function spawnServer(tokenFile) {
     child.once("exit", (code) => {
       clearTimeout(timer);
       clearInterval(poll);
+      // Already exited on this path, but killing is harmless (no-op on a
+      // dead pid) and keeps this branch symmetric with the timeout branch
+      // above rather than relying on "this one happens to not need it".
+      child.kill("SIGTERM");
       reject(new Error(`signaling server exited early (code ${code}).\nstdout: ${stdout}\nstderr: ${stderr}`));
     });
   });
@@ -742,17 +752,34 @@ async function seedMarkerFixture(page, takeDir, partBytes, marker) {
 
     // =====================================================================
     // Check 5: kill + respawn the signaling server (phase2 Check-13 pattern).
-    // Links rebuild, re-proof runs (see Check 1's reasoning — the stream can
-    // only resurface once the FRESH link's proof re-proves), videos flow
-    // again, framesDecoded resumes increasing on the rebuilt link. See the
-    // header's deviation note 2 for why "IV prefixes differ" is proven via
-    // pc identity + resumed decrypt liveness rather than exposing the
-    // worker's internal random bytes.
+    // Links rebuild, re-proof runs, videos flow again, framesDecoded resumes
+    // increasing on the rebuilt link. See the header's deviation note 2 for
+    // why "IV prefixes differ" is proven via pc identity + resumed decrypt
+    // liveness rather than exposing the worker's internal random bytes.
+    //
+    // Review fix (Important 2): none of "Agents present: 2", waitRemoteVideos
+    // Flowing, or framesDecoded actually PROVES re-proof ran on the FRESH
+    // link, even though earlier wording here claimed it did:
+    //   - roster() filters on the STICKY `everProven` (mesh.ts) — a peer
+    //     proven before the rebuild keeps its roster row through the
+    //     re-proof window regardless of whether the fresh proof has settled
+    //     yet, so "Agents present: 2" surviving proves nothing new here.
+    //   - waitRemoteVideosFlowing's videoWidth>0 check can pass against a
+    //     STALE <video> element still holding the old (ended) stream —
+    //     videoWidth persists after a track ends, so this alone doesn't
+    //     prove the NEW link's proof completed either.
+    //   - transforms attach regardless of proof state (D16) — framesDecoded
+    //     resuming says the rebuilt decrypt pipeline works, not that the
+    //     APP trusts this peer again.
+    // The actual re-proof-completed signal is `dcOpen`: mesh.ts's
+    // openChannels() aggregate filters on the STRICT `proven` flag (reset to
+    // false, unconditionally, on every fresh rising edge by session.ts's
+    // buildLink — see mesh.setProven(peerId, false) there), so dcOpen going
+    // true again after the respawn is a zero-production-change proof the
+    // fresh link's join-proof actually completed. Asserted explicitly below.
     // =====================================================================
     const pcCountBeforeA = await pcCount(pageA);
     const pcCountBeforeB = await pcCount(pageB);
-    const prefixProxyA = await pageA.evaluate(() => window.__pcs[window.__pcs.length - 1]); // identity only, never resolved to Node
-    void prefixProxyA;
 
     server.kill("SIGTERM");
     await new Promise((resolve) => {
@@ -769,7 +796,15 @@ async function seedMarkerFixture(page, takeDir, partBytes, marker) {
     await pageB.getByText("Agents present: 2").waitFor({ timeout: 90000 });
     await waitRemoteVideosFlowing(pageA, 1, 30000);
     await waitRemoteVideosFlowing(pageB, 1, 30000);
-    check(true, "check 5: server respawned — links rebuild, re-proof runs (video only resurfaces once re-proven), video flows again");
+    check(true, "check 5: server respawned — call recovers, roster shows both agents again, video visibly present");
+
+    // The actual re-proof proof (Important 2 fix): dcOpen is gated on the
+    // STRICT per-rising-edge `proven` flag, not the sticky `everProven` the
+    // roster count above relies on — this can only be true again once the
+    // fresh link's join-proof has genuinely completed.
+    await pageA.waitForFunction(() => window.__cosCall && window.__cosCall.dcOpen === true, { timeout: 15000 });
+    await pageB.waitForFunction(() => window.__cosCall && window.__cosCall.dcOpen === true, { timeout: 15000 });
+    check(true, "check 5: dcOpen is true again on both sides — the FRESH link's join-proof actually re-completed (strict `proven`, not sticky `everProven`)");
 
     const pcCountAfterA = await pcCount(pageA);
     const pcCountAfterB = await pcCount(pageB);
