@@ -49,7 +49,17 @@ export class IvState {
  * why sharing/rebuilding it incorrectly is a nonce-reuse hazard. */
 export async function encryptFrame(key: CryptoKey, iv: IvState, data: ArrayBuffer): Promise<ArrayBuffer> {
   const nonce = iv.next();
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, data);
+  // Fed as a Uint8Array VIEW, not the bare ArrayBuffer, on purpose: a test
+  // harness running under jsdom (a separate vm realm from Node's native
+  // WebCrypto implementation) constructs `data` with jsdom's own
+  // ArrayBuffer constructor, and `instanceof ArrayBuffer` checks inside
+  // Node's webidl argument coercion are realm-specific and reject it —
+  // exactly the cross-realm hazard __tests__/vault.test.ts already documents
+  // for Blob.arrayBuffer(). ArrayBuffer.isView() (what a TypedArray view
+  // satisfies) is realm-agnostic, so wrapping here is a no-op in a real
+  // single-realm browser but makes this function actually testable under
+  // jsdom too. Same reasoning below in decryptFrame.
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, new Uint8Array(data));
   const out = new Uint8Array(12 + ciphertext.byteLength);
   out.set(nonce, 0);
   out.set(new Uint8Array(ciphertext), 12);
@@ -65,7 +75,10 @@ export async function decryptFrame(key: CryptoKey, data: ArrayBuffer): Promise<A
   try {
     if (!(data instanceof ArrayBuffer) || data.byteLength < 12) return null;
     const iv = new Uint8Array(data, 0, 12);
-    const ciphertext = data.slice(12);
+    // A view over the SAME buffer (not .slice()'s copy-into-a-bare-ArrayBuffer)
+    // — see encryptFrame's comment on why a view, not a bare ArrayBuffer,
+    // crosses the jsdom/Node-webcrypto realm boundary cleanly.
+    const ciphertext = new Uint8Array(data, 12);
     return await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
   } catch {
     return null;

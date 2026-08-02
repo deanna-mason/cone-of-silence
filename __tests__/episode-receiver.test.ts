@@ -1,7 +1,7 @@
 // Task 6: EpisodeReceiver state machine. Fakes only — no real disk, no real
 // WebRTC. Frames are driven by hand via handleFrame(), mirroring how
 // xfer-channel.test.ts drives PeerLink by hand rather than mocking it away.
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   EpisodeReceiver,
   type EpisodeReceiverCallbacks,
@@ -12,7 +12,28 @@ import {
 } from "@/lib/podcast/transfer";
 import { HashMismatchError, type IncomingPart } from "@/lib/podcast/episodeStore";
 import type { SidecarEntry } from "@/lib/podcast/vault";
-import { XFER_HEADER_BYTES, encodeChunk, encodeFrame, type FilePlan, type XferFrame } from "@/lib/podcast/xferProtocol";
+import { encodeChunk, encodeFrame, type FilePlan, type XferFrame } from "@/lib/podcast/xferProtocol";
+import { createRoomKeys } from "@/lib/roomLink";
+import { deriveRoomKeys } from "@/lib/crypto/derive";
+import { IvState, encryptFrame } from "@/lib/crypto/frameCipher";
+
+// Task 6 (5D): EpisodeReceiver now takes xferKey as a mandatory constructor
+// dep (no keyless mode) — every fixture chunk in this file is REAL AES-GCM
+// ciphertext under this key, exercising the actual default (enc=1) path
+// rather than a fake. One shared IvState builds every fixture chunk across
+// this whole file: a fresh prefix per file run, monotonic counter, exactly
+// the discipline IvState itself guarantees — reusing it across many `it()`
+// blocks is fine because nothing here tests the SENDER's own nonce
+// discipline (that's crypto-frame.test.ts / episode-sender.test.ts /
+// xfer-envelope-enc.test.ts's job); this file only exercises the receiver's
+// decrypt-then-verify path.
+let TEST_XFER_KEY: CryptoKey;
+let fixtureIv: IvState;
+beforeAll(async () => {
+  const { secret } = createRoomKeys();
+  ({ xferKey: TEST_XFER_KEY } = await deriveRoomKeys(secret));
+  fixtureIv = new IvState();
+});
 
 // ---------------------------------------------------------------------------
 // fakes
@@ -127,9 +148,21 @@ class FakeCallbacks implements EpisodeReceiverCallbacks {
  *  fixed count of microtask ticks) is used deliberately: the chain nests
  *  several un-enqueued `await`s inside its longest link (append -> commit ->
  *  writeManifest), so a fixed tick count is fragile — a setTimeout(0) lets
- *  the whole microtask queue drain to exhaustion regardless of depth. */
+ *  the whole microtask queue drain to exhaustion regardless of depth.
+ *
+ *  Task 6 (5D): the chain now also nests a REAL crypto.subtle.decrypt() per
+ *  chunk (fixtures build real AES-GCM ciphertext, exercising the actual
+ *  default path). Node's native WebCrypto resolves through its own thread
+ *  pool rather than a plain Promise chain, so it isn't guaranteed to settle
+ *  within a single macrotask turn the way synchronous fake-store ops were —
+ *  episode-exchange-loopback.test.ts's own flush() carries the identical
+ *  note for crypto.subtle.digest(). Several real ticks (not more
+ *  microtask-only draining) reliably clears a multi-chunk part's whole
+ *  decrypt→append→commit run. */
 async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,20 +194,20 @@ function partFrame(episodeId: string, entry: SidecarEntry, chunks: number): stri
   return encodeFrame({ t: "xfr/part", v: 1, episodeId, name: entry.name, size: entry.size, sha256: entry.sha256, chunks });
 }
 
-function chunkBuf(seq: number, text: string): ArrayBuffer {
-  return encodeChunk(seq, new TextEncoder().encode(text));
+/** Real AES-GCM chunk (enc=1) under TEST_XFER_KEY — the happy-path fixture
+ *  everywhere a chunk is expected to be ACCEPTED. */
+async function chunkBuf(seq: number, text: string): Promise<ArrayBuffer> {
+  const payload = new TextEncoder().encode(text);
+  const encrypted = await encryptFrame(TEST_XFER_KEY, fixtureIv, payload.buffer);
+  const iv = new Uint8Array(encrypted, 0, 12);
+  const ciphertext = new Uint8Array(encrypted, 12);
+  return encodeChunk(seq, ciphertext, iv);
 }
 
-function enc1ChunkBuf(seq: number, text: string): ArrayBuffer {
-  const payload = new TextEncoder().encode(text);
-  const buf = new ArrayBuffer(XFER_HEADER_BYTES + payload.length);
-  const dv = new DataView(buf);
-  dv.setUint8(0, 1); // version
-  dv.setUint8(1, 1); // enc = aes-gcm (5B must reject this)
-  dv.setUint16(2, 0, true);
-  dv.setUint32(4, seq >>> 0, true);
-  new Uint8Array(buf, XFER_HEADER_BYTES).set(payload);
-  return buf;
+/** Plaintext (enc=0) chunk — the downgrade attempt 5D must refuse outright
+ *  now that keys are always present (mandatory constructor dep). */
+function plaintextChunkBuf(seq: number, text: string): ArrayBuffer {
+  return encodeChunk(seq, new TextEncoder().encode(text));
 }
 
 /** Drives a single part end to end: xfr/part, then N one-byte-string chunks. */
@@ -187,13 +220,13 @@ async function sendWholePart(
 ): Promise<void> {
   receiver.handleFrame(fromPeer, partFrame(episodeId, entry, chunks.length));
   for (let i = 0; i < chunks.length; i++) {
-    receiver.handleFrame(fromPeer, chunkBuf(i, chunks[i]!));
+    receiver.handleFrame(fromPeer, await chunkBuf(i, chunks[i]!));
   }
   await flush();
 }
 
 function makeReceiver(store: FakeStore, cb: FakeCallbacks, link = new FakeLink()) {
-  const receiver = new EpisodeReceiver(PEER, link, store, cb);
+  const receiver = new EpisodeReceiver(PEER, link, store, cb, TEST_XFER_KEY);
   return { receiver, link };
 }
 
@@ -261,9 +294,9 @@ describe("EpisodeReceiver", () => {
     link.sent = [];
 
     receiver.handleFrame(PEER, partFrame("ep-3", entry, 3));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa"));
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa"));
     await flush(); // the good chunk lands first, like a real per-message DC delivery
-    receiver.handleFrame(PEER, chunkBuf(2, "cc")); // skips seq 1
+    receiver.handleFrame(PEER, await chunkBuf(2, "cc")); // skips seq 1
     await flush();
 
     expect(cb.lastPhase()).toBe("fault");
@@ -286,15 +319,15 @@ describe("EpisodeReceiver", () => {
     await flush();
 
     receiver.handleFrame(PEER, partFrame("ep-3b", entry, 3));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa"));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa")); // duplicate of seq 0
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa"));
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa")); // duplicate of seq 0
     await flush();
 
     expect(cb.lastPhase()).toBe("fault");
   });
 
-  // -- (d) enc=1 chunk -> fault (5B rejects) --------------------------------
-  it("(d) an enc=1 chunk faults — 5B never accepts ciphertext", async () => {
+  // -- (d) enc=0 chunk -> fault (5D never downgrades) -----------------------
+  it("(d) an enc=0 (plaintext) chunk is refused — no downgrade when keys are present", async () => {
     const store = new FakeStore();
     const cb = new FakeCallbacks();
     const { receiver, link } = makeReceiver(store, cb);
@@ -304,7 +337,7 @@ describe("EpisodeReceiver", () => {
     link.sent = [];
 
     receiver.handleFrame(PEER, partFrame("ep-4", entry, 2));
-    receiver.handleFrame(PEER, enc1ChunkBuf(0, "aa"));
+    receiver.handleFrame(PEER, plaintextChunkBuf(0, "aa"));
     await flush();
 
     expect(cb.lastPhase()).toBe("fault");
@@ -440,7 +473,7 @@ describe("EpisodeReceiver", () => {
 
     // video part started but not finished when the channel drops
     receiver.handleFrame(PEER, partFrame("ep-7", v0, 2));
-    receiver.handleFrame(PEER, chunkBuf(0, "x"));
+    receiver.handleFrame(PEER, await chunkBuf(0, "x"));
     await flush();
 
     receiver.handleChannelClosed();
@@ -570,11 +603,11 @@ describe("EpisodeReceiver", () => {
     receiver.handleFrame(PEER, offer("ep-strag", files));
     await flush();
     receiver.handleFrame(PEER, partFrame("ep-strag", a0, 1));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa")); // the only expected chunk; commit() now blocked on the gate
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa")); // the only expected chunk; commit() now blocked on the gate
     await flush();
     link.sent = [];
 
-    receiver.handleFrame(PEER, chunkBuf(1, "bb")); // straggler: seq === old nextSeq, but past chunksExpected
+    receiver.handleFrame(PEER, await chunkBuf(1, "bb")); // straggler: seq === old nextSeq, but past chunksExpected
     await flush();
 
     expect(cb.lastPhase()).toBe("fault");
@@ -597,7 +630,7 @@ describe("EpisodeReceiver", () => {
 
     // begin a part so we can prove it's untouched by the ignored offer
     receiver.handleFrame(PEER, partFrame("ep-8", a0, 2));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa"));
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa"));
     await flush();
     link.sent = [];
     const opsBefore = [...store.ops];
@@ -610,7 +643,7 @@ describe("EpisodeReceiver", () => {
     expect(cb.lastPhase()).toBe("receiving");
 
     // the original episode's transfer is still alive: finishing it works
-    receiver.handleFrame(PEER, chunkBuf(1, "bb"));
+    receiver.handleFrame(PEER, await chunkBuf(1, "bb"));
     await flush();
     expect(store.ops).toContain("commit:audio.part000");
   });
@@ -625,7 +658,7 @@ describe("EpisodeReceiver", () => {
     await flush();
 
     receiver.handleFrame(PEER, partFrame("ep-10", a0, 3));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa")); // in-flight, uncommitted
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa")); // in-flight, uncommitted
     await flush();
     link.sent = [];
 
@@ -667,15 +700,15 @@ describe("EpisodeReceiver", () => {
     await flush();
     link.sent = [];
 
-    receiver.handleFrame(OTHER_PEER, chunkBuf(0, "zz")); // wrong peer, would-be seq 0
+    receiver.handleFrame(OTHER_PEER, await chunkBuf(0, "zz")); // wrong peer, would-be seq 0
     await flush();
 
     expect(store.ops.filter((o) => o.startsWith("append:"))).toEqual([]);
     expect(cb.lastPhase()).toBe("receiving"); // no fault — frame never reached the state machine
 
     // the real peer's seq 0 still lands correctly afterward
-    receiver.handleFrame(PEER, chunkBuf(0, "aa"));
-    receiver.handleFrame(PEER, chunkBuf(1, "bb"));
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa"));
+    receiver.handleFrame(PEER, await chunkBuf(1, "bb"));
     await flush();
     expect(store.ops).toContain("commit:audio.part000");
   });
@@ -689,7 +722,7 @@ describe("EpisodeReceiver", () => {
     receiver.handleFrame(PEER, offer("ep-13", plan([a0], [videoEntry("video.part000")])));
     await flush();
     receiver.handleFrame(PEER, partFrame("ep-13", a0, 3));
-    receiver.handleFrame(PEER, chunkBuf(0, "aa"));
+    receiver.handleFrame(PEER, await chunkBuf(0, "aa"));
     await flush();
 
     receiver.dispose();
@@ -700,7 +733,7 @@ describe("EpisodeReceiver", () => {
     const sentAtDispose = link.sent.length;
 
     // further frames after dispose must produce no sends and no callbacks
-    receiver.handleFrame(PEER, chunkBuf(1, "bb"));
+    receiver.handleFrame(PEER, await chunkBuf(1, "bb"));
     receiver.handleFrame(PEER, offer("ep-14", plan([audioEntry("x")], [videoEntry("y")])));
     receiver.handleChannelClosed();
     await flush();

@@ -12,6 +12,7 @@
 import { HashMismatchError, type IncomingPart, type PartReader } from "./episodeStore";
 import type { SidecarEntry } from "./vault";
 import { XFER_HIGH_WATER } from "../webrtc/peer";
+import { IvState, decryptFrame, encryptFrame } from "../crypto/frameCipher";
 import {
   decodeChunk,
   encodeChunk,
@@ -51,6 +52,17 @@ export interface EpisodeReceiverCallbacks {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Reassembles the [12-byte IV][ciphertext+tag] buffer decryptFrame expects
+ *  from the envelope's separately-carried `iv` + `payload` fields — the
+ *  envelope never duplicates the IV inside `payload` (xferProtocol.ts's D17
+ *  note: the header already has a dedicated 12-byte IV slot). */
+function ivAndCiphertext(iv: Uint8Array, ciphertext: Uint8Array): ArrayBuffer {
+  const out = new Uint8Array(iv.length + ciphertext.length);
+  out.set(iv, 0);
+  out.set(ciphertext, iv.length);
+  return out.buffer;
 }
 
 // parseXferFrame only guards the "xfr/" t-prefix (Task 4 advisory) — these
@@ -135,6 +147,11 @@ export class EpisodeReceiver {
     private readonly link: XferLink,
     private readonly store: ReceiverStore,
     private readonly cb: EpisodeReceiverCallbacks,
+    // Task 6 (5D): every caller now derives this from the room's never-sent
+    // secret (D15 — every call has one) and passes it in; there is no
+    // keyless mode any more, which is exactly what makes the enc=0 refusal
+    // below unconditional rather than a "keys present" runtime check.
+    private readonly xferKey: CryptoKey,
   ) {}
 
   /** Frames from any OTHER peerId are ignored — the transfer protocol is
@@ -360,8 +377,14 @@ export class EpisodeReceiver {
       this.fault("chunk with no announced part");
       return;
     }
-    if (envelope.enc !== 0) {
-      this.fault(`unexpected enc=${envelope.enc}`); // 5B always plaintext; 5D will accept enc=1
+    // 5D: xferKey is a mandatory constructor dep now (no keyless mode), so
+    // "keys are present" is always true — enc=0 is unconditionally a
+    // plaintext-downgrade attempt, never a legitimate frame. Same fault path
+    // as any other malformed/adversarial chunk (named fault, park semantics
+    // untouched); it fails BEFORE the seq/count checks below so a downgrade
+    // attempt can never be laundered through the ordering logic first.
+    if (envelope.enc !== 1) {
+      this.fault(`unexpected enc=${envelope.enc}`);
       return;
     }
     const slot = this.activePart;
@@ -382,10 +405,22 @@ export class EpisodeReceiver {
 
     slot.nextSeq += 1;
     const isLast = slot.nextSeq === slot.chunksExpected;
-    const payload = envelope.payload;
+    const iv = envelope.iv;
+    const ciphertext = envelope.payload;
 
     this.enqueue(async () => {
       if (this.activePart !== slot) return; // superseded by fault/park/restart/dispose while queued
+      // Decrypt BEFORE the existing verify/commit path — sidecar hashes stay
+      // hashes of PLAINTEXT bytes, so this must happen first and unwrap
+      // completely; a bad tag (tamper, wrong key, truncation) yields null
+      // and faults here rather than ever reaching append()/commit().
+      const plain = await decryptFrame(this.xferKey, ivAndCiphertext(iv, ciphertext));
+      if (plain === null) {
+        if (this.activePart !== slot || this.disposed) return; // superseded while decrypting
+        this.fault("decrypt failed");
+        return;
+      }
+      const payload = new Uint8Array(plain);
       try {
         const part = await slot.partPromise;
         await part.append(payload);
@@ -561,6 +596,19 @@ export class EpisodeSender {
   private offerTimer: ReturnType<typeof setTimeout> | null = null;
   /** Re-entrancy guard for pump() — see pump()'s own comment. */
   private pumping = false;
+  /** One IvState per sender CONSTRUCTION — where "construction" means each
+   *  start() call, not just the class instance: start() is the manual-resume
+   *  entry point ("pressing SEND again re-offers", spec verbatim) and this
+   *  engine instance survives a park/resume cycle (Task 11 keeps one sender
+   *  per send()/resend() call, but within a single instance start() can also
+   *  be re-invoked directly, e.g. after a peer-side xfr/fault — see
+   *  episode-sender.test.ts case (f)). Rebuilding it fresh in start() is
+   *  what gives every resume a fresh 32-bit prefix — reusing the prior
+   *  instance's counter+prefix across a resume would be a nonce reuse
+   *  (Global Constraints, load-bearing). Assigned a throwaway instance here
+   *  only so TS sees a definite value before the first start(); pump() is
+   *  never reachable before start() runs. */
+  private ivState = new IvState();
 
   // Progress accounting: sentBytes = bytes pumped over the wire this
   // session + committed-part sizes reported via `have` on resume; totalBytes
@@ -579,6 +627,8 @@ export class EpisodeSender {
     private readonly link: XferLink,
     private readonly store: SenderStore,
     private readonly cb: EpisodeSenderCallbacks,
+    // Task 6 (5D): mandatory now — see EpisodeReceiver's constructor comment.
+    private readonly xferKey: CryptoKey,
     deps?: { now?: () => number },
   ) {
     this.nowFn = deps?.now ?? Date.now;
@@ -594,6 +644,10 @@ export class EpisodeSender {
     const epoch = ++this.epoch;
     this.clearOfferTimer();
     this.activeSlot = null; // no disk resource to release on the sender side — just drop the reference
+    // Fresh IvState EVERY start() — see the field's own comment: this is the
+    // resume path, and a resume that reused the prior instance's counter
+    // under the same 32-bit prefix would be a nonce-reuse break.
+    this.ivState = new IvState();
     this.episodeId = episodeId;
     this.fromCodename = fromCodename;
     this.files = null;
@@ -819,7 +873,30 @@ export class EpisodeSender {
         }
         if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while the read was in flight
 
-        const ok = this.link.send(encodeChunk(seq, payload));
+        // D17: encrypt before sending — the envelope's `iv` slot carries the
+        // frame cipher's own IV, so the leading 12 bytes of encryptFrame's
+        // output are split off into the envelope header rather than
+        // duplicated inside the payload (see xferProtocol.ts's encodeChunk).
+        let encrypted: ArrayBuffer;
+        try {
+          // `payload` is typed as bare `Uint8Array` (TS default:
+          // `Uint8Array<ArrayBufferLike>`) per PartReader's public interface,
+          // so `.buffer.slice(...)` widens to `ArrayBuffer | SharedArrayBuffer`
+          // under TS 5.7's typed-array generics. Real readers always hand back
+          // ArrayBuffer-backed views (disk reads are never SharedArrayBuffer)
+          // — same idiom as episodeStore.ts's append() cast.
+          const bytes = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer;
+          encrypted = await encryptFrame(this.xferKey, this.ivState, bytes);
+        } catch (err) {
+          if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return;
+          this.fault(`encrypt:${errMessage(err)}`);
+          return;
+        }
+        if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while encrypting
+        const iv = new Uint8Array(encrypted, 0, 12);
+        const ciphertext = new Uint8Array(encrypted, 12);
+
+        const ok = this.link.send(encodeChunk(seq, ciphertext, iv));
         if (!ok) {
           this.park(); // the channel died between events
           return;

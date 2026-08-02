@@ -5,7 +5,7 @@
 // single-sided recorder) and the two stores (now backed by real SHA-256
 // hashing via crypto.subtle instead of hand-fed fixtures). This file owns
 // the plan's named carry-in test — see the (b) block below.
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   EpisodeSender,
   EpisodeReceiver,
@@ -22,6 +22,18 @@ import {
 import { HashMismatchError, type IncomingPart, type PartReader } from "@/lib/podcast/episodeStore";
 import type { SidecarEntry } from "@/lib/podcast/vault";
 import { XFER_CHUNK_BYTES, XFER_HEADER_BYTES, encodeChunk, encodeFrame, type FilePlan, type XferFrame } from "@/lib/podcast/xferProtocol";
+import { createRoomKeys } from "@/lib/roomLink";
+import { deriveRoomKeys } from "@/lib/crypto/derive";
+
+// Task 6 (5D): both engines now take xferKey as a mandatory constructor dep
+// (no keyless mode) — every chunk crossing a LoopbackLink below is real
+// AES-GCM ciphertext under this shared key, exercising the actual default
+// (enc=1) path end to end.
+let TEST_XFER_KEY: CryptoKey;
+beforeAll(async () => {
+  const { secret } = createRoomKeys();
+  ({ xferKey: TEST_XFER_KEY } = await deriveRoomKeys(secret));
+});
 
 // ---------------------------------------------------------------------------
 // loopback link
@@ -302,8 +314,8 @@ function makeExchange(senderStore: SenderStore, receiverStore: ReceiverStore) {
   // frames whose fromPeerId matches the constructor-bound peer it expects.
   const toReceiver = new LoopbackLink(SENDER_ID);
   const toSender = new LoopbackLink(RECEIVER_ID);
-  const sender = new EpisodeSender(RECEIVER_ID, toReceiver, senderStore, senderCb);
-  const receiver = new EpisodeReceiver(SENDER_ID, toSender, receiverStore, receiverCb);
+  const sender = new EpisodeSender(RECEIVER_ID, toReceiver, senderStore, senderCb, TEST_XFER_KEY);
+  const receiver = new EpisodeReceiver(SENDER_ID, toSender, receiverStore, receiverCb, TEST_XFER_KEY);
   toReceiver.wireTo(receiver);
   toSender.wireTo(sender);
   return { sender, receiver, senderCb, receiverCb, toReceiver, toSender };
@@ -443,7 +455,7 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
 
     const freshToReceiver = new LoopbackLink(SENDER_ID);
     const senderCb2 = new RecordingSenderCallbacks();
-    const sender2 = new EpisodeSender(RECEIVER_ID, freshToReceiver, senderStore, senderCb2);
+    const sender2 = new EpisodeSender(RECEIVER_ID, freshToReceiver, senderStore, senderCb2, TEST_XFER_KEY);
     freshToReceiver.wireTo(receiver); // sender2 talks directly to the SAME receiver instance
     toSender.wireTo(sender2); // the receiver's existing outbound link now targets sender2
 
@@ -478,7 +490,7 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
   });
 
   // -- (c) corrupt chunk in flight ---------------------------------------
-  it("(c) a corrupted chunk in flight faults that part with no rename; a later start() re-sends it and completes", async () => {
+  it("(c) a corrupted chunk in flight faults that part via decrypt (not corrupt-commit); a later start() re-sends it and completes", async () => {
     const fixture = await buildEpisodeFixture();
     const senderStore = new MemorySenderStore(fixture.plan, fixture.bytes);
     const receiverStore = new MemoryReceiverStore();
@@ -486,18 +498,27 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
 
     // Flips a payload byte of the very next chunk delivered sender->receiver
     // — the first (and only, at this size) chunk of audio.part000, the
-    // first part the sender ever announces.
+    // first part the sender ever announces. Task 6 (5D): that chunk is now
+    // real AES-GCM ciphertext, so flipping a ciphertext byte breaks the GCM
+    // tag rather than merely corrupting plaintext — decryptFrame returns
+    // null and the receiver faults BEFORE ever appending/committing, not
+    // after a bad hash. This is the "tampered chunk -> fault, not
+    // corrupt-commit" property directly: the corrupted bytes never reach
+    // disk at all, let alone under a wrong hash.
     toReceiver.corruptNextChunk = true;
 
     sender.start("ep-corrupt", "static-otter");
     await waitFor(() => receiverCb.lastPhase() === "fault");
 
     expect(receiverStore.committedNames.has("audio.part000")).toBe(false);
-    expect(receiverStore.ops).toContain("commit-fail:audio.part000");
+    // Never even reaches append/commit — decrypt fails first.
+    expect(receiverStore.ops.filter((o) => o.startsWith("append:"))).toEqual([]);
+    expect(receiverStore.ops).not.toContain("commit-fail:audio.part000");
     expect(receiverStore.ops).not.toContain("commit:audio.part000");
     expect(receiverStore.ops).toContain("abandon:audio.part000"); // temp cleaned up, not just left un-renamed
     const manifestCallsSoFar = receiverStore.manifestCalls; // manifest must never have been reached
     expect(manifestCallsSoFar).toEqual([]);
+    expect(receiverCb.phases.at(-1)?.detail).toBe("decrypt failed");
 
     // The receiver's xfr/fault reaches the sender. Per the engines as
     // actually shipped (EpisodeSender.onPeerFault sets phase "fault", never
@@ -509,7 +530,7 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     // side) and flagging the mismatch in the task report per this task's
     // own instruction.
     await waitFor(() => senderCb.lastPhase() === "fault");
-    expect(senderCb.phases.at(-1)?.detail).toBe("hash-mismatch:audio.part000");
+    expect(senderCb.phases.at(-1)?.detail).toBe("decrypt failed");
 
     // start() again re-offers; the receiver's have (still missing
     // audio.part000) makes the sender re-send that exact part from chunk 0,

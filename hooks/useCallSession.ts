@@ -35,6 +35,11 @@ export interface CallState {
   peers: RemotePeer[];
   dcOpen: boolean;
   bus: CallBus;
+  // Task 6 (5D): the session's derived xfer key, for useEpisodeExchange to
+  // thread into its engines — null until key derivation resolves (or if it
+  // never does, e.g. "equipment-outdated"), same lifetime as the session
+  // itself.
+  xferKey: CryptoKey | null;
 }
 
 export function useCallSession(
@@ -46,6 +51,7 @@ export function useCallSession(
   const [status, setStatus] = useState<CallStatus>("connecting");
   const [peers, setPeers] = useState<RemotePeer[]>([]);
   const [dcOpen, setDcOpen] = useState(false);
+  const [xferKey, setXferKey] = useState<CryptoKey | null>(null);
   const sessionRef = useRef<CallSession | null>(null);
   const streamRef = useRef<MediaStream | null>(stream);
   streamRef.current = stream;
@@ -120,6 +126,7 @@ export function useCallSession(
       const s = new CallSession(keys.roomId, local, { keys: roomKeys, api }, undefined, { forceRelay });
       session = s;
       sessionRef.current = s;
+      setXferKey(roomKeys.xferKey);
       offs = [
         s.events.on("status", setStatus),
         s.events.on("roster", setPeers),
@@ -151,6 +158,7 @@ export function useCallSession(
       setStatus("connecting");
       setPeers([]);
       setDcOpen(false);
+      setXferKey(null);
     };
     // `stream` is deliberately absent: device switches flow through
     // setLocalStream below instead of rebuilding the whole session.
@@ -162,5 +170,5 @@ export function useCallSession(
     if (stream) sessionRef.current?.setLocalStream(stream).catch(() => {});
   }, [stream]);
 
-  return { status, peers, dcOpen, bus: busRef.current };
+  return { status, peers, dcOpen, bus: busRef.current, xferKey };
 }

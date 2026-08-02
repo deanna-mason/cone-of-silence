@@ -7,7 +7,7 @@
 // (EpisodeSender or EpisodeReceiver) wired through a hand-rolled fake
 // XferPort — same shape as the Task 8 loopback test, adapted so the hook's
 // own subscriptions (registered via renderHook) are the thing under test.
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import {
   mergePanel,
@@ -24,6 +24,18 @@ import { HashMismatchError } from "@/lib/podcast/episodeStore";
 import type { IncomingPart, PartReader } from "@/lib/podcast/episodeStore";
 import type { SidecarEntry } from "@/lib/podcast/vault";
 import type { FilePlan } from "@/lib/podcast/xferProtocol";
+import { createRoomKeys } from "@/lib/roomLink";
+import { deriveRoomKeys } from "@/lib/crypto/derive";
+
+// Task 6 (5D): useEpisodeExchange threads xferKey into the engines it
+// constructs (mandatory dep, no keyless mode) — both this hook's own engine
+// and every "far peer" real engine below share this one key, exactly as the
+// session's single derived xferKey would in production.
+let TEST_XFER_KEY: CryptoKey;
+beforeAll(async () => {
+  const { secret } = createRoomKeys();
+  ({ xferKey: TEST_XFER_KEY } = await deriveRoomKeys(secret));
+});
 
 // ---------------------------------------------------------------------------
 // vi.mock episodeStore — hoisted, in-memory, keyed by takeId. Backs whichever
@@ -279,6 +291,7 @@ function setup(overrides: Partial<EpisodeExchangeArgs> = {}) {
   const initialProps: EpisodeExchangeArgs = {
     enabled: true,
     xfer: port,
+    xferKey: TEST_XFER_KEY,
     peerIds: [PEER],
     myCodename: "Nightingale",
     partnerCodename: "Falcon",
@@ -367,7 +380,7 @@ describe("useEpisodeExchange", () => {
     const farReceiver = new EpisodeReceiver(PEER, farLink(port, PEER), farStore, {
       onPhase: vi.fn(),
       onProgress: vi.fn(),
-    });
+    }, TEST_XFER_KEY);
     port.wirePeer(PEER, farReceiver);
 
     expect(view.result.current.busy).toBe(false);
@@ -419,7 +432,7 @@ describe("useEpisodeExchange", () => {
     // until the first chunk lands) — the far sender's own `from` value below
     // is deliberately something else, to prove it is NOT what gets displayed.
     const { port, view } = setup({ lastTakeId: null, partnerCodename: "Otter" });
-    const farSender = new EpisodeSender(PEER, farLink(port, PEER), farStore, { onPhase: vi.fn(), onProgress: vi.fn() });
+    const farSender = new EpisodeSender(PEER, farLink(port, PEER), farStore, { onPhase: vi.fn(), onProgress: vi.fn() }, TEST_XFER_KEY);
     port.wirePeer(PEER, farSender);
 
     expect(view.result.current.state).toBeNull();
@@ -511,6 +524,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: takeId,
         takeActive: false,
         dcOpen: false,
+        xferKey: TEST_XFER_KEY,
       });
     });
     act(() => port.setChannelState(PEER, "xfer", "open"));
@@ -532,6 +546,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: takeId,
         takeActive: false,
         dcOpen: true,
+        xferKey: TEST_XFER_KEY,
       });
     });
     expect(view.result.current.state).toEqual({ kind: "xfer-interrupted", direction: "send", canResend: true });
@@ -648,6 +663,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: null,
         takeActive: false,
         dcOpen: true,
+        xferKey: TEST_XFER_KEY,
       });
     });
 
@@ -694,6 +710,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: "take-1",
         takeActive: false,
         dcOpen: true,
+        xferKey: TEST_XFER_KEY,
       });
     });
     // Not exactly one peer -> false, even though P1's channel is still open.
@@ -709,6 +726,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: "take-1",
         takeActive: false,
         dcOpen: true,
+        xferKey: TEST_XFER_KEY,
       });
     });
     // Back to exactly one peer. P1's channel never actually closed — no
@@ -747,6 +765,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: takeId,
         takeActive: false,
         dcOpen: true,
+        xferKey: TEST_XFER_KEY,
       });
     });
     act(() => port.setChannelState(PEER2, "xfer", "open"));
@@ -800,6 +819,7 @@ describe("useEpisodeExchange", () => {
         lastTakeId: null,
         takeActive: false,
         dcOpen: true,
+        xferKey: TEST_XFER_KEY,
       });
     });
 
@@ -828,7 +848,7 @@ describe("useEpisodeExchange", () => {
     const farReceiver = new EpisodeReceiver(PEER, farLink(port, PEER), farStore, {
       onPhase: vi.fn(),
       onProgress: vi.fn(),
-    });
+    }, TEST_XFER_KEY);
     port.wirePeer(PEER, farReceiver);
 
     act(() => view.result.current.actions.send());

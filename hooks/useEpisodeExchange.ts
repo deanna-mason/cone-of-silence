@@ -58,6 +58,14 @@ export interface EpisodeExchange {
 export interface EpisodeExchangeArgs {
   enabled: boolean; // authed && in-room && supported (same gate as the take hook)
   xfer: XferPort;
+  // Task 6 (5D): the session's derived xfer key (lib/crypto/derive.ts's
+  // RoomCryptoKeys.xferKey) — null only for the brief window before
+  // useCallSession's async key derivation resolves. Both engines take it as
+  // a mandatory constructor dep (no keyless mode any more), so this hook
+  // never constructs one without a real key in hand; canSend/the inbound
+  // offer path both only fire once the channel is actually open, by which
+  // point the session (and therefore this) is never null in practice.
+  xferKey: CryptoKey | null;
   peerIds: string[];
   // CONTROLLER RULING D8: the offer's `from` carries the SENDER's OWN
   // codename (not the partner's) — myCodename feeds sender.start();
@@ -167,8 +175,13 @@ const IDLE_RECEIVER_VIEW: ReceiverView = {
 };
 
 export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
-  const { enabled, xfer, peerIds, myCodename, partnerCodename, lastTakeId, takeActive, dcOpen } = args;
+  const { enabled, xfer, xferKey, peerIds, myCodename, partnerCodename, lastTakeId, takeActive, dcOpen } = args;
   const singlePeerId = peerIds.length === 1 ? peerIds[0] : null;
+  // Same `latest` idiom as myCodenameRef etc. below — startSender/
+  // createReceiver read the CURRENT key at construction time, not whatever
+  // was in scope when the wire-subscription effect closed over it.
+  const xferKeyRef = useRef(xferKey);
+  xferKeyRef.current = xferKey;
 
   // Same `latest` idiom as usePodcastTake.ts: the wire-subscription effect
   // below is built once per (enabled, xfer) and must read the CURRENT
@@ -292,10 +305,15 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   /** ONE EpisodeSender per send()/resend() call — the old one is disposed
    *  first (Task 8 loopback review's confirmed engine-construction model). */
   function startSender(peerId: string, episodeId: string): void {
+    // Defensive only (see EpisodeExchangeArgs.xferKey's doc) — canSend
+    // already implies dcOpen, which implies the session (and its derived
+    // keys) exists, so this null in practice never fires in production.
+    const xferKey = xferKeyRef.current;
+    if (!xferKey) return;
     disposeSender();
     senderRateRef.current = RATE_IDLE;
     const cb: EpisodeSenderCallbacks = { onPhase: handleSenderPhase, onProgress: handleSenderProgress };
-    const sender = new EpisodeSender(peerId, makeLink(peerId), senderStoreAdapter, cb);
+    const sender = new EpisodeSender(peerId, makeLink(peerId), senderStoreAdapter, cb, xferKey);
     senderRef.current = sender;
     senderPeerRef.current = peerId;
     senderEpisodeIdRef.current = episodeId;
@@ -310,8 +328,13 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
    *  path) — a 4C link rebuild keeps the peerId and must resume into this
    *  SAME parked receiver, not a fresh one. */
   function createReceiver(peerId: string): void {
+    // Defensive only — see startSender's comment; an offer landing before
+    // the session's keys exist has nothing to gate on anyway, so it's simply
+    // not adopted (no receiver, no reply) rather than crashing.
+    const xferKey = xferKeyRef.current;
+    if (!xferKey) return;
     const cb: EpisodeReceiverCallbacks = { onPhase: handleReceiverPhase, onProgress: handleReceiverProgress };
-    const receiver = new EpisodeReceiver(peerId, makeLink(peerId), receiverStoreAdapter, cb);
+    const receiver = new EpisodeReceiver(peerId, makeLink(peerId), receiverStoreAdapter, cb, xferKey);
     receiverRef.current = receiver;
     receiverPeerRef.current = peerId;
   }

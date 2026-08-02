@@ -2,7 +2,7 @@
 // WebRTC. Frames are driven by hand via handleFrame(), mirroring
 // episode-receiver.test.ts's conventions (FakeLink, FakeStore, FakeCallbacks,
 // a flush() macrotask boundary for the store's async ops).
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   EpisodeSender,
   type EpisodeSenderCallbacks,
@@ -22,6 +22,18 @@ import {
   type XferFrame,
 } from "@/lib/podcast/xferProtocol";
 import { XFER_HIGH_WATER } from "@/lib/webrtc/peer";
+import { createRoomKeys } from "@/lib/roomLink";
+import { deriveRoomKeys } from "@/lib/crypto/derive";
+import { decryptFrame } from "@/lib/crypto/frameCipher";
+
+// Task 6 (5D): EpisodeSender now takes xferKey as a mandatory constructor
+// dep (no keyless mode) — every chunk it sends is real AES-GCM ciphertext
+// under this key, exercising the actual default (enc=1) path.
+let TEST_XFER_KEY: CryptoKey;
+beforeAll(async () => {
+  const { secret } = createRoomKeys();
+  ({ xferKey: TEST_XFER_KEY } = await deriveRoomKeys(secret));
+});
 
 // ---------------------------------------------------------------------------
 // fakes
@@ -129,9 +141,14 @@ class FakeCallbacks implements EpisodeSenderCallbacks {
 }
 
 /** Drains the sender's async continuations (readSendPlan/openPartReader
- *  promise chains) — a macrotask boundary, matching episode-receiver.test.ts. */
+ *  promise chains) — a macrotask boundary, matching episode-receiver.test.ts.
+ *  Task 6 (5D): pump() now does a REAL crypto.subtle.encrypt() per chunk —
+ *  several real ticks (not just one), same reasoning as
+ *  episode-receiver.test.ts's flush(). */
 async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +176,7 @@ function doneFrame(episodeId: string): string {
 }
 
 function makeSender(store: FakeStore, cb: FakeCallbacks, link = new FakeLink()) {
-  const sender = new EpisodeSender(PEER, link, store, cb);
+  const sender = new EpisodeSender(PEER, link, store, cb, TEST_XFER_KEY);
   return { sender, link };
 }
 
@@ -291,16 +308,27 @@ describe("EpisodeSender", () => {
     expect(chunks.length).toBe(3);
     const decoded = chunks.map((buf) => decodeChunk(buf)!);
     expect(decoded.map((d) => d.seq)).toEqual([0, 1, 2]);
-    expect(decoded[0]!.payload.length).toBe(XFER_CHUNK_BYTES);
-    expect(decoded[1]!.payload.length).toBe(XFER_CHUNK_BYTES);
-    expect(decoded[2]!.payload.length).toBe(5);
-    expect(decoded.every((d) => d.enc === 0)).toBe(true);
-    // reassembled payload equals the source bytes exactly
+    // Task 6 (5D): every chunk is now real AES-GCM ciphertext+tag (enc=1) —
+    // 16 bytes longer than the plaintext it carries, and NOT the plaintext
+    // itself (proving it's actually encrypted, not just labeled as such).
+    expect(decoded.every((d) => d.enc === 1)).toBe(true);
+    expect(decoded[0]!.payload.length).toBe(XFER_CHUNK_BYTES + 16);
+    expect(decoded[1]!.payload.length).toBe(XFER_CHUNK_BYTES + 16);
+    expect(decoded[2]!.payload.length).toBe(5 + 16);
+    expect(decoded.every((d) => d.iv.some((b) => b !== 0))).toBe(true); // never the 5B zeroed IV
+    // decrypting and reassembling recovers the source bytes exactly —
+    // stronger than the old plaintext-equality check, since it also proves
+    // the sent ciphertext is genuinely decryptable under TEST_XFER_KEY.
     const reassembled = new Uint8Array(audioBytes.length);
     let off = 0;
     for (const d of decoded) {
-      reassembled.set(d.payload, off);
-      off += d.payload.length;
+      const ivAndCt = new Uint8Array(d.iv.length + d.payload.length);
+      ivAndCt.set(d.iv, 0);
+      ivAndCt.set(d.payload, d.iv.length);
+      const plain = await decryptFrame(TEST_XFER_KEY, ivAndCt.buffer);
+      expect(plain).not.toBeNull();
+      reassembled.set(new Uint8Array(plain!), off);
+      off += plain!.byteLength;
     }
     expect(reassembled).toEqual(audioBytes);
 

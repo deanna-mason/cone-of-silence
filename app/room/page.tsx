@@ -143,6 +143,7 @@ export default function RoomPage() {
     // very first check), so it doubles as that signal here.
     enabled: authed && stage === "in-room" && podcast.panel.kind !== "unsupported",
     xfer: call.bus.xfer,
+    xferKey: call.xferKey,
     peerIds: call.peers.map((p) => p.peerId),
     myCodename: podcast.myCodename,
     partnerCodename: podcast.partnerCodename,

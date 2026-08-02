@@ -7,9 +7,13 @@
 // the frame layout itself never changes.
 import type { SidecarEntry } from "./vault";
 
-export const XFER_CHUNK_BYTES = 65_536; // <=64 KiB payload, safely under the 256 KiB SCTP message limit
+export const XFER_CHUNK_BYTES = 65_536; // <=64 KiB PLAINTEXT payload, safely under the 256 KiB SCTP message limit
 export const XFER_HEADER_BYTES = 20;
 export const OFFER_TIMEOUT_MS = 10_000;
+// AES-GCM's fixed authentication tag overhead (frameCipher.ts's encryptFrame
+// appends it after the ciphertext) — an enc=1 payload is up to this many
+// bytes larger than the XFER_CHUNK_BYTES of plaintext it carries.
+const GCM_TAG_BYTES = 16;
 
 export interface FilePlan {
   base: "audio" | "video";
@@ -56,15 +60,24 @@ export interface ChunkEnvelope {
   payload: Uint8Array;
 }
 
-/** enc=0 path (5B). */
-export function encodeChunk(seq: number, payload: Uint8Array): ArrayBuffer {
+/** enc=0 path (5B) when `iv` is omitted; enc=1 path (5D) when a 12-byte `iv`
+ *  is supplied. `payload` is always what goes out verbatim in the payload
+ *  slot — for 5D that means CIPHERTEXT+TAG ONLY, never the IV again: the IV
+ *  already has its own 12-byte slot in the header (bytes 8..19), so
+ *  encryptFrame's [IV][ciphertext+tag] output must be split before calling
+ *  this (the IV half goes here, the rest is `payload`) rather than passed
+ *  through whole. */
+export function encodeChunk(seq: number, payload: Uint8Array, iv?: Uint8Array): ArrayBuffer {
   const buf = new ArrayBuffer(XFER_HEADER_BYTES + payload.length);
   const dv = new DataView(buf);
   dv.setUint8(0, 1); // version
-  dv.setUint8(1, 0); // enc = plain
+  dv.setUint8(1, iv ? 1 : 0); // enc: 1 = aes-gcm (5D), 0 = plain (5B)
   dv.setUint16(2, 0, true); // reserved
   dv.setUint32(4, seq >>> 0, true); // seq, little-endian
-  // bytes 8..19 (IV) left zeroed — 5B's plain path always sends a zero IV.
+  if (iv) {
+    if (iv.length !== 12) throw new RangeError(`encodeChunk: iv must be exactly 12 bytes, got ${iv.length}`);
+    new Uint8Array(buf, 8, 12).set(iv);
+  } // else bytes 8..19 (IV) left zeroed — 5B's plain path always sends a zero IV.
   new Uint8Array(buf, XFER_HEADER_BYTES).set(payload);
   return buf;
 }
@@ -80,6 +93,11 @@ export function decodeChunk(buf: ArrayBuffer): ChunkEnvelope | null {
   const seq = dv.getUint32(4, true);
   const iv = new Uint8Array(buf.slice(8, 20));
   const payload = new Uint8Array(buf.slice(XFER_HEADER_BYTES));
-  if (payload.length > XFER_CHUNK_BYTES) return null;
+  // enc=1's payload is ciphertext+tag over up to XFER_CHUNK_BYTES of
+  // plaintext, so its cap is 16 bytes higher than enc=0's plaintext cap —
+  // widening this uniformly would let an enc=0 (plaintext) frame past the
+  // real XFER_CHUNK_BYTES limit, which the (c) byte-layout tests pin.
+  const maxPayload = enc === 1 ? XFER_CHUNK_BYTES + GCM_TAG_BYTES : XFER_CHUNK_BYTES;
+  if (payload.length > maxPayload) return null;
   return { enc, seq, iv, payload };
 }
