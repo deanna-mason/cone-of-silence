@@ -12,6 +12,22 @@
 // bigint here is constructed via BigInt(...) instead.
 const MAX_COUNTER = (BigInt(1) << BigInt(64)) - BigInt(1);
 
+/** Realm-agnostic "is this actually an ArrayBuffer" check. `instanceof
+ * ArrayBuffer` compares against the CALLING module's own realm's
+ * constructor — verified empirically here: a `TextEncoder().encode(x).buffer`
+ * built while this module runs under vitest's default jsdom environment
+ * fails `instanceof ArrayBuffer` even though it is a completely genuine
+ * ArrayBuffer (from a different vm realm), which would make an `instanceof`
+ * guard reject legitimate callers, not just bad ones — exactly the
+ * cross-realm gap __tests__/vault.test.ts:8-18 documents for
+ * Blob.arrayBuffer(). Object.prototype.toString reads the object's internal
+ * [[Class]] slot instead of walking a realm-specific prototype chain, so it
+ * correctly accepts an ArrayBuffer from ANY realm while still rejecting
+ * null/undefined/a DataView/a bare Uint8Array — see encryptFrame's guard. */
+function isArrayBuffer(x: unknown): x is ArrayBuffer {
+  return Object.prototype.toString.call(x) === "[object ArrayBuffer]";
+}
+
 /** Per-construction IV state: fresh random 4-byte prefix, monotonic 8-byte
  * big-endian counter. One instance per encrypt pipe (worker transform, xfer
  * sender) — never share an instance's counter across independent pipes, and
@@ -46,19 +62,41 @@ export class IvState {
 
 /** Encrypts one frame. Wire layout (D17): [12-byte IV][ciphertext ‖ 16-byte
  * GCM tag]. `iv` must be the pipe's single IvState — see the class doc for
- * why sharing/rebuilding it incorrectly is a nonce-reuse hazard. */
+ * why sharing/rebuilding it incorrectly is a nonce-reuse hazard. Throws
+ * TypeError on non-ArrayBuffer input (see the guard below) — unlike
+ * decryptFrame, this function must never fail closed: a caller error here
+ * should be loud, not silently produce a well-formed, wrong ciphertext. */
 export async function encryptFrame(key: CryptoKey, iv: IvState, data: ArrayBuffer): Promise<ArrayBuffer> {
+  // `new Uint8Array(data)` below COERCES rather than validates — for
+  // null/undefined/a DataView it silently yields a well-formed, ZERO-LENGTH
+  // view instead of throwing, which would turn a caller bug into a
+  // successfully-encrypted frame containing no plaintext at all. Guarding
+  // explicitly here (same fail-loud intent as decryptFrame's own
+  // `instanceof ArrayBuffer` check fails closed to null) keeps a bad call an
+  // error rather than wrong output — but a plain `instanceof ArrayBuffer`
+  // here would ALSO reject the legitimate cross-realm ArrayBuffers this
+  // module already has to tolerate (see isArrayBuffer's own doc), so this
+  // uses the realm-agnostic check instead.
+  if (!isArrayBuffer(data)) {
+    throw new TypeError("encryptFrame: data must be an ArrayBuffer");
+  }
   const nonce = iv.next();
-  // Fed as a Uint8Array VIEW, not the bare ArrayBuffer, on purpose: a test
-  // harness running under jsdom (a separate vm realm from Node's native
-  // WebCrypto implementation) constructs `data` with jsdom's own
-  // ArrayBuffer constructor, and `instanceof ArrayBuffer` checks inside
-  // Node's webidl argument coercion are realm-specific and reject it —
-  // exactly the cross-realm hazard __tests__/vault.test.ts already documents
-  // for Blob.arrayBuffer(). ArrayBuffer.isView() (what a TypedArray view
-  // satisfies) is realm-agnostic, so wrapping here is a no-op in a real
-  // single-realm browser but makes this function actually testable under
-  // jsdom too. Same reasoning below in decryptFrame.
+  // Fed as a Uint8Array VIEW, not the bare ArrayBuffer, on purpose: an
+  // ArrayBuffer constructed inside jsdom (a separate vm realm from Node's
+  // native WebCrypto implementation) fails the realm-specific
+  // `instanceof ArrayBuffer` check crypto.subtle.encrypt's webidl argument
+  // coercion runs internally — exactly the cross-realm gap
+  // __tests__/vault.test.ts:8-18 already documents for Blob.arrayBuffer().
+  // ArrayBuffer.isView() (what a TypedArray view satisfies) is realm-agnostic,
+  // so wrapping here is a no-op in a real single-realm browser but is what
+  // makes this callable from a jsdom-environment test at all. Only
+  // use-episode-exchange.test.tsx genuinely needs jsdom (it renders a hook
+  // via @testing-library/react); the Task 6 engine-fixture suites
+  // (episode-receiver/-sender/episode-exchange-loopback.test.ts) run under
+  // jsdom too only because they didn't opt into the repo's
+  // `// @vitest-environment node` docblock — this wrap is what lets them work
+  // either way, rather than this module requiring the node-only pragma
+  // everywhere it's exercised. Same reasoning below in decryptFrame.
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, new Uint8Array(data));
   const out = new Uint8Array(12 + ciphertext.byteLength);
   out.set(nonce, 0);

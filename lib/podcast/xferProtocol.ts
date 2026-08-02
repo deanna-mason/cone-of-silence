@@ -66,18 +66,26 @@ export interface ChunkEnvelope {
  *  already has its own 12-byte slot in the header (bytes 8..19), so
  *  encryptFrame's [IV][ciphertext+tag] output must be split before calling
  *  this (the IV half goes here, the rest is `payload`) rather than passed
- *  through whole. */
+ *  through whole.
+ *
+ *  Post-5D (Task 6): the `iv`-omitted (enc=0) branch below has no production
+ *  caller any more — EpisodeSender.pump() always supplies `iv`, and
+ *  EpisodeReceiver refuses any enc=0 chunk outright (xferKey is a mandatory
+ *  constructor dep now; there is no keyless mode to send a plain chunk
+ *  from). It stays only so tests can synthesize the downgrade-attempt
+ *  fixture that proves that refusal — do not read it as a live plaintext
+ *  wire path. */
 export function encodeChunk(seq: number, payload: Uint8Array, iv?: Uint8Array): ArrayBuffer {
   const buf = new ArrayBuffer(XFER_HEADER_BYTES + payload.length);
   const dv = new DataView(buf);
   dv.setUint8(0, 1); // version
-  dv.setUint8(1, iv ? 1 : 0); // enc: 1 = aes-gcm (5D), 0 = plain (5B)
+  dv.setUint8(1, iv ? 1 : 0); // enc: 1 = aes-gcm (5D), 0 = plain (5B, test-only post-Task-6)
   dv.setUint16(2, 0, true); // reserved
   dv.setUint32(4, seq >>> 0, true); // seq, little-endian
   if (iv) {
     if (iv.length !== 12) throw new RangeError(`encodeChunk: iv must be exactly 12 bytes, got ${iv.length}`);
     new Uint8Array(buf, 8, 12).set(iv);
-  } // else bytes 8..19 (IV) left zeroed — 5B's plain path always sends a zero IV.
+  } // else bytes 8..19 (IV) left zeroed — the enc=0 fixture path only (see doc comment above).
   new Uint8Array(buf, XFER_HEADER_BYTES).set(payload);
   return buf;
 }

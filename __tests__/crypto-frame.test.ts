@@ -137,6 +137,26 @@ describe("encryptFrame / decryptFrame", () => {
     }
   });
 
+  it("encryptFrame throws on non-ArrayBuffer input rather than silently encrypting zero bytes", async () => {
+    // `new Uint8Array(x)` for x in {null, undefined, a DataView} COERCES
+    // rather than validating — it yields a well-formed, zero-length view
+    // instead of throwing. Before encryptFrame wrapped its input in
+    // `new Uint8Array(data)` (for the jsdom cross-realm reason documented on
+    // encryptFrame itself), passing one of these produced a webidl
+    // TypeError; after, it silently produces a well-formed, DECRYPTABLE
+    // frame containing zero bytes of plaintext. encryptFrame is the one
+    // function in this module that must never quietly produce wrong output,
+    // so it needs its own explicit guard — the same one decryptFrame already
+    // has via `instanceof ArrayBuffer` — rather than relying on the coercion
+    // to fail loudly (it doesn't).
+    const key = await testKey();
+    const bad: unknown[] = [null, undefined, new DataView(new ArrayBuffer(8))];
+    for (const data of bad) {
+      const iv = new IvState();
+      await expect(encryptFrame(key, iv, data as ArrayBuffer)).rejects.toThrow(TypeError);
+    }
+  });
+
   it("multi-frame single-IvState round-trip: two frames off ONE IvState decrypt independently, IVs differ at bytes 4-11", async () => {
     const key = await testKey();
     const iv = new IvState();

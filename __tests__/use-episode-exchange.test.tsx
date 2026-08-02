@@ -889,6 +889,56 @@ describe("useEpisodeExchange", () => {
     expect(view.result.current.canSend).toBe(true);
   });
 
+  // Task 6 review, Minor 7: startSender/createReceiver's null-xferKey early
+  // return (EpisodeExchangeArgs.xferKey's doc: "the brief window before
+  // useCallSession's async key derivation resolves") had no test exercising
+  // either branch — every other fixture in this file passes a real key.
+  test("xferKey null: send() is a no-op — no EpisodeSender is constructed, no offer reaches the wire", () => {
+    const takeId = "take-no-key";
+    H.state.plans.set(takeId, [
+      { base: "audio", parts: [{ name: "audio.part000", size: 10, sha256: "x" }] },
+      { base: "video", parts: [] },
+    ]);
+
+    const { port, view } = setup({ lastTakeId: takeId, xferKey: null });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+    // canSend's truth table (test (a)) never checks xferKey — it's a
+    // defensive gate INSIDE startSender, not a public readiness signal — so
+    // this stays true even though send() is about to be a no-op.
+    expect(view.result.current.canSend).toBe(true);
+
+    act(() => view.result.current.actions.send());
+
+    expect(view.result.current.busy).toBe(false);
+    expect(view.result.current.state).toBeNull();
+    expect(port.framesSentTo(PEER)).toEqual([]);
+  });
+
+  test("xferKey null: an inbound xfr/offer is not adopted — no EpisodeReceiver is constructed, no xfr/have reply", () => {
+    const takeId = "take-no-key-recv";
+    const { port, view } = setup({ lastTakeId: null, xferKey: null });
+
+    act(() => {
+      port.deliver(
+        PEER,
+        JSON.stringify({
+          t: "xfr/offer",
+          v: 1,
+          episodeId: takeId,
+          from: "Otter",
+          files: [
+            { base: "audio", parts: [{ name: "audio.part000", size: 10, sha256: "x" }] },
+            { base: "video", parts: [] },
+          ],
+        }),
+      );
+    });
+
+    expect(view.result.current.busy).toBe(false);
+    expect(view.result.current.state).toBeNull();
+    expect(port.framesSentTo(PEER)).toEqual([]);
+  });
+
   test("(f) mergePanel: a take in progress always outranks a non-null exchange state", () => {
     const sendingState: ExchangePanelState = {
       kind: "xfer-sending",
