@@ -10,18 +10,39 @@
 
 export type E2eeApi = "script-transform" | "encoded-streams";
 
-/** `RTCRtpScriptTransform` (the modern, spec-track API) is checked first;
- * `RTCRtpSender.prototype.createEncodedStreams` (the older Chrome-only
- * "Insertable Streams" shape) is the fallback. Neither present → null (the
+/** `RTCRtpSender.prototype.createEncodedStreams` (the older Chrome-only
+ * "Insertable Streams" shape) is checked FIRST; `RTCRtpScriptTransform`
+ * (the newer, spec-track API) is the fallback. Neither present → null (the
  * caller's job, not this module's, to decide what null means — D15: a
- * themed refusal, never a silent plaintext call). */
+ * themed refusal, never a silent plaintext call).
+ *
+ * D25 (2026-08-01, Deanna): this preference is INVERTED from script-
+ * transform-first — deliberately, and only because of what Task 7's real-
+ * browser e2e (e2e/phase5d-e2e.js) actually found, not a preference for
+ * "older". `encoded-streams` is the branch that e2e proves end to end: two
+ * real browsers, live video, VP9 pinned, decrypt genuinely running
+ * continuously, a signaling kill+respawn rebuild, and an encrypted episode
+ * exchange. `script-transform`'s RECEIVER side was observed to construct
+ * cleanly, report no error, and then never invoke its transform callback for
+ * a single frame — permanently — under chrome-headless-shell; it has no e2e
+ * coverage anywhere in this codebase. Podcast mode (the only place E2EE
+ * matters today) is Chrome-only and Chrome supports both APIs, so nothing is
+ * lost by shipping the one with actual coverage; the fallback below is kept
+ * live (and pinned by its own test) for a future browser that ships
+ * script-transform without createEncodedStreams. If script-transform's
+ * receiver-side behavior is later confirmed sound on real desktop Chrome
+ * (the open question e2e/phase5d-e2e.js's header records for that
+ * verification), this preference is a one-line, fully reversible flip back —
+ * not a rewrite. lib/webrtc/e2ee.worker.ts's frame-flow watchdog (Task 7
+ * review round 2) now backstops WHICHEVER branch is live, including this
+ * fallback, so a future flip isn't flying blind either. */
 export function detectE2eeApi(): E2eeApi | null {
-  if (typeof window !== "undefined" && "RTCRtpScriptTransform" in window) {
-    return "script-transform";
-  }
   const sender = (globalThis as { RTCRtpSender?: { prototype: object } }).RTCRtpSender;
   if (sender && "createEncodedStreams" in sender.prototype) {
     return "encoded-streams";
+  }
+  if (typeof window !== "undefined" && "RTCRtpScriptTransform" in window) {
+    return "script-transform";
   }
   return null;
 }

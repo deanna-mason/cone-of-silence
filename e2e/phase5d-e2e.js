@@ -79,46 +79,56 @@
 //    again on the NEW pc to confirm decryption is genuinely live on it, not
 //    just that a new object exists.
 //
-// 3. This script forces the LEGACY "encoded-streams" transform API
-//    (deletes `window.RTCRtpScriptTransform` in every context's
-//    addInitScript, causing lib/webrtc/e2eeSupport.ts's detectE2eeApi() to
-//    fall through to its documented fallback) rather than letting
-//    detectE2eeApi() pick script-transform first, as production does.
-//    Root-caused live, empirically, before writing this note: with
-//    script-transform selected (this build's default — chrome-headless-
-//    shell's `RTCRtpScriptTransform` IS present, so feature-detection picks
-//    it), `scope.onrtctransform` fires correctly for BOTH sides (confirmed
-//    via a throwaway instrumented build) and the SENDER side genuinely
-//    encrypts (outbound framesEncoded/bytesSent climb normally) — but the
-//    RECEIVER side's transform stream's `transform()` callback is NEVER
-//    invoked for a single frame, on either host, for the life of the call:
-//    zero drops, zero errors, inbound-rtp `framesDecoded` pinned at exactly
-//    0 forever while `framesReceived`/`packetsReceived` climb normally
-//    (frames reach the jitter buffer, never reach the decoder). Forcing the
-//    legacy `encoded-streams` API (createEncodedStreams, feature-detected
-//    second) makes video flow immediately with no other change — isolating
-//    the fault to THIS BROWSER BUILD's receiver-side RTCRtpScriptTransform
-//    plumbing, not to lib/webrtc/peer.ts's or e2ee.worker.ts's usage of it
-//    (which mirrors the standard WebRTC insertable-streams sample pattern
-//    byte for byte) and not to lib/crypto/frameCipher.ts (already
-//    exhaustively round-trip-tested). A receiver-side RTCRtpScriptTransform
-//    silently never receiving frames is also an independently documented
-//    class of bug in another engine (Firefox: bugzilla.mozilla.org/show_bug.
-//    cgi?id=1969603, "Worker passed to RTCRtpScriptTransform never receives
-//    video frames from the ReadableStream") — this API is genuinely fragile
-//    across implementations, not something this codebase got wrong. The
-//    production preference order in e2eeSupport.ts is UNCHANGED (still
-//    tries script-transform first, per the plan's Tech Stack decision) —
-//    this workaround lives only in this test harness, which is the only
-//    place able to observe the bug (chrome-headless-shell is the only
-//    Chromium build in this sandbox that can even connect two same-machine
-//    peers at all — see e2e/phase5a-e2e.js's header for why the fuller
-//    Chrome-for-Testing build is rejected here). Flagged prominently for
-//    Deanna's human two-Mac verification step (spec's own acceptance
-//    criteria already requires confirming VP9 via webrtc-internals on real
-//    rigs) — if her real Chrome/Safari/Firefox ALSO hit this, that is a
-//    genuine, separate finding an agent in this sandbox cannot reproduce or
-//    fix without a real desktop browser.
+// 3. (D25, 2026-08-01 — superseded a prior harness workaround, kept here as
+//    the record of WHY.) This script no longer forces any particular
+//    transform API — it lets lib/webrtc/e2eeSupport.ts's detectE2eeApi() run
+//    exactly as production does. That's the point of this note: what
+//    follows is what this gate found, and it's WHY detectE2eeApi() now
+//    prefers "encoded-streams" (see that file's own D25 doc comment).
+//
+//    Root-caused live, empirically, in an earlier run of this investigation:
+//    with "script-transform" selected (chrome-headless-shell's
+//    `RTCRtpScriptTransform` IS present, so feature-detection used to pick
+//    it first), `scope.onrtctransform` fired correctly for BOTH sides
+//    (confirmed via a throwaway instrumented build) and the SENDER side
+//    genuinely encrypted (outbound framesEncoded/bytesSent climbed
+//    normally) — but the RECEIVER side's transform stream's `transform()`
+//    callback was NEVER invoked for a single frame, on either host, for the
+//    life of the call: zero drops, zero errors, inbound-rtp `framesDecoded`
+//    pinned at exactly 0 forever while `framesReceived`/`packetsReceived`
+//    climbed normally (frames reached the jitter buffer, never reached the
+//    decoder). Forcing the legacy `encoded-streams` API made video flow
+//    immediately with no other change — isolating the fault to THIS BROWSER
+//    BUILD's receiver-side RTCRtpScriptTransform plumbing, not to
+//    lib/webrtc/peer.ts's or e2ee.worker.ts's usage of it (which mirrors the
+//    standard WebRTC insertable-streams sample pattern byte for byte) and
+//    not to lib/crypto/frameCipher.ts (already exhaustively round-trip-
+//    tested). A receiver-side RTCRtpScriptTransform silently never
+//    receiving frames is also an independently documented class of bug in
+//    another engine (Firefox: bugzilla.mozilla.org/show_bug.cgi?id=1969603,
+//    "Worker passed to RTCRtpScriptTransform never receives video frames
+//    from the ReadableStream") — this API is genuinely fragile across
+//    implementations, not something this codebase got wrong.
+//
+//    Deanna ruled (D25): prefer `createEncodedStreams` in production —
+//    Chrome supports both APIs and podcast mode is Chrome-only, so nothing
+//    is lost today; it's a one-line, fully reversible change; and it
+//    removes the risk of a black-screen dress rehearsal. lib/webrtc/
+//    e2ee.worker.ts's frame-flow watchdog (Task 7 review round 2) backstops
+//    whichever branch is actually live, including the script-transform
+//    fallback, so a future flip back isn't flying blind either.
+//
+//    WHAT THIS GATE PROVES NOW: with the harness workaround removed, this
+//    script exercises the SHIPPED, PRODUCTION-PREFERRED path — detectE2eeApi()
+//    picks "encoded-streams" here exactly as it will for a real user, not a
+//    forced fallback. Every check below (proof, VP9 pin, continuous decode,
+//    wrong-secret refusal, rebuild, encrypted exchange) is now coverage of
+//    the actual default branch, closing the gap this note used to describe.
+//    Whether script-transform's receiver-side behavior is sound on real
+//    desktop Chrome remains open and is NOT this gate's concern any more
+//    (it's the fallback, backstopped by the watchdog) — that question is
+//    Deanna's human two-Mac verification step's to answer, if she ever needs
+//    to revisit D25.
 const { chromium } = require("playwright-core");
 const path = require("path");
 const os = require("os");
@@ -196,12 +206,9 @@ async function newHostPage(browser, codename, marker) {
   const context = await browser.newContext({ permissions: ["camera", "microphone"] });
   await context.addInitScript(
     ({ codename, vaultDirName, marker }) => {
-      // Header deviation note 3: force the legacy "encoded-streams" transform
-      // API for this test run — chrome-headless-shell's receiver-side
-      // RTCRtpScriptTransform silently never delivers frames in this build.
-      // Production's lib/webrtc/e2eeSupport.ts is unchanged (still prefers
-      // script-transform); this delete only affects THIS test context.
-      delete window.RTCRtpScriptTransform;
+      // D25 (see header note 3): no transform API is forced here any more —
+      // detectE2eeApi() runs exactly as production does, which now selects
+      // "encoded-streams" first (the branch this gate actually proves).
       localStorage.setItem(
         "cos-session",
         JSON.stringify({ session: "e2e-fake", username: codename, expiresAt: "2030-01-01T00:00:00.000Z" }),

@@ -16,15 +16,22 @@ import { PeerLink } from "@/lib/webrtc/peer";
 describe("detectE2eeApi", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("prefers RTCRtpScriptTransform when present", () => {
+  // D25 (Task 7 review round 2): encoded-streams is preferred now — it's the
+  // branch e2e/phase5d-e2e.js actually proves end to end in a real browser;
+  // script-transform's receiver side was observed never delivering frames
+  // under chrome-headless-shell and has no e2e coverage anywhere.
+
+  it("prefers createEncodedStreams when present (D25)", () => {
     vi.stubGlobal("RTCRtpScriptTransform", class {});
-    vi.stubGlobal("RTCRtpSender", { prototype: { createEncodedStreams() {} } }); // present too — script-transform still wins
-    expect(detectE2eeApi()).toBe("script-transform");
+    vi.stubGlobal("RTCRtpSender", { prototype: { createEncodedStreams() {} } }); // present too — encoded-streams still wins
+    expect(detectE2eeApi()).toBe("encoded-streams");
   });
 
-  it("falls back to encoded-streams when only createEncodedStreams exists", () => {
-    vi.stubGlobal("RTCRtpSender", { prototype: { createEncodedStreams() {} } });
-    expect(detectE2eeApi()).toBe("encoded-streams");
+  it("falls back to script-transform when createEncodedStreams is absent (D25 fallback stays live)", () => {
+    vi.stubGlobal("RTCRtpScriptTransform", class {});
+    // No RTCRtpSender stubbed at all — a browser that ships script-transform
+    // without the legacy insertable-streams shape must still get e2ee.
+    expect(detectE2eeApi()).toBe("script-transform");
   });
 
   it("returns null when neither API exists", () => {
