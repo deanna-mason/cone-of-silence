@@ -340,6 +340,26 @@ export class Mesh {
     return entry.link?.sendXfer(data) ?? false;
   }
 
+  /** Which of this peer's channels the mesh currently holds OPEN, in a fixed
+   *  cos-then-xfer order. Exists for CallSession's proof-gated channelState
+   *  replay (see session.ts's onProven): the app-facing lifecycle events of
+   *  an unproven peer are dropped, so whatever is still open at proving time
+   *  has to be re-announced — and it must be re-announced from THIS state,
+   *  the same flags openChannels()/remove()/rebuildLink() act on, rather than
+   *  from a session-local record of the last event seen. Those two diverge:
+   *  "error" is forwarded WITHOUT flipping the open flag (see construct()'s
+   *  onChannelState), so a channel that errored while still open reads
+   *  "error" in any last-event map but is, correctly, still open here.
+   *  Empty for an unknown peer. */
+  openChannelsOf(peerId: string): ChannelName[] {
+    const entry = this.entries.get(peerId);
+    if (!entry) return [];
+    const open: ChannelName[] = [];
+    if (entry.channelOpen) open.push("cos");
+    if (entry.xferOpen) open.push("xfer");
+    return open;
+  }
+
   /** -1 when the peer is unknown or its link isn't built yet. */
   xferBufferedAmount(peerId: string): number {
     const link = this.entries.get(peerId)?.link;

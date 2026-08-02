@@ -296,13 +296,6 @@ export class CallSession {
 
     let link!: PeerLink;
     let stashedStream: MediaStream | null = null;
-    // Minor 2 review fix: the latest lifecycle state THIS link reported for
-    // each of its channels, so the states gated away while the peer was
-    // unproven can be replayed the instant it proves. Per-link (a rebuild
-    // gets a fresh map with its fresh channels), and only the last state per
-    // channel is kept — an open/closed/open churn while unproven is not a
-    // history the app needs, only the truth at proving time.
-    const lastChannelState = new Map<ChannelName, ChannelLifecycle>();
     const proofEvents: ProofEvents = {
       onSend: (text) => {
         link.send(text);
@@ -315,12 +308,24 @@ export class CallSession {
           stashedStream = null;
           ev.onRemoteStream(stream);
         }
-        // Replay only what is CURRENTLY open: a channel that opened and
-        // closed again while gated was never announced, so announcing its
-        // close now would be news about an event the app never saw. Strictly
-        // after setProven above, so these pass the gate they were held at.
-        for (const [channel, state] of lastChannelState) {
-          if (state === "open") this.events.emit("channelState", peerId, channel, state, undefined);
+        // Replay whatever is CURRENTLY open, read from MESH — the same flags
+        // openChannels()/remove()/rebuildLink() act on — rather than from a
+        // session-local record of the last event seen. A parallel truth
+        // diverges: mesh forwards "error" without flipping the open flag
+        // (peer.ts fires onerror on a channel that is still open), so
+        // `xfer: open → error` while gated reads "error" in any last-event map
+        // and its replay would be skipped, leaving the app permanently unaware
+        // that xfer is open — canSend wedged false for the life of the link
+        // (useEpisodeExchange) while mesh.sendXferTo would happily succeed.
+        // That is the very wedge this replay exists to prevent.
+        //
+        // A channel that genuinely CLOSED while gated is absent here, and
+        // correctly so: the app was never told it opened, so announcing its
+        // close would be news about an event it never saw. Strictly after
+        // setProven above, so these pass the gate they were held at, and
+        // synchronous with it — nothing can close in between.
+        for (const channel of this.mesh.openChannelsOf(peerId)) {
+          this.events.emit("channelState", peerId, channel, "open", undefined);
         }
       },
       // Review fix (Important 4): JoinProof distinguishes "bad-mac" (the
@@ -402,12 +407,10 @@ export class CallSession {
         },
         // Deliberately forwarded ungated to MESH (see the mesh callback's own
         // comment above, where the app-facing gate lives): mesh needs every
-        // transition to keep entry.channelOpen/xferOpen honest. Recorded here
-        // so onProven can replay whatever is still open.
-        onChannelState: (channel, state, detail) => {
-          lastChannelState.set(channel, state);
-          ev.onChannelState(channel, state, detail);
-        },
+        // transition to keep entry.channelOpen/xferOpen honest — which is
+        // also the single source onProven's replay reads back, so there is no
+        // second copy of this state anywhere to drift.
+        onChannelState: ev.onChannelState,
         // Review fix (Critical 1): D16 names cos-xfer explicitly alongside
         // cos — "every cos/cos-xfer app message" is gated on proof. Before
         // this, the xfer channel (negotiated, opens independently of "cos")

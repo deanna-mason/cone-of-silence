@@ -301,14 +301,55 @@ describe("CallSession xfer events", () => {
     await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
 
     expect(events).toEqual([
-      ["p1", "xfer", "open", undefined],
       ["p1", "cos", "open", undefined],
+      ["p1", "xfer", "open", undefined],
     ]);
 
     // Post-proof, everything forwards live, all four args intact.
     xfer.onerror!({ error: { message: "sctp reset" } });
     expect(events.at(-1)).toEqual(["p1", "xfer", "error", "sctp reset"]);
 
+    xfer.onclose!();
+    expect(events.at(-1)).toEqual(["p1", "xfer", "closed", undefined]);
+  });
+
+  it("(a2) a pre-proof 'error' on a still-open channel does not cancel its replay — the replay mirrors mesh, not a parallel truth", async () => {
+    session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
+    const events: [string, ChannelName, ChannelLifecycle, string | undefined][] = [];
+    const rosters: RemotePeer[][] = [];
+    session.events.on("channelState", (peerId, channel, state, detail) =>
+      events.push([peerId, channel, state, detail]),
+    );
+    session.events.on("roster", (r) => rosters.push(r));
+    const { pc, xfer } = buildLiveLink();
+
+    // "error" is NOT a close: mesh deliberately leaves the open flag alone on
+    // it (mesh.ts's onChannelState — "an error is often followed by a close,
+    // and the close flips it then"), and peer.ts fires onerror on a channel
+    // that is still open. A replay driven off a session-local "last state
+    // seen" map would read "error" here and skip the channel, leaving the app
+    // permanently unaware that xfer is open — canSend wedged false for the
+    // life of the link while mesh.sendXferTo would happily succeed. That is
+    // the exact wedge the replay exists to prevent, so the replay reads
+    // mesh's own channelOpen/xferOpen and the two cannot diverge.
+    xfer.readyState = "open";
+    xfer.onopen!();
+    xfer.onerror!({ error: { message: "sctp hiccup" } });
+    expect(events).toEqual([]); // both gated — still unproven
+
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+
+    expect(events).toEqual([
+      ["p1", "cos", "open", undefined],
+      ["p1", "xfer", "open", undefined], // replayed despite the error — mesh still holds it open
+    ]);
+    expect(session.sendXferTo("p1", "x")).toBe(true); // and the send path agrees
+
+    // The eventual real close still forwards live, so the engines' only
+    // stall recovery (useEpisodeExchange's handleChannelClosed) still fires.
     xfer.onclose!();
     expect(events.at(-1)).toEqual(["p1", "xfer", "closed", undefined]);
   });
@@ -480,8 +521,8 @@ describe("useCallSession bus.xfer", () => {
     // event useEpisodeExchange turns into canSend, so losing it would wedge
     // "Send Episode" shut for the whole call.
     expect(states).toEqual([
-      ["p1", "xfer", "open"],
       ["p1", "cos", "open"],
+      ["p1", "xfer", "open"],
     ]);
 
     act(() => xfer.onbufferedamountlow!());

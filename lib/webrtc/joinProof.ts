@@ -243,7 +243,21 @@ export class JoinProof {
 
   /** Draws a FRESH nonce, sends the challenge, and arms the window. Every
    * challenge this class ever sends comes from here, so "one nonce per
-   * challenge, never replayed" holds by construction for the retry too. */
+   * challenge, never replayed" holds by construction for the retry too.
+   *
+   * KNOWN HAZARD, flagged not fixed (final-review Minor, no code change
+   * requested): `events.onSend` runs BEFORE the timer is armed, and the
+   * session wires it to PeerLink.send, whose bare `channel.send(text)` can
+   * throw between its own readyState check and the send (a channel closing in
+   * that gap). On the start() path that throw propagates out of the
+   * onChannelOpen handler with nothing armed; on the RETRY path it is worse in
+   * kind — `retried` is already true and `timeoutId` is already null, so the
+   * proof strands "pending" forever with no timer to ever fail it and no
+   * second retry available: silent, permanent, exactly the class of stranding
+   * the timeout-retry fix above exists to eliminate. start() has always had
+   * this shape (the retry only inherits it), and the honest fix is to make
+   * PeerLink.send non-throwing rather than to reorder here — arming first
+   * would leave a timer armed for a challenge that never went out. */
   private issueChallenge(): void {
     const nonce = randomNonce();
     this.ownChallengeNonce = nonce;
