@@ -274,17 +274,38 @@ describe("CallSession xfer events", () => {
     return { pc, xfer: xferChannelOf(pc) };
   }
 
-  it("(a) mesh onChannelState -> session channelState event with all four args", () => {
+  it("(a) mesh onChannelState -> session channelState event with all four args — proof-gated, with the open channels replayed on proven (Minor 2 review fix)", async () => {
     session = new CallSession(ROOM, stream, FAKE_CRYPTO, "ws://test/ws");
     const events: [string, ChannelName, ChannelLifecycle, string | undefined][] = [];
+    const rosters: RemotePeer[][] = [];
     session.events.on("channelState", (peerId, channel, state, detail) =>
       events.push([peerId, channel, state, detail]),
     );
-    const { xfer } = buildLiveLink();
+    session.events.on("roster", (r) => rosters.push(r));
+    const { pc, xfer } = buildLiveLink();
 
+    // Final-review Minor 2: channelState was the last ungated member of the
+    // trust-gate enumeration (its three siblings — onMessage, onXferMessage,
+    // onXferDrain — were all gated). An unproven peer's channel lifecycle
+    // must not drive app state either (useEpisodeExchange keys canSend off
+    // exactly this event).
     xfer.onopen!();
-    expect(events).toEqual([["p1", "xfer", "open", undefined]]);
+    expect(events).toEqual([]);
 
+    // SCTP routinely establishes before the proof settles, so the gate can't
+    // just drop these: whatever is still open at proven time is replayed,
+    // or the send panel would stay wedged shut for the life of the call.
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+
+    expect(events).toEqual([
+      ["p1", "xfer", "open", undefined],
+      ["p1", "cos", "open", undefined],
+    ]);
+
+    // Post-proof, everything forwards live, all four args intact.
     xfer.onerror!({ error: { message: "sctp reset" } });
     expect(events.at(-1)).toEqual(["p1", "xfer", "error", "sctp reset"]);
 
@@ -441,7 +462,7 @@ describe("useCallSession bus.xfer", () => {
     h.result.current.bus.xfer.onChannelState((peerId, channel, state) => states.push([peerId, channel, state]));
 
     act(() => xfer.onopen!());
-    expect(states).toEqual([["p1", "xfer", "open"]]); // channel lifecycle itself is not proof-gated
+    expect(states).toEqual([]); // channel lifecycle is proof-gated too (Minor 2 review fix)
 
     xfer.bufferedAmount = 777;
     act(() => xfer.onbufferedamountlow!()); // still unproven — drain gated
@@ -454,6 +475,14 @@ describe("useCallSession bus.xfer", () => {
       cos.onopen!();
     });
     await waitFor(() => h.result.current.peers.some((p) => p.peerId === "p1"));
+
+    // Replayed on proven, through the hook's own bus fan-out — this is the
+    // event useEpisodeExchange turns into canSend, so losing it would wedge
+    // "Send Episode" shut for the whole call.
+    expect(states).toEqual([
+      ["p1", "xfer", "open"],
+      ["p1", "cos", "open"],
+    ]);
 
     act(() => xfer.onbufferedamountlow!());
     expect(drains).toEqual(["p1"]);

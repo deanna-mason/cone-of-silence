@@ -227,7 +227,12 @@ describe("JoinProof", () => {
     expect(a.phase).toBe<ProofPhase>("pending");
     expect(events.failedReasons).toEqual([]);
 
-    // Nothing valid ever arrives — the armed timeout is what finally fails it.
+    // Nothing valid ever arrives — the armed timeout is what finally fails
+    // it. TWO fires, not one: the first timeout re-arms the proof once with a
+    // FRESH challenge (the honest-jank recovery path — see the retry tests
+    // below); only the second is terminal.
+    clock.fire();
+    expect(a.phase).toBe<ProofPhase>("pending"); // retry armed, not yet failed
     clock.fire();
 
     expect(a.phase).toBe<ProofPhase>("failed");
@@ -253,7 +258,12 @@ describe("JoinProof", () => {
     expect(a.phase).toBe<ProofPhase>("pending");
     expect(clock.pendingCount()).toBe(1);
 
-    clock.fire();
+    clock.fire(); // first window: re-arms once (fresh nonce), NOT terminal
+    expect(a.phase).toBe<ProofPhase>("pending");
+    expect(events.failedReasons).toEqual([]);
+    expect(clock.pendingCount()).toBe(1); // exactly one live timer, never two
+
+    clock.fire(); // second window: terminal
 
     expect(a.phase).toBe<ProofPhase>("failed");
     expect(events.failedReasons).toEqual(["timeout"]);
@@ -262,6 +272,166 @@ describe("JoinProof", () => {
     // Firing again (nothing pending) must not double-fire onFailed.
     clock.fire();
     expect(events.failedReasons).toEqual(["timeout"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Final-review BLOCKING fix: a timeout re-arms the proof exactly once, with
+  // a fresh nonce. Before this, a timeout was permanently terminal with no
+  // recovery path at all — start() is `started`-guarded, verifyResponse
+  // early-returns on a non-pending phase, and (the part that made it
+  // unrecoverable) the LINK stays open and connected on a timeout, so 4C
+  // never rebuilds and buildLink never re-runs. An honest peer whose own main
+  // thread stalled past the 5s window (heavy encode on a four-way call, an
+  // OPFS write, a GC pause) therefore dropped every message, xfer frame and
+  // stream from a peer it would never re-prove, silently, until a reload.
+  // -------------------------------------------------------------------------
+  it("retry: the first timeout re-issues a FRESH challenge and an honest answer to it still reaches proven", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const events = new BusEvents();
+    const clock = new FakeClock();
+    const a = new JoinProof({
+      proofKey,
+      selfPeerId: "peer-a",
+      remotePeerId: "peer-b",
+      events,
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    a.start();
+    const firstNonce = (parseProofMsg(events.sent[0]!) as { nonce: string }).nonce;
+
+    // The far side's JS never got to this challenge (stalled main thread) —
+    // the window expires with silence.
+    clock.fire();
+
+    expect(a.phase).toBe<ProofPhase>("pending"); // NOT terminal — this is the recovery
+    expect(events.failedReasons).toEqual([]);
+    expect(events.sent).toHaveLength(2);
+    const secondNonce = (parseProofMsg(events.sent[1]!) as { nonce: string }).nonce;
+    expect(parseProofMsg(events.sent[1]!)?.t).toBe("prf/challenge");
+    // The whole point: a FRESH nonce, never a replay of the timed-out one.
+    expect(secondNonce).not.toBe(firstNonce);
+
+    // The far side, now unstuck, answers the SECOND challenge honestly.
+    const bEvents = new BusEvents();
+    const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events: bEvents });
+    b.handleMessage(events.sent[1]!);
+    await waitFor(() => bEvents.sent.length === 1);
+    a.handleMessage(bEvents.sent[0]!);
+    await waitFor(() => a.phase !== "pending");
+
+    expect(a.phase).toBe<ProofPhase>("proven");
+    expect(events.provenCount).toBe(1);
+    expect(events.failedReasons).toEqual([]);
+    expect(clock.pendingCount()).toBe(0); // proving cleared the retry's armed timer
+  });
+
+  it("retry: an answer to the RETIRED first challenge can never prove — only the fresh nonce counts", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const events = new BusEvents();
+    const clock = new FakeClock();
+    const a = new JoinProof({
+      proofKey,
+      selfPeerId: "peer-a",
+      remotePeerId: "peer-b",
+      events,
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    a.start();
+    const firstChallenge = events.sent[0]!;
+
+    // A genuine, correctly-signed answer to the FIRST challenge, computed
+    // before the window expired but delivered after the retry re-armed.
+    const bEvents = new BusEvents();
+    const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events: bEvents });
+    b.handleMessage(firstChallenge);
+    await waitFor(() => bEvents.sent.length === 1);
+    const staleButGenuine = bEvents.sent[0]!;
+
+    clock.fire(); // retire the first nonce, issue the second
+    a.handleMessage(staleButGenuine);
+    await flush();
+
+    expect(a.phase).toBe<ProofPhase>("pending"); // the retired challenge is dead
+    expect(events.provenCount).toBe(0);
+    expect(events.failedReasons).toEqual([]); // stale ≠ bad-mac: silently ignored, exactly like any other stale nonce
+  });
+
+  it("retry is bounded to exactly one: both windows timing out → terminal failed('timeout'), no third challenge", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const events = new BusEvents();
+    const clock = new FakeClock();
+    const a = new JoinProof({
+      proofKey,
+      selfPeerId: "peer-a",
+      remotePeerId: "peer-b",
+      events,
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    a.start();
+    clock.fire();
+    clock.fire();
+
+    expect(a.phase).toBe<ProofPhase>("failed");
+    expect(events.failedReasons).toEqual(["timeout"]);
+    expect(events.sent).toHaveLength(2); // two challenges total — never a third
+    expect(clock.pendingCount()).toBe(0); // nothing left armed: no unbounded re-arming
+
+    clock.fire(); // hygiene
+    expect(events.failedReasons).toEqual(["timeout"]);
+    expect(events.sent).toHaveLength(2);
+
+    // Terminal means terminal: even a genuine answer arriving now is inert.
+    const bEvents = new BusEvents();
+    const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events: bEvents });
+    b.handleMessage(events.sent[1]!);
+    await waitFor(() => bEvents.sent.length === 1);
+    a.handleMessage(bEvents.sent[0]!);
+    await flush();
+    expect(a.phase).toBe<ProofPhase>("failed");
+    expect(events.provenCount).toBe(0);
+  });
+
+  it("retry: a bad-mac during the RETRY window is immediately terminal — no third attempt", async () => {
+    const { keyA, keyB } = await twoKeys();
+    const events = new BusEvents();
+    const clock = new FakeClock();
+    const a = new JoinProof({
+      proofKey: keyA,
+      selfPeerId: "peer-a",
+      remotePeerId: "peer-b",
+      events,
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    a.start();
+    clock.fire(); // into the retry window
+    expect(a.phase).toBe<ProofPhase>("pending");
+
+    // A wrong-secret peer answers the RETRY's challenge: a real HMAC, under
+    // the wrong key. bad-mac is still immediately terminal — the retry
+    // budget is for silence only, never for a countersign that was actually
+    // wrong (that is the one thing that may reach the refusal card).
+    const wrongEvents = new BusEvents();
+    const wrong = new JoinProof({ proofKey: keyB, selfPeerId: "peer-b", remotePeerId: "peer-a", events: wrongEvents });
+    wrong.handleMessage(events.sent[1]!);
+    await waitFor(() => wrongEvents.sent.length === 1);
+    a.handleMessage(wrongEvents.sent[0]!);
+    await waitFor(() => a.phase !== "pending");
+
+    expect(a.phase).toBe<ProofPhase>("failed");
+    expect(events.failedReasons).toEqual(["bad-mac"]);
+    expect(events.sent).toHaveLength(2); // no third challenge — bad-mac does not re-arm
+    expect(clock.pendingCount()).toBe(0);
   });
 
   it("foreign t / malformed JSON → handleMessage returns false, phase unchanged", async () => {
@@ -558,17 +728,27 @@ describe("JoinProof", () => {
       // resolved.
       a.handleMessage(genuineResponse);
       // Fire the timeout SYNCHRONOUSLY, before that sign call can resolve:
-      // FakeClock.fire() invokes the pending callback (fail("timeout"))
-      // immediately, in this same synchronous turn.
+      // FakeClock.fire() invokes the pending callback immediately, in this
+      // same synchronous turn. The first window re-arms (fresh nonce), so
+      // the phase is still "pending" — but the challenge that in-flight
+      // verification is answering has been RETIRED.
+      clock.fire();
+      expect(a.phase).toBe<ProofPhase>("pending");
+      expect(events.failedReasons).toEqual([]);
+
+      // Let the in-flight verifyResponse's computeMac actually settle now.
+      // Its post-await guard must see that its nonce is no longer the
+      // outstanding one and return without ever calling onProven — the
+      // retired challenge cannot resurrect itself from inside a race.
+      await flush();
+      expect(a.phase).toBe<ProofPhase>("pending");
+      expect(events.provenCount).toBe(0);
+
+      // The second window is terminal, and still exactly ONE event total.
       clock.fire();
       expect(a.phase).toBe<ProofPhase>("failed");
       expect(events.failedReasons).toEqual(["timeout"]);
-
-      // Let the in-flight verifyResponse's computeMac actually settle now.
-      // Its post-await guard (`this._phase !== "pending"`) must see
-      // "failed" and return without ever calling onProven.
       await flush();
-      expect(a.phase).toBe<ProofPhase>("failed");
       expect(events.provenCount).toBe(0);
       expect(events.failedReasons).toEqual(["timeout"]);
     });
@@ -1095,12 +1275,66 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
     await vi.advanceTimersByTimeAsync(STAGGER_MS);
     a.openChannel("peer-b"); // arms the default 5s timeout; nobody ever answers
 
+    // 10s, not 5s: the first window re-arms once with a fresh challenge (the
+    // BLOCKING final-review fix); the SECOND is what goes terminal.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(a.proofPhaseOf("peer-b")).toBe("pending"); // retrying, still fully gated
+    expect(a.roster).toEqual([]);
     await vi.advanceTimersByTimeAsync(5_000);
 
     expect(a.proofPhaseOf("peer-b")).toBe("failed");
     expect(a.linkFor("peer-b").closeCalls).toBe(0); // NOT closed — a timeout isn't evidence about the secret
     expect(a.countersignFailedCount).toBe(0); // NOT counted toward the refusal card
     expect(a.roster).toEqual([]); // still unproven (never was) — correctly invisible either way
+  });
+
+  it("an honest peer whose FIRST challenge is lost recovers on the retry: proven, visible, messages flow again", async () => {
+    const { secret } = createRoomKeys();
+    const { proofKey } = await deriveRoomKeys(secret);
+    const a = new GatingHarness("peer-a", () => proofKey);
+    const b = new GatingHarness("peer-b", () => proofKey);
+
+    a.enter(["peer-b"]);
+    b.mesh.addNewcomer("peer-a", false);
+    await vi.advanceTimersByTimeAsync(STAGGER_MS);
+
+    // A's FIRST challenge never reaches B — the honest-jank scenario the
+    // reviewer traced (B's main thread stalled past the 5s window on a heavy
+    // encode / OPFS write / GC pause, so nothing answers it). Everything
+    // after that first message flows normally.
+    let dropFirstChallenge = true;
+    a.linkFor("peer-b").onSendHook = (text) => {
+      if (dropFirstChallenge && parseProofMsg(text)?.t === "prf/challenge") {
+        dropFirstChallenge = false;
+        return;
+      }
+      b.deliverMessage("peer-a", text);
+    };
+    b.wireTo("peer-a", a, "peer-b");
+
+    a.openChannel("peer-b");
+    b.openChannel("peer-a");
+
+    // B proves A (its own challenge got through, and A answers regardless of
+    // its own phase), but A is stuck — pre-fix this asymmetry was PERMANENT.
+    await waitForFake(() => b.proofPhaseOf("peer-a") === "proven");
+    expect(a.proofPhaseOf("peer-b")).toBe("pending");
+    expect(a.roster).toEqual([]);
+    a.mesh.sendAll("during-the-stall");
+    expect(b.deliveredMessages).toEqual([]); // gated throughout the retry window
+
+    // The window expires: A re-arms with a FRESH challenge, which does get
+    // through, and B answers it.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await waitForFake(() => a.proofPhaseOf("peer-b") === "proven");
+
+    expect(a.proofPhaseOf("peer-b")).toBe("proven");
+    expect(a.roster.map((p) => p.peerId)).toEqual(["peer-b"]);
+    expect(a.linkFor("peer-b").closeCalls).toBe(0);
+    expect(a.countersignFailedCount).toBe(0);
+
+    a.mesh.sendAll("after-recovery");
+    expect(b.deliveredMessages).toEqual([["peer-a", "after-recovery"]]); // the stalled message is gone for good — dropped, never queued
   });
 
   it("a previously-proven peer's REBUILT proof genuinely failing (bad-mac) drops the roster row (Important 5's revokeVisibility)", async () => {

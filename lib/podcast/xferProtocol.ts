@@ -72,9 +72,10 @@ export interface ChunkEnvelope {
  *  caller any more — EpisodeSender.pump() always supplies `iv`, and
  *  EpisodeReceiver refuses any enc=0 chunk outright (xferKey is a mandatory
  *  constructor dep now; there is no keyless mode to send a plain chunk
- *  from). It stays only so tests can synthesize the downgrade-attempt
- *  fixture that proves that refusal — do not read it as a live plaintext
- *  wire path. */
+ *  from). It is test-only: xfer-envelope-enc.test.ts synthesizes the
+ *  downgrade-attempt fixture that proves that refusal with it, and
+ *  xfer-protocol.test.ts uses the same iv-less form for ordinary byte-layout
+ *  assertions — do not read it as a live plaintext wire path. */
 export function encodeChunk(seq: number, payload: Uint8Array, iv?: Uint8Array): ArrayBuffer {
   const buf = new ArrayBuffer(XFER_HEADER_BYTES + payload.length);
   const dv = new DataView(buf);

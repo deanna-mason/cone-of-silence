@@ -111,7 +111,13 @@ export async function encryptFrame(key: CryptoKey, iv: IvState, data: ArrayBuffe
  * that: a bad frame is dropped (black tile), not a crashed pipe. */
 export async function decryptFrame(key: CryptoKey, data: ArrayBuffer): Promise<ArrayBuffer | null> {
   try {
-    if (!(data instanceof ArrayBuffer) || data.byteLength < 12) return null;
+    // Realm-agnostic (Minor 4 review fix): a plain `instanceof ArrayBuffer`
+    // here rejects a genuine ArrayBuffer from another realm — and this
+    // function's rejection is `null`, which is indistinguishable from a
+    // tampered tag and would be read as an attack. Both callers happen to be
+    // same-realm today, so that was latent, not live; isArrayBuffer (written
+    // for exactly this bug class — see its doc) removes the trap outright.
+    if (!isArrayBuffer(data) || data.byteLength < 12) return null;
     const iv = new Uint8Array(data, 0, 12);
     // A view over the SAME buffer (not .slice()'s copy-into-a-bare-ArrayBuffer)
     // — see encryptFrame's comment on why a view, not a bare ArrayBuffer,

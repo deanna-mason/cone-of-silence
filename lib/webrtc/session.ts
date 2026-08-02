@@ -155,13 +155,39 @@ export class CallSession {
         onChannelOpen: () => this.events.emit("channelOpen"),
         onChannelClosed: () => this.events.emit("channelClosed"),
         onMessage: (peerId, text) => this.events.emit("message", peerId, text),
-        // Straight forward to the session's own event surface. Ordering vs.
-        // the aggregate `channelClosed` event is deliberately unspecified —
-        // it's aggregate-first on a live close but per-channel-first on a
-        // mesh-synthesized one (remove/closeAll/rebuild) — so nothing here
-        // or downstream may assume an interleaving between the two.
-        onChannelState: (peerId, channel, state, detail) =>
-          this.events.emit("channelState", peerId, channel, state, detail),
+        // Forwarded to the session's own event surface, PROOF-GATED like
+        // every other per-peer app signal (message/xferMessage/xferDrain).
+        // Ordering vs. the aggregate `channelClosed` event is deliberately
+        // unspecified — it's aggregate-first on a live close but
+        // per-channel-first on a mesh-synthesized one (remove/closeAll/
+        // rebuild) — so nothing here or downstream may assume an
+        // interleaving between the two.
+        //
+        // Final-review Minor 2: this was the last ungated member of the trust
+        // gate. The gate lives HERE, at the app-facing emit, and not at
+        // buildLink's link-level callback (where its three siblings sit),
+        // because mesh IS a genuine consumer of the ungated link signal: the
+        // same callback maintains entry.channelOpen/entry.xferOpen, which
+        // drive the openChannels() aggregate and the synthesized closes on
+        // remove/closeAll/rebuild. Gating it at the link would leave mesh's
+        // own bookkeeping permanently wrong for any peer whose channels
+        // opened before its proof settled (SCTP routinely does — see
+        // mesh.ts's openChannels() doc). What the APP must not see is an
+        // unproven peer's lifecycle, and that is exactly what this drops —
+        // buildLink replays whatever is still open the moment the peer
+        // proves, so nothing durable is lost.
+        //
+        // Mesh-synthesized closes (remove/closeAll/rebuildLink) all run while
+        // the peer's proof object is still the current, still-proven one —
+        // rebuildLink synthesizes before scheduleConstruction ever reaches
+        // buildLink, and both dropAll() and leave() call mesh.closeAll()
+        // before disposeAllProofs() — so a proven peer's teardown still
+        // reaches the engines' handleChannelClosed (useEpisodeExchange's only
+        // stall recovery).
+        onChannelState: (peerId, channel, state, detail) => {
+          if (this.proofs.get(peerId)?.proof.phase !== "proven") return;
+          this.events.emit("channelState", peerId, channel, state, detail);
+        },
         onXferMessage: (peerId, data) => this.events.emit("xferMessage", peerId, data),
         onXferDrain: (peerId) => this.events.emit("xferDrain", peerId),
       },
@@ -270,6 +296,13 @@ export class CallSession {
 
     let link!: PeerLink;
     let stashedStream: MediaStream | null = null;
+    // Minor 2 review fix: the latest lifecycle state THIS link reported for
+    // each of its channels, so the states gated away while the peer was
+    // unproven can be replayed the instant it proves. Per-link (a rebuild
+    // gets a fresh map with its fresh channels), and only the last state per
+    // channel is kept — an open/closed/open churn while unproven is not a
+    // history the app needs, only the truth at proving time.
+    const lastChannelState = new Map<ChannelName, ChannelLifecycle>();
     const proofEvents: ProofEvents = {
       onSend: (text) => {
         link.send(text);
@@ -282,6 +315,13 @@ export class CallSession {
           stashedStream = null;
           ev.onRemoteStream(stream);
         }
+        // Replay only what is CURRENTLY open: a channel that opened and
+        // closed again while gated was never announced, so announcing its
+        // close now would be news about an event the app never saw. Strictly
+        // after setProven above, so these pass the gate they were held at.
+        for (const [channel, state] of lastChannelState) {
+          if (state === "open") this.events.emit("channelState", peerId, channel, state, undefined);
+        }
       },
       // Review fix (Important 4): JoinProof distinguishes "bad-mac" (the
       // countersign was actually wrong) from "timeout" (nobody answered in
@@ -293,6 +333,21 @@ export class CallSession {
       // link alone — 4C's own connectionState-driven recovery (or a future
       // rebuild) gets a fair shot instead of the session being told, and
       // closing the door on, an accusation the timeout never actually made.
+      //
+      // Final-review BLOCKING fix, second half: a "timeout" reaching here now
+      // means BOTH windows expired (JoinProof re-arms itself once with a
+      // fresh nonce first — see its module doc), so this is genuinely the end
+      // of the line for this link. It is still not an accusation and still
+      // gets no card — but it must not be silent either, which is exactly
+      // what it was: the peer stays permanently gated (no messages, no xfer
+      // frames, no stream, no roster row) on a link that stays open and
+      // connected, so nothing else in the stack ever reports it. Routed
+      // through the same console path as onE2eeFailure below rather than the
+      // roster/badge: a roster row for an unproven peer is precisely what the
+      // gating exists to prevent, and a badge would read as an accusation the
+      // timeout hasn't made. This also closes the ledgered "wrong-secret
+      // joiner whose peers merely time out never gets the card" case — same
+      // root, which is why the ledger said not to fix them separately.
       onFailed: (reason) => {
         this.mesh.setProven(peerId, false);
         const entry = this.proofs.get(peerId);
@@ -301,6 +356,10 @@ export class CallSession {
           this.mesh.revokeVisibility(peerId);
           link.close();
           this.checkCountersignFailed();
+        } else {
+          console.error(
+            `[cos] join proof timed out twice (challenge + one retry) for peer ${peerId} — it stays gated: no messages, no transfers, no stream, no roster row, until this link rebuilds`,
+          );
         }
       },
     };
@@ -341,7 +400,14 @@ export class CallSession {
           if (proof.phase === "proven") ev.onMessage(text);
           // else: dropped, not queued — an unproven peer's messages never reach the app.
         },
-        onChannelState: ev.onChannelState,
+        // Deliberately forwarded ungated to MESH (see the mesh callback's own
+        // comment above, where the app-facing gate lives): mesh needs every
+        // transition to keep entry.channelOpen/xferOpen honest. Recorded here
+        // so onProven can replay whatever is still open.
+        onChannelState: (channel, state, detail) => {
+          lastChannelState.set(channel, state);
+          ev.onChannelState(channel, state, detail);
+        },
         // Review fix (Critical 1): D16 names cos-xfer explicitly alongside
         // cos — "every cos/cos-xfer app message" is gated on proof. Before
         // this, the xfer channel (negotiated, opens independently of "cos")

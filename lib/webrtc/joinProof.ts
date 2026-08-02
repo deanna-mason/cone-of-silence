@@ -34,6 +34,28 @@
 // `proven` and `failed` are both terminal: once reached, nothing (a stale
 // timer fire, a replayed response, a duplicate bad mac) can move the phase
 // again.
+//
+// TIMEOUT RETRY (final-review BLOCKING fix). A timeout is jank, not evidence
+// about the secret (see session.ts's onFailed), so it must not be terminal on
+// its first occurrence: the first expiry re-arms the proof ONCE with a FRESH
+// challenge (`retried`), and only the second expiry fails. Without that, a
+// timeout was permanently unrecoverable — start() is `started`-guarded,
+// verifyResponse early-returns on a non-pending phase, and (the part that
+// closed the last door) a timeout deliberately leaves the LINK open and
+// connected, so connectionState never fails, 4C never rebuilds, buildLink
+// never re-runs, and no fresh proof is ever constructed. An honest peer whose
+// own main thread stalled past the 5s window (heavy encode on a four-way
+// call, an OPFS write, a GC pause) would then drop every message, xfer frame
+// and stream from a peer it could never re-prove, silently and asymmetrically,
+// until a page reload. Rules the retry does NOT bend:
+//   - fresh nonce, always — the timed-out challenge is retired, never
+//     replayed, and a late answer to it can no longer verify (verifyResponse
+//     re-checks the outstanding nonce after its await for exactly this);
+//   - exactly one retry, never unbounded;
+//   - bad-mac stays immediately terminal, at any point in either window — the
+//     retry budget is for silence only;
+//   - the phase stays "pending" throughout, so every trust gate (messages,
+//     xfer frames, stream, roster) stays closed for the whole retry window.
 
 import { base64url } from "../base64url";
 import { TOKEN_RE } from "../roomLink";
@@ -161,6 +183,10 @@ export class JoinProof {
 
   private _phase: ProofPhase = "pending";
   private started = false;
+  /** True once the single permitted timeout retry has been spent — the bound
+   *  on re-arming. Set before the retry's challenge goes out, never cleared,
+   *  so a second expiry is always terminal. */
+  private retried = false;
   private disposed = false;
   // The nonce of OUR outstanding challenge — the only nonce a prf/response
   // can ever be verified against. Cleared the instant it's consumed (proven
@@ -205,17 +231,42 @@ export class JoinProof {
 
   /** Sends our own challenge and arms the timeout. Idempotent — a second
    * call (or a call after dispose) is a no-op, since re-issuing a challenge
-   * would invalidate the nonce an in-flight honest response is answering. */
+   * would invalidate the nonce an in-flight honest response is answering.
+   * The ONE thing that may legitimately retire an outstanding nonce is this
+   * class's own single timeout retry (see the module doc), which only ever
+   * runs after that window has already expired. */
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
+    this.issueChallenge();
+  }
+
+  /** Draws a FRESH nonce, sends the challenge, and arms the window. Every
+   * challenge this class ever sends comes from here, so "one nonce per
+   * challenge, never replayed" holds by construction for the retry too. */
+  private issueChallenge(): void {
     const nonce = randomNonce();
     this.ownChallengeNonce = nonce;
     this.events.onSend(JSON.stringify({ t: "prf/challenge", nonce }));
     this.timeoutId = this.setTimeoutFn(() => {
       this.timeoutId = null;
-      this.fail("timeout");
+      this.onTimeout();
     }, this.timeoutMs);
+  }
+
+  /** One window expired with no valid answer. First time: re-arm once, with
+   * a fresh nonce, phase untouched ("pending" — every trust gate stays shut).
+   * Second time: terminal. The guard and every state write below are one
+   * synchronous block with no await between them, same absorbing-state
+   * discipline as fail(). */
+  private onTimeout(): void {
+    if (this._phase !== "pending" || this.disposed) return;
+    if (this.retried) {
+      this.fail("timeout");
+      return;
+    }
+    this.retried = true;
+    this.issueChallenge();
   }
 
   /** Feeds one inbound wire message. Returns true iff it was a recognized
@@ -278,7 +329,14 @@ export class JoinProof {
     // direction: a bad mac can never CREATE trust, it can only fail to veto
     // it, so whichever loses the race was never going to change the
     // outcome once the winner has already fired.
-    if (this.disposed || this._phase !== "pending") return;
+    //
+    // The nonce is re-checked here too, not just before the await: the
+    // timeout retry (module doc) can RETIRE the outstanding challenge while
+    // a verification against it is still in flight — phase is still
+    // "pending" at that moment, so the phase guard alone would let a
+    // response to a dead challenge prove us. Re-reading the current
+    // outstanding nonce is what makes a retired challenge provably inert.
+    if (this.disposed || this._phase !== "pending" || nonce !== this.ownChallengeNonce) return;
     // Constant-time-ish comparison: both operands are base64url encodings of
     // fixed-length (32-byte HMAC-SHA-256) outputs, never attacker-chosen in
     // length, so a plain `===` does not leak a variable-length signal — and
