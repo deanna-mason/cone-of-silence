@@ -114,9 +114,10 @@
 //    Chrome supports both APIs and podcast mode is Chrome-only, so nothing
 //    is lost today; it's a one-line, fully reversible change; and it
 //    removes the risk of a black-screen dress rehearsal. lib/webrtc/
-//    e2ee.worker.ts's frame-flow watchdog (Task 7 review round 2) backstops
-//    whichever branch is actually live, including the script-transform
-//    fallback, so a future flip back isn't flying blind either.
+//    e2ee.worker.ts's frame-flow timer (Task 7 review round 2 — unrelated to
+//    lib/podcast/watchdog.ts's fault system) backstops whichever branch is
+//    actually live, including the script-transform fallback, so a future
+//    flip back isn't flying blind either.
 //
 //    WHAT THIS GATE PROVES NOW: with the harness workaround removed, this
 //    script exercises the SHIPPED, PRODUCTION-PREFERRED path — detectE2eeApi()
@@ -126,9 +127,9 @@
 //    the actual default branch, closing the gap this note used to describe.
 //    Whether script-transform's receiver-side behavior is sound on real
 //    desktop Chrome remains open and is NOT this gate's concern any more
-//    (it's the fallback, backstopped by the watchdog) — that question is
-//    Deanna's human two-Mac verification step's to answer, if she ever needs
-//    to revisit D25.
+//    (it's the fallback, backstopped by the frame-flow timer) — that
+//    question is Deanna's human two-Mac verification step's to answer, if
+//    she ever needs to revisit D25.
 const { chromium } = require("playwright-core");
 const path = require("path");
 const os = require("os");

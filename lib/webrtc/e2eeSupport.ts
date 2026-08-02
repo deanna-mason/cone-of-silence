@@ -33,12 +33,22 @@ export type E2eeApi = "script-transform" | "encoded-streams";
  * receiver-side behavior is later confirmed sound on real desktop Chrome
  * (the open question e2e/phase5d-e2e.js's header records for that
  * verification), this preference is a one-line, fully reversible flip back —
- * not a rewrite. lib/webrtc/e2ee.worker.ts's frame-flow watchdog (Task 7
- * review round 2) now backstops WHICHEVER branch is live, including this
- * fallback, so a future flip isn't flying blind either. */
+ * not a rewrite. lib/webrtc/e2ee.worker.ts's frame-flow timer (Task 7 review
+ * round 2 — unrelated to lib/podcast/watchdog.ts's fault system despite
+ * both once being called "watchdog") now backstops WHICHEVER branch is
+ * live, including this fallback, so a future flip isn't flying blind
+ * either. */
 export function detectE2eeApi(): E2eeApi | null {
-  const sender = (globalThis as { RTCRtpSender?: { prototype: object } }).RTCRtpSender;
-  if (sender && "createEncodedStreams" in sender.prototype) {
+  // Review round 3 (one-token safety): `prototype` is typed optional here and
+  // guarded at runtime — the ordering swap (D25) made this the FIRST,
+  // unconditional dereference in the function, where it previously only ran
+  // after a script-transform check had already returned early for any host
+  // that also exposed RTCRtpScriptTransform. Not reachable from any real
+  // browser (every real RTCRtpSender has a .prototype), but a host object
+  // without one would otherwise throw here instead of falling through to the
+  // script-transform check below.
+  const sender = (globalThis as { RTCRtpSender?: { prototype?: object } }).RTCRtpSender;
+  if (sender && sender.prototype && "createEncodedStreams" in sender.prototype) {
     return "encoded-streams";
   }
   if (typeof window !== "undefined" && "RTCRtpScriptTransform" in window) {
