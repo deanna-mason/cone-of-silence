@@ -23,7 +23,7 @@ import path from "node:path";
 import { DarkroomError } from "./errors.mjs";
 import { readEpisode, verifyEpisode } from "./vault.mjs";
 import { reassemble, remuxArgs } from "./concat.mjs";
-import { findMarks } from "./tone.mjs";
+import { findMarksWindowed, SEARCH_WINDOW_S, SAMPLE_RATE as TONE_SAMPLE_RATE } from "./tone.mjs";
 import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment } from "./drift.mjs";
 import { measureStem, applyStemArgs, mixMeasureArgs, mixApplyArgs } from "./chain.mjs";
 import { compositeArgs } from "./composite.mjs";
@@ -77,7 +77,7 @@ function parseFfmpegVersion(stdout) {
 /**
  * developEpisode(deps, manifestPath, opts) -> Promise<Receipt>
  *
- * deps = { runner, renderBackdrop, decodePcm, now } — every side effect.
+ * deps = { runner, renderBackdrop, decodeMarkWindows, now } — every side effect.
  * opts = { ownCodename, model, chromePath, templatePath }.
  *
  * Throws DarkroomError on any refusal (manifest-invalid, part-missing,
@@ -159,10 +159,14 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
     }
 
     // Step 3: decode both audio raws, find marks, compute drift + alignment.
-    const localPcm = await deps.decodePcm(deps.runner, rawPaths["local-audio"]);
-    const remotePcm = await deps.decodePcm(deps.runner, rawPaths["remote-audio"]);
-    const localMarks = findMarks(localPcm);
-    const remoteMarks = findMarks(remotePcm);
+    // Window-limited (5C punch list): only the two SEARCH_WINDOW_S ends are
+    // ever searched, so only they are kept in memory — a 40-min take no
+    // longer buffers ~460MB of samples per stream twice over.
+    const markWindow = SEARCH_WINDOW_S * TONE_SAMPLE_RATE;
+    const localWin = await deps.decodeMarkWindows(deps.runner, rawPaths["local-audio"], markWindow);
+    const remoteWin = await deps.decodeMarkWindows(deps.runner, rawPaths["remote-audio"], markWindow);
+    const localMarks = findMarksWindowed(localWin);
+    const remoteMarks = findMarksWindowed(remoteWin);
 
     const ratio = driftRatio(localMarks, remoteMarks);
     // D23 (review CRITICAL 2): the remote start mark's sample index,

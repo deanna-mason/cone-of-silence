@@ -34,14 +34,34 @@ function collect(child, wantStdout) {
   });
 }
 
+function streamCollect(child, onChunk) {
+  return new Promise((resolve, reject) => {
+    const stderrChunks = [];
+    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    child.stdout.on("data", onChunk);
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (code !== 0) {
+        reject(new DarkroomError("ffmpeg-failed", stderr.slice(-STDERR_TAIL)));
+        return;
+      }
+      resolve({ stderr });
+    });
+  });
+}
+
 /**
- * makeRunner(bin, spawnFn) → { run(args), capture(args) }
+ * makeRunner(bin, spawnFn) → { run(args), capture(args), stream(args, onChunk) }
  *
  * - run(args) → Promise<{stderr}> — stdout is ignored/discarded.
  * - capture(args) → Promise<{stdout, stderr}> — stdout collected as a
  *   Buffer (binary-safe; decodePcm reads f32le samples straight out of it).
+ * - stream(args, onChunk) → Promise<{stderr}> — stdout delivered chunk by
+ *   chunk to `onChunk` as it arrives, never buffered here (the window-limited
+ *   decode's whole point); chunks split at arbitrary byte boundaries.
  *
- * Both reject with `DarkroomError("ffmpeg-failed", <stderr tail>)` on a
+ * All reject with `DarkroomError("ffmpeg-failed", <stderr tail>)` on a
  * non-zero exit code.
  */
 export function makeRunner(bin = "ffmpeg", spawnFn = defaultSpawn) {
@@ -58,6 +78,10 @@ export function makeRunner(bin = "ffmpeg", spawnFn = defaultSpawn) {
     },
     capture(args) {
       return spawnFor(args, true);
+    },
+    stream(args, onChunk) {
+      const child = spawnFn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+      return streamCollect(child, onChunk);
     },
   };
 }

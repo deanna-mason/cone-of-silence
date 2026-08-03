@@ -24,3 +24,55 @@ export async function decodePcm(runner, file) {
   }
   return pcm;
 }
+
+/**
+ * decodeMarkWindows(runner, file, windowSamples) →
+ *   Promise<{ full }                                  — total ≤ 2·window
+ *          | { head, tail, tailStart, totalSamples }> — otherwise
+ *
+ * Window-limited variant of decodePcm for mark-finding (5C punch list): a
+ * 40-min take is ~460MB of f32 samples buffered twice under capture(),
+ * while tone.mjs only ever searches a fixed window at each end. This
+ * streams the same ffmpeg decode (identical argv — see decodeArgs) and
+ * keeps just the first `windowSamples` (head), a `windowSamples` ring of
+ * the most recent samples (unrolled into `tail` at the end), and the
+ * running total. Short inputs — anything the two windows would jointly
+ * cover — come back as `{ full }` so tone.mjs's overlap-aware single-array
+ * path handles them verbatim (the memory concern doesn't exist there).
+ * Chunks arrive at arbitrary byte boundaries; a ≤3-byte carry stitches
+ * floats split across chunks.
+ */
+export async function decodeMarkWindows(runner, file, windowSamples) {
+  const head = new Float32Array(windowSamples);
+  const ring = new Float32Array(windowSamples);
+  let total = 0;
+  let carry = Buffer.alloc(0);
+
+  await runner.stream(decodeArgs(file), (chunk) => {
+    const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+    const usable = buf.length - (buf.length % 4);
+    for (let off = 0; off < usable; off += 4) {
+      const sample = buf.readFloatLE(off);
+      if (total < windowSamples) head[total] = sample;
+      ring[total % windowSamples] = sample;
+      total += 1;
+    }
+    carry = Buffer.from(buf.subarray(usable));
+  });
+
+  if (total <= windowSamples * 2) {
+    const full = new Float32Array(total);
+    full.set(head.subarray(0, Math.min(total, windowSamples)));
+    for (let i = Math.max(0, total - windowSamples); i < total; i++) {
+      full[i] = ring[i % windowSamples];
+    }
+    return { full };
+  }
+
+  const tailStart = total - windowSamples;
+  const tail = new Float32Array(windowSamples);
+  for (let i = 0; i < windowSamples; i++) {
+    tail[i] = ring[(tailStart + i) % windowSamples];
+  }
+  return { head, tail, tailStart, totalSamples: total };
+}

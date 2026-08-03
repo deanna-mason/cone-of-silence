@@ -10,6 +10,8 @@ import {
   SAMPLE_RATE,
   synthesizeMark,
   findMarks,
+  findMarksWindowed,
+  SEARCH_WINDOW_S,
 } from "../scripts/darkroom/tone.mjs";
 
 const ECHO_MINUS_8DB = Math.pow(10, -8 / 20); // ~0.3981
@@ -285,5 +287,41 @@ describe("darkroom tone: review-round regressions", () => {
 
     const { start } = findMarks(track);
     expect(start - at).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMarksWindowed — the window-limited entry (5C punch list). Must agree
+// with findMarks exactly: same marks, same absolute sample indices, whether
+// fed the decode's windowed form or its short-take {full} fallback.
+// ---------------------------------------------------------------------------
+describe("darkroom tone: findMarksWindowed", () => {
+  it("windowed form of a long track yields the same absolute marks as findMarks on the whole track", () => {
+    const track = buildTrack(50, [2.0, 48.5]);
+    const whole = findMarks(track);
+
+    const W = SEARCH_WINDOW_S * SAMPLE_RATE;
+    const tailStart = track.length - W;
+    const windowed = findMarksWindowed({
+      head: track.slice(0, W),
+      tail: track.slice(tailStart),
+      tailStart,
+      totalSamples: track.length,
+    });
+    expect(windowed).toEqual(whole);
+  });
+
+  it("{full} fallback delegates to findMarks — short-take overlap semantics preserved verbatim", () => {
+    const track = buildTrack(10, [2.0, 8.5]);
+    expect(findMarksWindowed({ full: track })).toEqual(findMarks(track));
+  });
+
+  it("missing end mark in the tail window still throws tone-end-missing", () => {
+    const track = buildTrack(50, [2.0]); // no end mark anywhere
+    const W = SEARCH_WINDOW_S * SAMPLE_RATE;
+    const tailStart = track.length - W;
+    expect(() =>
+      findMarksWindowed({ head: track.slice(0, W), tail: track.slice(tailStart), tailStart, totalSamples: track.length }),
+    ).toThrowError(expect.objectContaining({ code: "tone-end-missing" }));
   });
 });

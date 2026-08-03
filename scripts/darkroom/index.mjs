@@ -25,7 +25,7 @@ import { DarkroomError } from "./errors.mjs";
 import { scanVault } from "./vault.mjs";
 import { developEpisode, DEFAULT_OWN_CODENAME, DEFAULT_MODEL } from "./pipeline.mjs";
 import { makeRunner } from "./runner.mjs";
-import { decodePcm } from "./decode.mjs";
+import { decodeMarkWindows } from "./decode.mjs";
 import { renderBackdrop } from "./composite.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -240,7 +240,7 @@ function buildPipelineDeps() {
   return {
     runner: makeRunner("ffmpeg"),
     renderBackdrop,
-    decodePcm,
+    decodeMarkWindows,
     now: () => new Date().toISOString(),
   };
 }

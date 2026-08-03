@@ -233,3 +233,31 @@ export function findMarks(pcm) {
 
   return { start, end };
 }
+
+/**
+ * findMarks over decode.mjs's window-limited form (5C punch list): `{full}`
+ * (a short take) delegates to findMarks verbatim — overlap semantics and
+ * all — while the windowed form searches the head and tail arrays
+ * separately and converts the tail hit back to an ABSOLUTE sample index via
+ * `tailStart`, so every consumer downstream (driftRatio spans, alignment)
+ * sees exactly what the whole-track search would have produced. The
+ * start-mark exclusion for the end search survives the split: expressed in
+ * tail-local coordinates it's `start + markLen - tailStart`, which is
+ * simply negative (a no-op, correctly) whenever the windows are disjoint.
+ */
+export function findMarksWindowed(win) {
+  if (win.full) return findMarks(win.full);
+  const { head, tail, tailStart } = win;
+  const windowLen = SEARCH_WINDOW_S * SAMPLE_RATE;
+  const markLen = Math.round((MARK_TOTAL_MS / 1000) * SAMPLE_RATE);
+
+  const start = locateMark(head, 0, Math.min(windowLen, head.length), "tone-start-missing");
+  const endLocal = locateMark(
+    tail,
+    Math.max(0, tail.length - windowLen),
+    tail.length,
+    "tone-end-missing",
+    start + markLen - tailStart,
+  );
+  return { start, end: endLocal + tailStart };
+}

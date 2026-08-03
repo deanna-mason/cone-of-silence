@@ -400,11 +400,14 @@ describe("pipeline.mjs — developEpisode", () => {
     };
   }
 
-  function makeFakeDecodePcm(localPcm: Float32Array, remotePcm: Float32Array) {
-    return async (_runner: unknown, file: string): Promise<Float32Array> => {
-      if (file.includes("local-audio")) return localPcm;
-      if (file.includes("remote-audio")) return remotePcm;
-      throw new Error(`fake decodePcm: unexpected file ${file}`);
+  // Fakes hand back the {full} short-take shape — findMarksWindowed
+  // delegates it to findMarks, so these tests keep pinning the exact
+  // whole-track mark math they always did.
+  function makeFakeDecodeMarkWindows(localPcm: Float32Array, remotePcm: Float32Array) {
+    return async (_runner: unknown, file: string, _windowSamples: number): Promise<{ full: Float32Array }> => {
+      if (file.includes("local-audio")) return { full: localPcm };
+      if (file.includes("remote-audio")) return { full: remotePcm };
+      throw new Error(`fake decodeMarkWindows: unexpected file ${file}`);
     };
   }
 
@@ -472,7 +475,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: runnerWithHook,
       renderBackdrop,
-      decodePcm: makeFakeDecodePcm(localPcm, remotePcm),
+      decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
       now: () => "2026-08-01T00:00:00.000Z",
     };
     const opts = {
@@ -572,7 +575,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: fakeRunner,
       renderBackdrop: NEVER_CALLED,
-      decodePcm: NEVER_CALLED,
+      decodeMarkWindows: NEVER_CALLED,
       now: () => "2026-01-01T00:00:00.000Z",
     };
 
@@ -600,7 +603,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: fakeRunner,
       renderBackdrop: NEVER_CALLED,
-      decodePcm: NEVER_CALLED,
+      decodeMarkWindows: NEVER_CALLED,
       now: () => "2026-01-01T00:00:00.000Z",
     };
 
@@ -622,7 +625,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: fakeRunner,
       renderBackdrop,
-      decodePcm: makeFakeDecodePcm(localPcm, remotePcm),
+      decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
       now: () => "2026-01-01T00:00:00.000Z",
     };
 
@@ -655,7 +658,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: fakeRunner,
       renderBackdrop: NEVER_CALLED,
-      decodePcm: NEVER_CALLED,
+      decodeMarkWindows: NEVER_CALLED,
       now: () => "2026-01-01T00:00:00.000Z",
     };
 
@@ -683,7 +686,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: fakeRunner,
       renderBackdrop: NEVER_CALLED,
-      decodePcm: NEVER_CALLED,
+      decodeMarkWindows: NEVER_CALLED,
       now: () => "2026-01-01T00:00:00.000Z",
     };
 
@@ -715,7 +718,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const deps = {
       runner: fakeRunner,
       renderBackdrop: NEVER_CALLED,
-      decodePcm: makeFakeDecodePcm(localPcm, remotePcm),
+      decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
       now: () => "2026-01-01T00:00:00.000Z",
     };
 
