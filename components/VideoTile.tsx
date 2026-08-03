@@ -30,10 +30,11 @@ export default function VideoTile({
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
-  // Remote audio starts muted: unmuted autoplay is blocked by browsers, and
-  // muted playback always starts. The overlay button is the user gesture
-  // that lawfully unmutes.
-  const [audioOn, setAudioOn] = useState(false);
+  // Remote audio is on from the first frame: by the time a remote tile
+  // exists the user has clicked "Enter the Cone", which is the activation
+  // browsers require for unmuted playback. "blocked" is the rare fallback
+  // when a browser still refuses — muted playback + a Restore Audio gesture.
+  const [audio, setAudio] = useState<"on" | "muted" | "blocked">("on");
 
   // Remote streams gain/lose tracks via ontrack/removetrack without any React
   // render — re-render on stream mutations so `covered` stays truthful.
@@ -48,16 +49,18 @@ export default function VideoTile({
     };
   }, [stream]);
 
-  // Bind the stream once per identity change; muted play() always starts.
+  // Bind the stream once per identity change. Muted play() always starts the
+  // picture; the audio effect below immediately upgrades to unmuted. A
+  // replaced stream is a fresh join and resets to audible (spec: reconnects
+  // never inherit a stale mute).
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     video.srcObject = stream;
-    setAudioOn(false); // a new stream must start muted again
+    setAudio("on");
     if (stream) {
-      video.play().catch(() => {
-        // autoplay refused — the Restore Audio gesture retries below
-      });
+      video.muted = true;
+      video.play().catch(() => {});
     }
   }, [stream]);
 
@@ -65,11 +68,17 @@ export default function VideoTile({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.muted = isSelf || !audioOn;
+    video.muted = isSelf || audio !== "on";
     if (stream && !video.muted) {
-      video.play().catch(() => setAudioOn(false)); // gesture failed — reshow the button
+      video.play().catch(() => {
+        // unmuted playback refused — keep the picture rolling muted and
+        // surface the Restore Audio gesture.
+        video.muted = true;
+        video.play().catch(() => {});
+        setAudio("blocked");
+      });
     }
-  }, [stream, isSelf, audioOn]);
+  }, [stream, isSelf, audio]);
 
   const hasVideoTrack = stream !== null && stream.getVideoTracks().length > 0;
   const covered = !hasVideoTrack || camOff;
@@ -108,14 +117,17 @@ export default function VideoTile({
           ◈ Signal Lost
         </p>
       )}
-      {!isSelf && stream && !audioOn && (
-        <button
-          type="button"
-          onClick={() => setAudioOn(true)}
-          className="kicker absolute right-2 top-2 border border-brass bg-field/80 px-3 py-1.5 text-ink-soft transition hover:text-signal"
-        >
-          Restore Audio
-        </button>
+      {!isSelf && stream && audio === "blocked" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-reveal/30 p-3 text-center">
+          <p className="kicker text-vermilion">◈ Audio Blocked by Browser</p>
+          <button
+            type="button"
+            onClick={() => setAudio("on")}
+            className="cta-glow bg-vermilion px-6 py-3 font-display text-2xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright"
+          >
+            Restore Audio
+          </button>
+        </div>
       )}
       <figcaption className="kicker absolute bottom-2 left-2 bg-field/80 px-2 py-1 text-ink-soft">
         {label}
