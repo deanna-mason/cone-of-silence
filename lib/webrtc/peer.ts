@@ -329,18 +329,33 @@ export class PeerLink {
     transceiver.setCodecPreferences(prefs);
   }
 
-  /** App-message send over the cos channel. False (not queued) unless open. */
+  /** App-message send over the cos channel. False (not queued) unless open.
+   *  channel.send can throw even after the readyState check passes (the
+   *  transport can close the channel between the check and the send) — that
+   *  refusal must surface as `false`, never a throw: joinProof's
+   *  issueChallenge calls this BEFORE arming its retry timeout, so an
+   *  escaping throw on the retry path strands the proof `pending` forever. */
   send(text: string): boolean {
     if (this.channel.readyState !== "open") return false;
-    this.channel.send(text);
+    try {
+      this.channel.send(text);
+    } catch {
+      return false;
+    }
     return true;
   }
 
   /** Transfer-channel send. False (not queued) unless open — the exchange
-   *  engine treats a refused send as the channel dying under it (parks). */
+   *  engine treats a refused send as the channel dying under it (parks).
+   *  Same throw-to-false guard as send(): the closing race exists on this
+   *  channel too, and parking is exactly the right response to it. */
   sendXfer(data: string | ArrayBuffer): boolean {
     if (this.xfer.readyState !== "open") return false;
-    this.xfer.send(data as string); // TS overload appeasement; runtime handles both
+    try {
+      this.xfer.send(data as string); // TS overload appeasement; runtime handles both
+    } catch {
+      return false;
+    }
     return true;
   }
 
