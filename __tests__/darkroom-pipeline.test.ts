@@ -18,7 +18,14 @@ import { DarkroomError } from "../scripts/darkroom/errors.mjs";
 import { SAMPLE_RATE, synthesizeMark, findMarks } from "../scripts/darkroom/tone.mjs";
 import { driftRatio, alignment } from "../scripts/darkroom/drift.mjs";
 import { developEpisode } from "../scripts/darkroom/pipeline.mjs";
-import { pollOnce, isDeveloped, developedMarkerPath, parseArgs } from "../scripts/darkroom/index.mjs";
+import {
+  pollOnce,
+  isDeveloped,
+  developedMarkerPath,
+  parseArgs,
+  resolveChromePath,
+  makeRefusalBackoff,
+} from "../scripts/darkroom/index.mjs";
 import { scanVault } from "../scripts/darkroom/vault.mjs";
 
 const LAYOUT = {
@@ -909,5 +916,144 @@ describe("index.mjs — pollOnce watcher pass", () => {
     expect(secondPass).toEqual([]);
     expect(calls).toBe(2);
     expect(logged.length).toBe(1); // no new log entries — the second call succeeded
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveChromePath — arch-aware executable resolution (5C punch list)
+// ---------------------------------------------------------------------------
+describe("resolveChromePath", () => {
+  let tmpRoot: string;
+  beforeEach(async () => {
+    tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "darkroom-chrome-"));
+  });
+  afterEach(async () => {
+    await fsp.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  async function seedShell(revision: number, archSegment: string): Promise<string> {
+    const bin = path.join(
+      tmpRoot,
+      `chromium_headless_shell-${revision}`,
+      `chrome-headless-shell-${archSegment}`,
+      "chrome-headless-shell",
+    );
+    await fsp.mkdir(path.dirname(bin), { recursive: true });
+    await fsp.writeFile(bin, "");
+    return bin;
+  }
+
+  it("resolves the arm64 binary on an arm64 Mac — the hardcoded x64 segment died at startup there", async () => {
+    const bin = await seedShell(1200, "mac-arm64");
+    expect(resolveChromePath({ root: tmpRoot, arch: "arm64" })).toBe(bin);
+  });
+
+  it("still resolves the x64 binary on x64, picking the HIGHEST cached revision", async () => {
+    await seedShell(1100, "mac-x64");
+    const newest = await seedShell(1200, "mac-x64");
+    expect(resolveChromePath({ root: tmpRoot, arch: "x64" })).toBe(newest);
+  });
+
+  it("a cached revision without this arch's binary is a clear DarkroomError naming the install fix, not a later spawn ENOENT", async () => {
+    await seedShell(1200, "mac-x64"); // stale x64 cache on an arm64 machine
+    expect(() => resolveChromePath({ root: tmpRoot, arch: "arm64" })).toThrowError(DarkroomError);
+    expect(() => resolveChromePath({ root: tmpRoot, arch: "arm64" })).toThrowError(/playwright-core install/);
+  });
+
+  it("an empty cache root stays the existing no-build DarkroomError", async () => {
+    expect(() => resolveChromePath({ root: tmpRoot, arch: "x64" })).toThrowError(/no chromium_headless_shell build/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refusal backoff — deterministically-refused takes stop re-running the full
+// pipeline every poll (5C punch list), without breaking the copy-fallback's
+// unparseable-manifest self-heal (first retry is still the very next poll).
+// ---------------------------------------------------------------------------
+describe("pollOnce refusal backoff", () => {
+  let tmpRoot: string;
+  beforeEach(async () => {
+    tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "darkroom-backoff-"));
+  });
+  afterEach(async () => {
+    await fsp.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  const take = { takeId: "take-1", manifestPath: "unused" };
+  const quiet = { error: () => {} };
+
+  function harness(develop: () => Promise<void>) {
+    return {
+      fns: { scanVault: async () => [take], developEpisode: develop },
+      backoff: makeRefusalBackoff(),
+    };
+  }
+
+  it("first refusal retries on the very next poll — the manifest self-heal window stays one poll wide", async () => {
+    let calls = 0;
+    const { fns, backoff } = harness(async () => {
+      calls += 1;
+      if (calls === 1) throw new DarkroomError("manifest-unreadable", "manifest-unreadable: transient");
+    });
+    const p1 = await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff);
+    expect(p1).toEqual([{ takeId: "take-1", status: "refused", code: "manifest-unreadable" }]);
+    const p2 = await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff);
+    expect(p2).toEqual([{ takeId: "take-1", status: "developed" }]);
+    expect(calls).toBe(2);
+  });
+
+  it("consecutive refusals back off exponentially — attempts thin out instead of re-running every poll", async () => {
+    let calls = 0;
+    const { fns, backoff } = harness(async () => {
+      calls += 1;
+      throw new DarkroomError("part-gap", "part-gap: deterministic");
+    });
+    const statuses: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff);
+      statuses.push(r[0]!.status);
+    }
+    // p1 refused (f=1, +1) -> p2 refused (f=2, +2) -> p3 deferred -> p4
+    // refused (f=3, +4) -> p5 deferred; 3 real attempts in 5 polls.
+    expect(statuses).toEqual(["refused", "refused", "deferred", "refused", "deferred"]);
+    expect(calls).toBe(3);
+  });
+
+  it("a successful develop resets the take's backoff entirely", async () => {
+    let failNext = true;
+    let calls = 0;
+    const { fns, backoff } = harness(async () => {
+      calls += 1;
+      if (failNext) throw new DarkroomError("part-gap", "part-gap: flaky");
+    });
+    await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff); // refused (f=1)
+    failNext = false;
+    const healed = await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff);
+    expect(healed[0]!.status).toBe("developed");
+    // Marker isn't written by the fake, so the take is re-attempted; break it
+    // again — a reset take must retry NEXT poll (f back to 1), not inherit
+    // the earlier failure count.
+    failNext = true;
+    const r3 = await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff); // refused (f=1, +1)
+    const r4 = await pollOnce(fns, {}, tmpRoot, {}, quiet, backoff); // eligible again immediately
+    expect(r3[0]!.status).toBe("refused");
+    expect(r4[0]!.status).toBe("refused");
+    expect(calls).toBe(4);
+  });
+
+  it("without a backoff instance, every poll retries — the shipped pre-backoff behavior", async () => {
+    let calls = 0;
+    const fns = {
+      scanVault: async () => [take],
+      developEpisode: async () => {
+        calls += 1;
+        throw new DarkroomError("part-gap", "part-gap: deterministic");
+      },
+    };
+    await pollOnce(fns, {}, tmpRoot, {}, quiet);
+    await pollOnce(fns, {}, tmpRoot, {}, quiet);
+    await pollOnce(fns, {}, tmpRoot, {}, quiet);
+    expect(calls).toBe(3);
   });
 });

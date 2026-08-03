@@ -120,13 +120,46 @@ export async function isDeveloped(vaultDir, episodeId) {
  * observability and testing; an empty array on a scanVault failure (nothing
  * was scanned, so nothing to report per-take).
  */
+/** Per-take exponential refusal backoff for the watcher, counted in POLLS
+ *  (deterministic, clock-free). The first refusal still retries on the very
+ *  next poll — the copy-fallback's unparseable-manifest window self-heals in
+ *  one poll and must keep doing so — then consecutive refusals skip 2, 4, …
+ *  up to `capPolls` polls between attempts. Never gives up entirely: a
+ *  deterministic refusal keeps re-surfacing (capped), and a develop success
+ *  resets the take to a clean slate. State is in-memory per watcher process,
+ *  matching the refusal model itself (sources untouched on disk). */
+export function makeRefusalBackoff(capPolls = 8) {
+  const state = new Map(); // takeId -> { failures, nextEligiblePoll }
+  let poll = 0;
+  return {
+    beginPoll() {
+      poll += 1;
+    },
+    shouldDefer(takeId) {
+      const s = state.get(takeId);
+      return s !== undefined && poll < s.nextEligiblePoll;
+    },
+    recordRefusal(takeId) {
+      const s = state.get(takeId) ?? { failures: 0, nextEligiblePoll: 0 };
+      s.failures += 1;
+      s.nextEligiblePoll = poll + Math.min(2 ** (s.failures - 1), capPolls);
+      state.set(takeId, s);
+    },
+    reset(takeId) {
+      state.delete(takeId);
+    },
+  };
+}
+
 export async function pollOnce(
   fns,
   pipelineDeps,
   vaultDir,
   pipelineOpts,
   log = { error: (...args) => console.error(...args) },
+  backoff = /** @type {ReturnType<typeof makeRefusalBackoff> | null} */ (null),
 ) {
+  backoff?.beginPoll();
   let takes;
   try {
     takes = await fns.scanVault(vaultDir);
@@ -143,9 +176,16 @@ export async function pollOnce(
       results.push({ takeId: take.takeId, status: "skipped" });
       continue;
     }
+    if (backoff?.shouldDefer(take.takeId)) {
+      // Quiet by design: the refusal that armed this deferral already logged
+      // with its full reason; a line per deferred poll would just be noise.
+      results.push({ takeId: take.takeId, status: "deferred" });
+      continue;
+    }
     try {
       // eslint-disable-next-line no-await-in-loop -- one at a time, sequential (spec)
       await fns.developEpisode(pipelineDeps, take.manifestPath, pipelineOpts);
+      backoff?.reset(take.takeId);
       results.push({ takeId: take.takeId, status: "developed" });
     } catch (err) {
       // IMPORTANT 5 (Task 6 review): a DarkroomError's own .message is
@@ -155,6 +195,7 @@ export async function pollOnce(
       const code = err instanceof DarkroomError ? err.code : "unknown";
       const message = err instanceof DarkroomError ? err.message : `unknown: ${(err && err.message) || String(err)}`;
       log.error(`darkroom: ${message} (take ${take.takeId} — sources untouched, will retry next poll)`);
+      backoff?.recordRefusal(take.takeId);
       results.push({ takeId: take.takeId, status: "refused", code });
     }
   }
@@ -165,18 +206,34 @@ export async function pollOnce(
  *  EXECUTABLE pattern (see e2e/phase5a-e2e.js), ported verbatim: pick the
  *  HIGHEST cached revision under the transient `--no-save` install cache,
  *  since a stale older build beside a newer one is incompatible with the
- *  installed playwright-core. Real wiring only — never used by pipeline.mjs
- *  itself, which receives renderBackdrop already bound to a resolved path. */
-function resolveChromePath() {
-  const SHELL_ROOT = path.join(os.homedir(), "Library/Caches/ms-playwright");
+ *  installed playwright-core. Arch-aware (5C punch list): the segment was
+ *  hardcoded mac-x64, which dies at spawn on an arm64 co-host Mac; the
+ *  binary's existence is checked here so a wrong-arch cache surfaces as a
+ *  DarkroomError naming the install fix instead of a later ENOENT. Real
+ *  wiring only — never used by pipeline.mjs itself, which receives
+ *  renderBackdrop already bound to a resolved path. Deps injectable for
+ *  tests; the bare call keeps the shipped behavior. */
+export function resolveChromePath(deps = {}) {
+  const {
+    root = path.join(os.homedir(), "Library/Caches/ms-playwright"),
+    arch = process.arch,
+  } = deps;
   const shellDir = fs
-    .readdirSync(SHELL_ROOT)
+    .readdirSync(root)
     .filter((d) => d.startsWith("chromium_headless_shell"))
     .sort((a, b) => Number(b.split("-").pop()) - Number(a.split("-").pop()))[0];
   if (!shellDir) {
-    throw new DarkroomError("template-render-failed", `no chromium_headless_shell build found under ${SHELL_ROOT}`);
+    throw new DarkroomError("template-render-failed", `no chromium_headless_shell build found under ${root}`);
   }
-  return path.join(SHELL_ROOT, shellDir, "chrome-headless-shell-mac-x64/chrome-headless-shell");
+  const archSegment = arch === "arm64" ? "mac-arm64" : "mac-x64";
+  const bin = path.join(root, shellDir, `chrome-headless-shell-${archSegment}/chrome-headless-shell`);
+  if (!fs.existsSync(bin)) {
+    throw new DarkroomError(
+      "template-render-failed",
+      `no ${archSegment} chrome-headless-shell under ${path.join(root, shellDir)} — run: npx --no-save playwright-core install chromium-headless-shell`,
+    );
+  }
+  return bin;
 }
 
 function buildPipelineDeps() {
@@ -271,9 +328,12 @@ async function main() {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
+  // One backoff for the watcher's whole life — per-take state inside it.
+  const refusalBackoff = makeRefusalBackoff();
+
   while (!stopped) {
     // eslint-disable-next-line no-await-in-loop -- polling loop, by design
-    await pollOnce({ developEpisode, scanVault }, pipelineDeps, opts.vault, pipelineOpts, console);
+    await pollOnce({ developEpisode, scanVault }, pipelineDeps, opts.vault, pipelineOpts, console, refusalBackoff);
     if (stopped) break;
     // eslint-disable-next-line no-await-in-loop -- polling loop, by design
     await sleep(opts.pollMs);
