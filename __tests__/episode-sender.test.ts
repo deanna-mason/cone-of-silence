@@ -433,6 +433,58 @@ describe("EpisodeSender", () => {
     expect(link.chunkSends().length).toBe(1); // sent exactly once, not duplicated
   });
 
+  it("a pump swallowed by a mid-flight restart still drains the new generation — no bufferedamountlow rescue needed", async () => {
+    // The ledgered Phase-6 carry-forward (5D final review): pump A awaits a
+    // gated reader.read() with `pumping` held; a mid-flight start() (manual
+    // re-offer — legal from ANY phase) supersedes it and announces the new
+    // generation's first part, whose own pump() call hits the re-entrancy
+    // guard while pump A is still in flight. Pump A then wakes, sees itself
+    // superseded, and exits WITHOUT sending anything — so with a swallow-only
+    // guard nobody ever drains the new slot, and with an empty channel buffer
+    // there is no bufferedamountlow coming to rescue it: the transfer sits in
+    // `sending` with zero progress until a reload. The guard must coalesce
+    // (queue a rerun), not swallow.
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { sender, link } = makeSender(store, cb);
+    const { audio } = await startAndOffer(sender, store, "ep-6", new Uint8Array([7, 7, 7, 7]), new Uint8Array([9]));
+    const reader1 = store.readers.get(audio.name)!;
+    reader1.pauseNextRead();
+    sender.handleFrame(PEER, haveFrame("ep-6", []));
+    await flush(); // ep-6's audio part announced; pump A now awaiting the gated read
+
+    // Mid-flight restart to a second episode while pump A is still in flight.
+    const audio2 = entry("audio2.part000", 3);
+    const video2 = entry("video2.part000", 2);
+    store.plan = [
+      { base: "audio", parts: [audio2] },
+      { base: "video", parts: [video2] },
+    ];
+    store.readers.set(audio2.name, new FakePartReader(new Uint8Array([1, 2, 3])));
+    store.readers.set(video2.name, new FakePartReader(new Uint8Array([4, 5])));
+    sender.start("ep-7", "static-otter");
+    await flush(); // ep-7 offered
+    sender.handleFrame(PEER, haveFrame("ep-7", []));
+    await flush(); // ep-7's audio part announced; ITS pump() call ran into pump A's guard
+
+    reader1.releaseRead(); // pump A wakes, sees itself superseded, exits
+    await flush();
+
+    // The new generation must have pumped on its own — the buffer was never
+    // above the low-water mark, so no drain event will ever fire here.
+    const chunks = link.chunkSends();
+    expect(chunks.length).toBe(1); // audio2 is 3 bytes -> exactly one chunk
+    const decoded = decodeChunk(chunks[0]!)!;
+    expect(decoded.seq).toBe(0);
+    const ivAndCt = new Uint8Array(decoded.iv.length + decoded.payload.length);
+    ivAndCt.set(decoded.iv, 0);
+    ivAndCt.set(decoded.payload, decoded.iv.length);
+    const plain = await decryptFrame(TEST_XFER_KEY, ivAndCt.buffer);
+    expect(plain).not.toBeNull();
+    expect(new Uint8Array(plain!)).toEqual(new Uint8Array([1, 2, 3])); // the NEW generation's bytes, not ep-6's
+    expect(cb.lastPhase()).toBe("sending"); // alive and awaiting part-committed — not stalled, not parked
+  });
+
   // -- (e) send() false -> parked; handleChannelClosed mid-pump -> parked ---
   it("(e) link.send() returning false parks — the channel died between events", async () => {
     const store = new FakeStore();

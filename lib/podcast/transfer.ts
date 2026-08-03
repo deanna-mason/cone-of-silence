@@ -596,6 +596,11 @@ export class EpisodeSender {
   private offerTimer: ReturnType<typeof setTimeout> | null = null;
   /** Re-entrancy guard for pump() — see pump()'s own comment. */
   private pumping = false;
+  /** Set when a pump() call arrives while another is in flight — the
+   *  in-flight call reruns the drain loop before releasing the guard, so a
+   *  swallowed call is never LOST (see pump()'s own comment: the swallowed
+   *  call may have been the only one coming for a brand-new generation). */
+  private pumpQueued = false;
   /** One IvState per sender CONSTRUCTION — where "construction" means each
    *  start() call, not just the class instance: start() is the manual-resume
    *  entry point ("pressing SEND again re-offers", spec verbatim) and this
@@ -847,66 +852,86 @@ export class EpisodeSender {
    *  (handleDrain) can fire while a PREVIOUS call's `reader.read()` is
    *  still in flight (both are async DC events), so a second concurrent
    *  call would otherwise race the first and double-send. The `pumping`
-   *  flag guards that — a re-entrant call just returns; the in-flight loop
-   *  re-checks bufferedAmount()/remaining chunks every iteration, so it
-   *  naturally resumes on its own once unblocked. */
+   *  flag guards that — but it COALESCES rather than swallows: a re-entrant
+   *  call sets `pumpQueued` and the in-flight call reruns the drain loop
+   *  before releasing the guard. Swallowing outright was the ledgered
+   *  stuck-in-sending bug — a mid-flight start() (manual re-offer) both
+   *  supersedes the in-flight pump AND issues the new generation's only
+   *  pump() call while the guard is still held; the superseded pump then
+   *  exits without sending anything, and with the channel buffer already
+   *  below the low-water mark no bufferedamountlow ever comes to rescue
+   *  the new slot. The rerun re-reads `activeSlot`/`phase` fresh, so it
+   *  drains whatever generation is CURRENT (or exits immediately if the
+   *  queued call is stale — same checks the loop always made). */
   private async pump(): Promise<void> {
-    if (this.pumping) return;
+    if (this.pumping) {
+      this.pumpQueued = true;
+      return;
+    }
     this.pumping = true;
     try {
-      for (;;) {
-        const slot = this.activeSlot;
-        if (!slot || this.phase !== "sending" || this.disposed) return;
-        if (slot.nextSeq >= slot.chunksExpected) return; // part fully sent; now awaiting xfr/part-committed
-        if (this.link.bufferedAmount() >= XFER_HIGH_WATER) return; // handleDrain resumes
-
-        const seq = slot.nextSeq;
-        const offset = seq * XFER_CHUNK_BYTES;
-        const length = Math.min(XFER_CHUNK_BYTES, slot.entry.size - offset);
-        let payload: Uint8Array;
-        try {
-          payload = await slot.reader.read(offset, length);
-        } catch (err) {
-          if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return;
-          this.fault(`read:${errMessage(err)}`);
-          return;
-        }
-        if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while the read was in flight
-
-        // D17: encrypt before sending — the envelope's `iv` slot carries the
-        // frame cipher's own IV, so the leading 12 bytes of encryptFrame's
-        // output are split off into the envelope header rather than
-        // duplicated inside the payload (see xferProtocol.ts's encodeChunk).
-        let encrypted: ArrayBuffer;
-        try {
-          // `payload` is typed as bare `Uint8Array` (TS default:
-          // `Uint8Array<ArrayBufferLike>`) per PartReader's public interface,
-          // so `.buffer.slice(...)` widens to `ArrayBuffer | SharedArrayBuffer`
-          // under TS 5.7's typed-array generics. Real readers always hand back
-          // ArrayBuffer-backed views (disk reads are never SharedArrayBuffer)
-          // — same idiom as episodeStore.ts's append() cast.
-          const bytes = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer;
-          encrypted = await encryptFrame(this.xferKey, this.ivState, bytes);
-        } catch (err) {
-          if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return;
-          this.fault(`encrypt:${errMessage(err)}`);
-          return;
-        }
-        if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while encrypting
-        const iv = new Uint8Array(encrypted, 0, 12);
-        const ciphertext = new Uint8Array(encrypted, 12);
-
-        const ok = this.link.send(encodeChunk(seq, ciphertext, iv));
-        if (!ok) {
-          this.park(); // the channel died between events
-          return;
-        }
-        slot.nextSeq += 1;
-        this.sentBytesThisSession += payload.length;
-        this.cb.onProgress(this.progressSnapshot(slot.entry.name));
-      }
+      do {
+        this.pumpQueued = false;
+        await this.drainLoop();
+      } while (this.pumpQueued);
     } finally {
       this.pumping = false;
+    }
+  }
+
+  /** pump()'s body — one full "loop until blocked" pass. Only ever called
+   *  with the `pumping` guard held. */
+  private async drainLoop(): Promise<void> {
+    for (;;) {
+      const slot = this.activeSlot;
+      if (!slot || this.phase !== "sending" || this.disposed) return;
+      if (slot.nextSeq >= slot.chunksExpected) return; // part fully sent; now awaiting xfr/part-committed
+      if (this.link.bufferedAmount() >= XFER_HIGH_WATER) return; // handleDrain resumes
+
+      const seq = slot.nextSeq;
+      const offset = seq * XFER_CHUNK_BYTES;
+      const length = Math.min(XFER_CHUNK_BYTES, slot.entry.size - offset);
+      let payload: Uint8Array;
+      try {
+        payload = await slot.reader.read(offset, length);
+      } catch (err) {
+        if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return;
+        this.fault(`read:${errMessage(err)}`);
+        return;
+      }
+      if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while the read was in flight
+
+      // D17: encrypt before sending — the envelope's `iv` slot carries the
+      // frame cipher's own IV, so the leading 12 bytes of encryptFrame's
+      // output are split off into the envelope header rather than
+      // duplicated inside the payload (see xferProtocol.ts's encodeChunk).
+      let encrypted: ArrayBuffer;
+      try {
+        // `payload` is typed as bare `Uint8Array` (TS default:
+        // `Uint8Array<ArrayBufferLike>`) per PartReader's public interface,
+        // so `.buffer.slice(...)` widens to `ArrayBuffer | SharedArrayBuffer`
+        // under TS 5.7's typed-array generics. Real readers always hand back
+        // ArrayBuffer-backed views (disk reads are never SharedArrayBuffer)
+        // — same idiom as episodeStore.ts's append() cast.
+        const bytes = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer;
+        encrypted = await encryptFrame(this.xferKey, this.ivState, bytes);
+      } catch (err) {
+        if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return;
+        this.fault(`encrypt:${errMessage(err)}`);
+        return;
+      }
+      if (this.activeSlot !== slot || this.phase !== "sending" || this.disposed) return; // superseded while encrypting
+      const iv = new Uint8Array(encrypted, 0, 12);
+      const ciphertext = new Uint8Array(encrypted, 12);
+
+      const ok = this.link.send(encodeChunk(seq, ciphertext, iv));
+      if (!ok) {
+        this.park(); // the channel died between events
+        return;
+      }
+      slot.nextSeq += 1;
+      this.sentBytesThisSession += payload.length;
+      this.cb.onProgress(this.progressSnapshot(slot.entry.name));
     }
   }
 
