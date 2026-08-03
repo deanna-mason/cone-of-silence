@@ -96,7 +96,9 @@ export default function VideoTile({
           playsInline
           className={`h-full w-full ${fullFrame ? "object-contain" : "object-cover"} ${
             mirrored ? "-scale-x-100" : ""
-          } ${covered ? "invisible" : ""}`}
+          } ${covered ? "invisible" : ""} ${
+            audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""
+          }`}
         />
       )}
       {covered && (
@@ -116,6 +118,19 @@ export default function VideoTile({
         <p className="kicker absolute left-2 top-2 border border-vermilion/60 bg-field/80 px-2 py-1 text-vermilion">
           ◈ Signal Lost
         </p>
+      )}
+      {!isSelf && stream && audio !== "blocked" && (
+        <button
+          type="button"
+          onClick={() => setAudio(audio === "muted" ? "on" : "muted")}
+          className={`kicker absolute right-2 top-2 border bg-field/80 px-3 py-1.5 transition hover:text-signal ${
+            audio === "muted"
+              ? "border-vermilion/60 text-vermilion"
+              : "border-brass text-ink-soft"
+          }`}
+        >
+          {audio === "muted" ? "◇ Muted — Unmute" : "Mute"}
+        </button>
       )}
       {!isSelf && stream && audio === "blocked" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-reveal/30 p-3 text-center">

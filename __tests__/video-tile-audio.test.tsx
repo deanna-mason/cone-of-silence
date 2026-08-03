@@ -71,3 +71,33 @@ test("blocked autoplay falls back to muted playback + Restore Audio treatment", 
   await waitFor(() => expect(video.muted).toBe(false));
   expect(screen.queryByText(/audio blocked/i)).toBeNull();
 });
+
+test("mute silences one person locally; unmute restores them", async () => {
+  const { container } = render(<VideoTile stream={fakeStream()} label="Agent 99" />);
+  const video = container.querySelector("video")!;
+  await waitFor(() => expect(video.muted).toBe(false));
+
+  fireEvent.click(screen.getByRole("button", { name: /^mute$/i }));
+  expect(video.muted).toBe(true);
+  expect(video.className).toContain("saturate-"); // muted tile dims
+
+  fireEvent.click(screen.getByRole("button", { name: /unmute/i }));
+  await waitFor(() => expect(video.muted).toBe(false));
+  expect(screen.getByRole("button", { name: /^mute$/i })).toBeDefined();
+  expect(video.className).not.toContain("saturate-");
+});
+
+test("a replaced stream is a fresh join: mute resets to audible", async () => {
+  const { container, rerender } = render(
+    <VideoTile stream={fakeStream()} label="Agent 99" />,
+  );
+  const video = container.querySelector("video")!;
+  await waitFor(() => expect(video.muted).toBe(false));
+
+  fireEvent.click(screen.getByRole("button", { name: /^mute$/i }));
+  expect(video.muted).toBe(true);
+
+  rerender(<VideoTile stream={fakeStream()} label="Agent 99" />);
+  await waitFor(() => expect(video.muted).toBe(false));
+  expect(screen.getByRole("button", { name: /^mute$/i })).toBeDefined();
+});
