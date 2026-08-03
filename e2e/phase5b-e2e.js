@@ -168,6 +168,24 @@ async function newHostPage(browser, codename) {
           proto.requestPermission = async () => "granted";
         }
       }
+      // The vault stub above is OPFS, where FileSystemFileHandle.move()
+      // WORKS — but a real picked vault is a local directory, where Chrome
+      // throws NotAllowedError (move-for-local-files is still flag-gated;
+      // hit live 2026-08-03: zero inbound parts ever committed). Refusing
+      // move() here makes this e2e exercise the SHIPPED path — episodeStore's
+      // copy fallback — instead of an OPFS-only rename production never
+      // runs (same D25 lesson as the E2EE harness workaround removal).
+      // window.__moveRefusals proves the fallback actually engaged.
+      window.__moveRefusals = 0;
+      if (window.FileSystemFileHandle) {
+        window.FileSystemFileHandle.prototype.move = async function () {
+          window.__moveRefusals += 1;
+          throw new DOMException(
+            "The request is not allowed by the user agent or the platform in the current context.",
+            "NotAllowedError",
+          );
+        };
+      }
       window.__xferChannels = [];
       const realCreateDataChannel = RTCPeerConnection.prototype.createDataChannel;
       RTCPeerConnection.prototype.createDataChannel = function (label, opts) {
@@ -375,9 +393,27 @@ async function opfsRemoteEntries(page, takeDir) {
       } catch {
         return [];
       }
-      const out = [];
+      // "Committed" must mean CONTENT IN PLACE, not name visible: the
+      // store's copy fallback (move() is refused on real vaults — and this
+      // harness refuses it everywhere so the shipped path is what's under
+      // test) creates the final name empty, streams into a sibling
+      // <name>.crswap, and swaps on close(). So skip swap litter, skip any
+      // name whose swap sibling is still live (commit in flight), and skip
+      // 0-byte files (the create→createWritable micro-window). Name-only
+      // filtering here raced an in-flight commit and failed check 6 on
+      // mtime — the part was never re-sent; the sampler was just early.
+      const names = [];
       for await (const [name] of remote.entries()) {
-        if (!name.startsWith(incomingPrefix)) out.push(name);
+        names.push(name);
+      }
+      const out = [];
+      for (const name of names) {
+        if (name.startsWith(incomingPrefix)) continue;
+        if (name.endsWith(".crswap")) continue;
+        if (names.includes(`${name}.crswap`)) continue;
+        const file = await (await remote.getFileHandle(name)).getFile();
+        if (file.size === 0) continue;
+        out.push(name);
       }
       return out;
     },
@@ -620,6 +656,17 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     );
     const manifest1 = await opfsReadJSON(pageB, takeId1, "episode.json");
     check(manifest1 !== null, "check 2: episode.json exists on B after xfer-done");
+
+    // The init script refuses every move() with NotAllowedError (the real
+    // picked-vault behavior) — so this completed transfer PROVES the copy
+    // fallback, the shipped path, carried every commit. A zero here means
+    // the patch silently stopped applying and the run regressed to
+    // OPFS-only rename coverage.
+    const refusalsB = await pageB.evaluate(() => window.__moveRefusals);
+    check(
+      typeof refusalsB === "number" && refusalsB >= 3,
+      `check 2: B committed via the copy fallback — move() was refused for both parts + manifest (refusals: ${refusalsB})`,
+    );
     if (manifest1) {
       const audioEntry1 = manifest1.remote?.audio?.find((p) => p.name === "audio.part000");
       check(!!audioEntry1, "check 2: manifest.remote.audio lists audio.part000");

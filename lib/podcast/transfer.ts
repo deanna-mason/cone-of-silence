@@ -31,7 +31,10 @@ export interface XferLink {
 }
 
 export interface ReceiverStore {
-  scanCommitted(episodeId: string): Promise<string[]>;
+  /** `expected` is the offer's flattened {name, size} plan — the store uses
+   *  it to refuse (and delete) size-mismatched crash artifacts so they never
+   *  enter xfr/have as resume state (see episodeStore.scanCommitted). */
+  scanCommitted(episodeId: string, expected: ReadonlyArray<{ name: string; size: number }>): Promise<string[]>;
   openIncomingPart(episodeId: string, entry: SidecarEntry): Promise<IncomingPart>;
   writeManifest(episodeId: string, remote: { video: SidecarEntry[]; audio: SidecarEntry[] }, from: string | null): Promise<void>;
 }
@@ -276,7 +279,8 @@ export class EpisodeReceiver {
     this.enqueue(async () => {
       if (this.superseded(epoch)) return;
       try {
-        const committed = await this.store.scanCommitted(episodeId);
+        const expected = files.flatMap((f) => f.parts.map((p) => ({ name: p.name, size: p.size })));
+        const committed = await this.store.scanCommitted(episodeId, expected);
         if (this.superseded(epoch)) return;
         this.committedNames = new Set(committed);
         this.send({ t: "xfr/have", v: 1, episodeId, committed });

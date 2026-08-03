@@ -99,7 +99,19 @@ class FakeFileHandle {
   // Atomic: the entry appears under the new name and vanishes under the old
   // one in the SAME synchronous step (no `await` between the delete and the
   // set), so nothing can observe an in-between state.
+  //
+  // moveNotAllowed mirrors the real LOCAL file system: Chrome ships move()
+  // only inside OPFS — on a picker-granted directory it throws a
+  // DOMException named "NotAllowedError" (chromestatus 6271579653144576),
+  // which is exactly what the 2026-08-03 two-Mac drill hit.
   async move(newName: string): Promise<void> {
+    if (this.parent.moveNotAllowed) {
+      this.parent.ops.push(`move-refused:${this.name}`);
+      throw new DOMException(
+        "The request is not allowed by the user agent or the platform in the current context.",
+        "NotAllowedError",
+      );
+    }
     this.parent.ops.push(`move:${this.name}->${newName}`);
     this.parent.files.delete(this.name);
     this.name = newName;
@@ -111,6 +123,9 @@ class FakeDirHandle {
   files = new Map<string, FakeFileHandle>();
   dirs = new Map<string, FakeDirHandle>();
   failWriteFor = new Set<string>();
+  /** Local-file-system mode: move() throws NotAllowedError (see FakeFileHandle.move).
+   *  Inherited by subdirectories at creation time. */
+  moveNotAllowed = false;
   /** Records getFileHandle(create:true) and move() calls, in order. */
   ops: string[] = [];
 
@@ -130,6 +145,7 @@ class FakeDirHandle {
     if (!d) {
       if (!opts?.create) throw notFoundError(name);
       d = new FakeDirHandle();
+      d.moveNotAllowed = this.moveNotAllowed;
       this.dirs.set(name, d);
     }
     return d;
@@ -251,8 +267,11 @@ async function makeVaultRoot(): Promise<FakeDirHandle> {
 }
 
 let takeCounter = 0;
-async function freshTakeDir(): Promise<{ root: FakeDirHandle; takeId: string; dir: FakeDirHandle }> {
+async function freshTakeDir(
+  opts?: { moveNotAllowed?: boolean },
+): Promise<{ root: FakeDirHandle; takeId: string; dir: FakeDirHandle }> {
   const root = await makeVaultRoot();
+  if (opts?.moveNotAllowed) root.moveNotAllowed = true;
   const takeId = `take-${++takeCounter}`;
   const dir = asFake(await openTakeDir(takeId));
   return { root, takeId, dir };
@@ -520,5 +539,84 @@ describe("episodeStore", () => {
     await part.commit();
 
     expect(Array.from(remote.files.get("audio.part000")!.committed)).toEqual(Array.from(freshBytes));
+  });
+
+  // -- (i) local file system: move() unavailable ----------------------------
+  // Chrome ships FileSystemFileHandle.move() only inside OPFS; on a real
+  // picker-granted vault it throws NotAllowedError (hit live, 2026-08-03
+  // two-Mac drill: zero inbound parts ever committed). commit() and
+  // writeManifest() must fall back to copy-into-place — the platform's own
+  // swap-file close() keeps the final name atomic.
+  it("(i) commit() falls back to copy+delete-temp when move() throws NotAllowedError — final bytes land, temp gone", async () => {
+    const { dir, takeId } = await freshTakeDir({ moveNotAllowed: true });
+    const bytes = new TextEncoder().encode("real vault bytes");
+    const entry: SidecarEntry = { name: "video.part000", size: bytes.length, sha256: await sha256(bytes) };
+
+    const part = await openIncomingPart(takeId, entry);
+    await part.append(bytes);
+    await part.commit();
+
+    const remote = dir.dirs.get(REMOTE_DIR)!;
+    expect(remote.files.has(`${INCOMING_PREFIX}video.part000`)).toBe(false);
+    expect(remote.files.has("video.part000")).toBe(true);
+    expect(Array.from(remote.files.get("video.part000")!.committed)).toEqual(Array.from(bytes));
+  });
+
+  it("(i) hash mismatch on a move-less vault: HashMismatchError, the final name is NEVER created, temp gone", async () => {
+    const { dir, takeId } = await freshTakeDir({ moveNotAllowed: true });
+    const goodBytes = new TextEncoder().encode("good bytes");
+    const entry: SidecarEntry = { name: "audio.part000", size: goodBytes.length, sha256: await sha256(goodBytes) };
+
+    const part = await openIncomingPart(takeId, entry);
+    await part.append(new TextEncoder().encode("corrupted!!"));
+    await expect(part.commit()).rejects.toBeInstanceOf(HashMismatchError);
+
+    const remote = dir.dirs.get(REMOTE_DIR)!;
+    expect(remote.files.has("audio.part000")).toBe(false);
+    expect(remote.files.has(`${INCOMING_PREFIX}audio.part000`)).toBe(false);
+    // The verify-BEFORE-final-name order is the invariant: a refused move
+    // must not tempt the fallback into creating the final early.
+    expect(remote.ops).not.toContain("create:audio.part000");
+  });
+
+  it("(i) writeManifest falls back on a move-less vault — episode.json lands complete, temp gone, final created only after the temp was fully written", async () => {
+    const { dir, takeId } = await freshTakeDir({ moveNotAllowed: true });
+    const remoteVideo: SidecarEntry[] = [{ name: "video.part000", size: 5, sha256: "cc" }];
+    const remoteAudio: SidecarEntry[] = [{ name: "audio.part000", size: 3, sha256: "dd" }];
+
+    await writeManifest(takeId, { video: remoteVideo, audio: remoteAudio }, null, { now: () => 1000 });
+
+    expect(dir.files.has(`${INCOMING_PREFIX}${MANIFEST_NAME}`)).toBe(false);
+    const parsed = JSON.parse(new TextDecoder().decode(dir.files.get(MANIFEST_NAME)!.committed));
+    expect(parsed.remote).toEqual({ video: remoteVideo, audio: remoteAudio });
+    expect(dir.ops).toEqual([
+      `create:${INCOMING_PREFIX}${MANIFEST_NAME}`,
+      `move-refused:${INCOMING_PREFIX}${MANIFEST_NAME}`,
+      `create:${MANIFEST_NAME}`,
+    ]);
+  });
+
+  // The copy fallback opens one crash window rename never had: die between
+  // getFileHandle(create:true) and close() and a 0-byte file wears the final
+  // name. Name-only scanning would report it as committed and the sender
+  // would never re-send it — silent corruption. The expected-size gate is
+  // the counter: wrong size -> deleted from disk AND absent from the scan.
+  it("(i) scanCommitted with an expected-size plan deletes a size-mismatched crash artifact and keeps true matches", async () => {
+    const { dir, takeId } = await freshTakeDir({ moveNotAllowed: true });
+    const remote = asFake(await asFsDir(dir).getDirectoryHandle(REMOTE_DIR, { create: true }));
+    seedFile(remote, "audio.part000", new Uint8Array(0)); // crash artifact: created, never closed
+    seedFile(remote, "video.part000", new Uint8Array([7])); // genuinely committed
+    seedFile(remote, `${INCOMING_PREFIX}video.part001`, new Uint8Array([3]));
+    seedFile(remote, "stray.bin", new Uint8Array([9])); // not in the plan: untouched, still listed
+
+    const names = await scanCommitted(takeId, [
+      { name: "audio.part000", size: 5 },
+      { name: "video.part000", size: 1 },
+    ]);
+
+    expect(names.sort()).toEqual(["stray.bin", "video.part000"]);
+    expect(remote.files.has("audio.part000")).toBe(false);
+    expect(remote.files.has("video.part000")).toBe(true);
+    expect(remote.files.has("stray.bin")).toBe(true);
   });
 });

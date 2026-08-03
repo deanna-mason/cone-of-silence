@@ -101,7 +101,7 @@ const senderStoreAdapter: SenderStore = {
   openPartReader: (episodeId, name) => episodeStore.openPartReader(episodeId, name),
 };
 const receiverStoreAdapter: ReceiverStore = {
-  scanCommitted: (episodeId) => episodeStore.scanCommitted(episodeId),
+  scanCommitted: (episodeId, expected) => episodeStore.scanCommitted(episodeId, expected),
   openIncomingPart: (episodeId, entry: SidecarEntry) => episodeStore.openIncomingPart(episodeId, entry),
   writeManifest: (episodeId, remote, from) => episodeStore.writeManifest(episodeId, remote, from),
 };

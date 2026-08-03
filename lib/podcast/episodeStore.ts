@@ -1,11 +1,16 @@
-// Episode-exchange vault disk layer. Temp names + hash-gated atomic renames
-// ARE the crash-safety story: a receiver's committed parts under
-// <take>/remote/ are the ONLY persistent transfer state (scanCommitted() IS
-// the resume state — no separate resume journal), and the episode manifest
-// is written LAST because it is the 5C darkroom's trigger: a bare
-// getFileHandle(create:true) makes an empty file visible before its
-// writable closes, and an early-visible episode.json would false-trigger
-// the darkroom watcher on an incomplete episode.
+// Episode-exchange vault disk layer. Temp names + hash-gated atomic
+// put-into-place (move() on OPFS, verified-copy on real vaults — see
+// moveIntoPlace) ARE the crash-safety story: a receiver's committed parts
+// under <take>/remote/ are the ONLY persistent transfer state
+// (scanCommitted() IS the resume state — no separate resume journal, with
+// an expected-size gate against the copy fallback's 0-byte crash window),
+// and the episode manifest is written LAST because it is the 5C darkroom's
+// trigger: a bare getFileHandle(create:true) makes an empty file visible
+// before its writable closes, and an early-visible episode.json would
+// false-trigger the darkroom watcher on an incomplete episode. (Under the
+// copy fallback the final episode.json IS transiently visible empty; the
+// darkroom treats an unparseable manifest as a per-take refusal and retries
+// next poll, so that window self-heals.)
 import { openTakeDir, type SidecarEntry } from "./vault";
 import type { FilePlan } from "./xferProtocol";
 
@@ -51,6 +56,43 @@ async function remoteDir(takeId: string): Promise<FileSystemDirectoryHandle> {
   return dir.getDirectoryHandle(REMOTE_DIR, { create: true });
 }
 
+/** Puts an already-verified temp into place under its final name.
+ *
+ *  move() works only inside OPFS — Chrome throws NotAllowedError for any
+ *  picker-granted local directory (move-for-local-files is still gated
+ *  behind a flag; chromestatus 6271579653144576). Real vaults ARE local
+ *  directories, so on the shipped path this falls back to copying `bytes`
+ *  (the exact buffer the hash was verified against) into the final name and
+ *  deleting the temp. The final name still can't hold partial content: a
+ *  local-FS createWritable() streams into a swap file and swaps in on
+ *  close(). What the fallback DOES give up is create-invisibility — a crash
+ *  between getFileHandle(create:true) and close() leaves a 0-byte file
+ *  under the final name (rename never had that window), which is why resume
+ *  state must not trust names alone (see scanCommitted's expected-size
+ *  gate). Any non-NotAllowedError failure propagates: everything else is a
+ *  real fault and must surface, same as before. */
+async function moveIntoPlace(
+  dir: FileSystemDirectoryHandle,
+  fh: FileSystemFileHandle,
+  tempName: string,
+  finalName: string,
+  bytes: Uint8Array | string,
+): Promise<void> {
+  try {
+    await fh.move(finalName);
+    return;
+  } catch (err) {
+    const notAllowed =
+      typeof err === "object" && err !== null && (err as { name?: unknown }).name === "NotAllowedError";
+    if (!notAllowed) throw err;
+  }
+  const final = await dir.getFileHandle(finalName, { create: true });
+  const writable = await final.createWritable();
+  await writable.write(bytes as Uint8Array<ArrayBuffer> | string);
+  await writable.close();
+  await dir.removeEntry(tempName);
+}
+
 // ---------------------------------------------------------------------------
 // sender side
 // ---------------------------------------------------------------------------
@@ -94,22 +136,51 @@ export async function openPartReader(takeId: string, name: string): Promise<Part
 // receiver side
 // ---------------------------------------------------------------------------
 
-/** Committed = verified + renamed. Scans <take>/remote/, EXCLUDING any
- *  .incoming-* temp — an in-flight part is never resume state. */
-export async function scanCommitted(takeId: string): Promise<string[]> {
+/** Committed = verified + put into place. Scans <take>/remote/, EXCLUDING
+ *  any .incoming-* temp — an in-flight part is never resume state.
+ *
+ *  With `expected` (the offer's {name, size} plan): a scanned name whose
+ *  on-disk size mismatches its plan entry is DELETED and omitted — it can
+ *  only be a crash artifact of moveIntoPlace()'s copy fallback (a 0-byte
+ *  create the close() swap never filled), and reporting it in xfr/have
+ *  would stop the sender from ever re-sending it. Names outside the plan
+ *  are listed untouched, as before — the sender ignores what it never
+ *  offered. Size is a cheap gate, not proof of content; the darkroom's
+ *  develop-time hash verification remains the end-to-end backstop. */
+export async function scanCommitted(
+  takeId: string,
+  expected?: ReadonlyArray<{ name: string; size: number }>,
+): Promise<string[]> {
   const dir = await remoteDir(takeId);
   const names: string[] = [];
   for await (const name of dir.keys()) {
     if (!name.startsWith(INCOMING_PREFIX)) names.push(name);
   }
-  return names;
+  if (!expected) return names;
+  const planSize = new Map(expected.map((e) => [e.name, e.size]));
+  const verified: string[] = [];
+  for (const name of names) {
+    const want = planSize.get(name);
+    if (want === undefined) {
+      verified.push(name);
+      continue;
+    }
+    const file = await (await dir.getFileHandle(name)).getFile();
+    if (file.size === want) {
+      verified.push(name);
+    } else {
+      await dir.removeEntry(name);
+    }
+  }
+  return verified;
 }
 
 export interface IncomingPart {
   append(bytes: Uint8Array): Promise<void>;
-  /** close → read back → SHA-256 → compare to the sidecar hash → move() to the
-   *  real name. Mismatch: temp deleted, HashMismatchError thrown, NO rename —
-   *  a corrupt part can never be mistaken for a committed one. */
+  /** close → read back → SHA-256 → compare to the sidecar hash → put into
+   *  place under the real name (moveIntoPlace). Mismatch: temp deleted,
+   *  HashMismatchError thrown, the real name is never created — a corrupt
+   *  part can never be mistaken for a committed one. */
   commit(): Promise<void>;
   /** Best-effort close + delete of the temp (parking path). Never throws. */
   abandon(): Promise<void>;
@@ -137,12 +208,13 @@ export async function openIncomingPart(takeId: string, entry: SidecarEntry): Pro
     async commit(): Promise<void> {
       await writable.close(); // atomic swap: bytes are durable from this point on
       const file = await fh.getFile();
-      const digest = await sha256Hex(await file.arrayBuffer());
+      const buf = await file.arrayBuffer();
+      const digest = await sha256Hex(buf);
       if (digest !== entry.sha256) {
         await dir.removeEntry(tempName);
         throw new HashMismatchError(entry.name);
       }
-      await fh.move(entry.name);
+      await moveIntoPlace(dir, fh, tempName, entry.name, new Uint8Array(buf));
     },
 
     async abandon(): Promise<void> {
@@ -200,10 +272,10 @@ async function readLocalSidecarParts(
 }
 
 /** Written LAST — the 5C trigger contract. Reads the local sidecars off disk
- *  (null if absent); writes .incoming-episode.json then move()s it into
- *  place, because getFileHandle(create:true) makes an empty file visible
- *  before the writable closes and a bare create would false-trigger the
- *  darkroom watcher. */
+ *  (null if absent); writes .incoming-episode.json then puts it into place
+ *  (moveIntoPlace), because getFileHandle(create:true) makes an empty file
+ *  visible before the writable closes and a bare create would false-trigger
+ *  the darkroom watcher. */
 export async function writeManifest(
   takeId: string,
   remote: { video: SidecarEntry[]; audio: SidecarEntry[] },
@@ -238,7 +310,8 @@ export async function writeManifest(
   const tempName = `${INCOMING_PREFIX}${MANIFEST_NAME}`;
   const fh = await dir.getFileHandle(tempName, { create: true });
   const writable = await fh.createWritable();
-  await writable.write(JSON.stringify(manifest, null, 2));
+  const json = JSON.stringify(manifest, null, 2);
+  await writable.write(json);
   await writable.close();
-  await fh.move(MANIFEST_NAME);
+  await moveIntoPlace(dir, fh, tempName, MANIFEST_NAME, json);
 }

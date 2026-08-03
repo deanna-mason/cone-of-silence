@@ -87,8 +87,13 @@ class FakeStore implements ReceiverStore {
     this.commitReleasers.get(name)?.();
   }
 
-  async scanCommitted(episodeId: string): Promise<string[]> {
+  /** The expected-size plan each scanCommitted() call received — the
+   *  crash-artifact size gate only works if adopt() actually hands it down. */
+  scanExpected: Array<ReadonlyArray<{ name: string; size: number }> | undefined> = [];
+
+  async scanCommitted(episodeId: string, expected?: ReadonlyArray<{ name: string; size: number }>): Promise<string[]> {
     this.ops.push(`scan:${episodeId}`);
+    this.scanExpected.push(expected);
     return [...this.seededCommitted];
   }
 
@@ -249,6 +254,27 @@ describe("EpisodeReceiver", () => {
     expect(store.ops).toEqual(["scan:ep-1"]);
     expect(link.frames()).toEqual([{ t: "xfr/have", v: 1, episodeId: "ep-1", committed: ["audio.part000"] }]);
     expect(cb.lastPhase()).toBe("receiving");
+  });
+
+  it("(a-ii) adopt hands scanCommitted the offer's own {name, size} plan — arms the crash-artifact size gate", async () => {
+    const store = new FakeStore();
+    const cb = new FakeCallbacks();
+    const { receiver } = makeReceiver(store, cb);
+
+    const files = plan(
+      [audioEntry("audio.part000", 6), audioEntry("audio.part001", 2)],
+      [videoEntry("video.part000", 9)],
+    );
+    receiver.handleFrame(PEER, offer("ep-1", files));
+    await flush();
+
+    expect(store.scanExpected).toEqual([
+      [
+        { name: "audio.part000", size: 6 },
+        { name: "audio.part001", size: 2 },
+        { name: "video.part000", size: 9 },
+      ],
+    ]);
   });
 
   // -- (b) sequential chunks assemble a part; part-committed after commit ---

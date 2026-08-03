@@ -41,6 +41,11 @@ human half of the same acceptance.
 | 13 | Watch the resumed transfer | Completes without re-sending any part the receiver already has on disk |
 | 14 | Check the receiver's take folder throughout | `episode.json` appears in it only at the very end, after every part has landed |
 
+Commit acceptance: part files must visibly land in the receiver's take
+folder (`remote/`) while the transfer runs — a `commit:` fault on the very
+first part is the real-vault commit regression class the 2026-08-03 drill
+caught (`move()` is OPFS-only; real vaults take the copy fallback).
+
 Honest-throughput note: the sender's own uplink bounds the whole transfer —
 expect roughly 20 minutes for 3 GB at a 20 Mbps upload, not the LAN speed
 between the two Macs.
