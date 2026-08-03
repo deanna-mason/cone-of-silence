@@ -70,7 +70,9 @@ export default function VideoTile({
     if (!video) return;
     video.muted = isSelf || audio !== "on";
     if (stream && !video.muted) {
-      video.play().catch(() => {
+      video.play().catch((err: unknown) => {
+        if ((err as DOMException)?.name !== "NotAllowedError") return;
+        if (video.srcObject !== stream) return; // stale binding — a newer effect owns the element
         // unmuted playback refused — keep the picture rolling muted and
         // surface the Restore Audio gesture.
         video.muted = true;

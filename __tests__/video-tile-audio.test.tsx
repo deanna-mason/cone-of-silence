@@ -101,3 +101,62 @@ test("a replaced stream is a fresh join: mute resets to audible", async () => {
   await waitFor(() => expect(video.muted).toBe(false));
   expect(screen.getByRole("button", { name: /^mute$/i })).toBeDefined();
 });
+
+test("a stale play() rejection from a swapped-out stream does not blockade the new one", async () => {
+  // The first unmuted play() (bound to the original stream) hangs until we
+  // reject it by hand, simulating the browser aborting it mid-flight because
+  // a newer srcObject assignment superseded it.
+  let unmutedCalls = 0;
+  let rejectFirstUnmuted: ((err: unknown) => void) | undefined;
+  installPlay((muted) => {
+    if (muted) return Promise.resolve();
+    unmutedCalls += 1;
+    if (unmutedCalls === 1) {
+      return new Promise<void>((_, reject) => {
+        rejectFirstUnmuted = reject;
+      });
+    }
+    return Promise.resolve();
+  });
+
+  const { container, rerender } = render(
+    <VideoTile stream={fakeStream()} label="Agent 99" />,
+  );
+  const video = container.querySelector("video")!;
+
+  await waitFor(() => expect(unmutedCalls).toBe(1));
+
+  // A fresh stream binds before the old pending play() ever settles.
+  rerender(<VideoTile stream={fakeStream()} label="Agent 99" />);
+  await waitFor(() => expect(unmutedCalls).toBe(2));
+  await waitFor(() => expect(video.muted).toBe(false));
+
+  // Now the stale promise rejects with AbortError — it belongs to a binding
+  // this element no longer owns.
+  rejectFirstUnmuted!(new DOMException("interrupted", "AbortError"));
+  await waitFor(() => expect(video.muted).toBe(false));
+
+  expect(video.muted).toBe(false);
+  expect(screen.queryByText(/audio blocked/i)).toBeNull();
+});
+
+test("a failed Restore Audio gesture leaves the tile blocked, with no corner Mute button", async () => {
+  installPlay(blockUnmuted);
+  render(<VideoTile stream={fakeStream()} label="Agent 13" />);
+
+  const restore = await screen.findByRole("button", { name: /restore audio/i });
+  expect(screen.queryByRole("button", { name: /^mute$/i })).toBeNull();
+
+  const container = screen.getByText(/agent 13/i).closest("figure")!;
+  const video = container.querySelector("video")!;
+  const callsBeforeRestore = mutedAtPlay.length;
+
+  fireEvent.click(restore);
+  // blockUnmuted is still installed, so the retried unmuted play() is
+  // refused again — the tile should settle right back into "blocked".
+  await waitFor(() => expect(mutedAtPlay.length).toBeGreaterThan(callsBeforeRestore));
+
+  expect(screen.getByText(/audio blocked by browser/i)).toBeDefined();
+  expect(video.muted).toBe(true);
+  expect(screen.queryByRole("button", { name: /^mute$/i })).toBeNull();
+});
