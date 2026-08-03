@@ -3,6 +3,7 @@ export interface LoudnormMeasurement {
   inputTp: string;
   inputLra: string;
   inputThresh: string;
+  targetOffset: string;
 }
 
 const LOUDNORM_TARGET = "loudnorm=I=-16:TP=-1.5:LRA=11";
@@ -29,8 +30,10 @@ export function applyArgs(input: string, model: string, m: LoudnormMeasurement, 
   return [
     "-hide_banner", "-nostdin", "-y", "-i", input, "-vn",
     "-af",
+    // offset= from the measured target_offset — ffmpeg's own documented
+    // 5-field two-pass recipe, matching the darkroom chain (chain.mjs).
     `${chainFilter(model)},${LOUDNORM_TARGET}:measured_I=${m.inputI}:measured_TP=${m.inputTp}` +
-      `:measured_LRA=${m.inputLra}:measured_thresh=${m.inputThresh}:linear=true`,
+      `:measured_LRA=${m.inputLra}:measured_thresh=${m.inputThresh}:offset=${m.targetOffset}:linear=true`,
     "-ar", "48000", "-c:a", "aac", "-b:a", "192k", out,
   ];
 }
@@ -57,5 +60,6 @@ export function parseLoudnorm(stderr: string): LoudnormMeasurement {
     inputTp: pick("input_tp"),
     inputLra: pick("input_lra"),
     inputThresh: pick("input_thresh"),
+    targetOffset: pick("target_offset"),
   };
 }

@@ -21,10 +21,13 @@ describe("ffmpeg args (Deanna's enhance chain, ported verbatim)", () => {
   });
 
   it("apply pass embeds measured values, strips video, outputs 48k aac 192k", () => {
-    const m = { inputI: "-23.1", inputTp: "-5.2", inputLra: "9.9", inputThresh: "-33.5" };
+    const m = { inputI: "-23.1", inputTp: "-5.2", inputLra: "9.9", inputThresh: "-33.5", targetOffset: "0.31" };
     const joined = applyArgs("/in/source.mp4", M, m, "/out/enhanced.m4a").join(" ");
+    // offset= from the measured target_offset — ffmpeg's own documented
+    // 5-field two-pass recipe, backported from the darkroom chain (which
+    // always carried it; defaulting to 0 was less precise, not wrong).
     for (const frag of ["measured_I=-23.1", "measured_TP=-5.2", "measured_LRA=9.9",
-      "measured_thresh=-33.5", "linear=true", "-vn", "-ar 48000", "-c:a aac", "-b:a 192k"]) {
+      "measured_thresh=-33.5", "offset=0.31", "linear=true", "-vn", "-ar 48000", "-c:a aac", "-b:a 192k"]) {
       expect(joined).toContain(frag);
     }
   });
@@ -37,7 +40,7 @@ describe("ffmpeg args (Deanna's enhance chain, ported verbatim)", () => {
   it("parseLoudnorm digs the json out of noisy stderr and rejects garbage", () => {
     const stderr = `frame=... blah\n{\n"input_i" : "-23.06",\n"input_tp" : "-5.20",\n"input_lra" : "9.90",\n"input_thresh" : "-33.53",\n"target_offset" : "0.31"\n}\n`;
     expect(parseLoudnorm(stderr)).toEqual({
-      inputI: "-23.06", inputTp: "-5.20", inputLra: "9.90", inputThresh: "-33.53",
+      inputI: "-23.06", inputTp: "-5.20", inputLra: "9.90", inputThresh: "-33.53", targetOffset: "0.31",
     });
     expect(() => parseLoudnorm("no json here")).toThrow();
   });
