@@ -64,16 +64,76 @@ export class SignalingClient {
 
   start(): void {
     this.stopped = false;
+    if (typeof window !== "undefined") {
+      window.addEventListener("offline", this.onOffline);
+      window.addEventListener("online", this.onOnline);
+    }
     this.connect();
   }
 
   stop(): void {
     this.stopped = true;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("offline", this.onOffline);
+      window.removeEventListener("online", this.onOnline);
+    }
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.ws?.close();
     this.ws = null;
   }
+
+  /** Detach the current socket and enter recovery WITHOUT waiting for its
+   *  close event: close() on a dead path stalls in the CLOSING handshake
+   *  (~60s in Chrome — observed in the 2026-08-03 proxy repro), and a
+   *  silently-dead socket may never fire close at all. The onclose
+   *  identity guard (`this.ws !== ws`) turns the detached socket's
+   *  eventual close into a no-op, so recovery is driven exactly once. */
+  private detachAndAbandon(): void {
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close(); // best effort — may stall; nothing waits on it
+    if (this.outageSince === null) this.outageSince = Date.now();
+    this.events.emit("reconnecting");
+  }
+
+  /** The OS says the network is gone. A silently-dead socket often never
+   *  fires close on its own — the server's protocol pings are auto-ponged
+   *  by the browser below JS, and an idle call sends nothing, so a dead
+   *  path can hold readyState OPEN forever (observed live 2026-08-03: a
+   *  ~20s wifi loss left a zombie socket and the call never healed, while
+   *  the same outage delivered as an RST healed in seconds). Hand the
+   *  outage to the proven backoff → rejoin machinery now, honest banner
+   *  and all. */
+  private readonly onOffline = (): void => {
+    if (this.stopped || this.timer !== null) return; // already recovering
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) return;
+    this.detachAndAbandon();
+    this.scheduleReconnect();
+  };
+
+  /** Network is back (or changed). A pending backoff retry fires NOW —
+   *  waiting out a 10s ceiling after the network just returned is pure
+   *  lag. With no retry pending but a socket still reporting OPEN or
+   *  CLOSING, the socket is suspect: whatever transition fired this event
+   *  likely killed the old path (a silent death never fired 'offline';
+   *  a stalled close handshake can hold CLOSING for a minute). Abandoning
+   *  it costs one quick rejoin cycle if it was healthy; keeping a zombie
+   *  costs the call forever. */
+  private readonly onOnline = (): void => {
+    if (this.stopped) return;
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+      this.attempt = 0;
+      this.connect();
+      return;
+    }
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) return;
+    this.detachAndAbandon();
+    this.attempt = 0;
+    this.connect();
+  };
 
   sendRelay(to: string, payload: string): void {
     this.send({ v: PROTOCOL_VERSION, t: "relay", to, payload });

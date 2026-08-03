@@ -200,3 +200,126 @@ describe("unchanged terminal paths", () => {
     expect(refusals).toEqual([["create-refused", true]]);
   });
 });
+
+// The 2026-08-03 two-Mac drill: a ~20s wifi loss on one Mac never healed.
+// Proxy-blackhole repro proved a silently-dead socket keeps readyState OPEN
+// forever — the browser auto-pongs the server's protocol pings invisibly,
+// an idle call never sends, so NOTHING notices the socket is gone (while the
+// same outage delivered as an RST heals in seconds). The OS's own
+// offline/online events are the client's only reliable network-loss signal.
+describe("network liveness events", () => {
+  it("'offline' proactively closes an open socket — recovery machinery engages instead of a zombie", () => {
+    let reconnecting = 0;
+    client.events.on("reconnecting", () => reconnecting++);
+    enterRoom();
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("offline"));
+
+    expect(lastWS().readyState).toBe(3);
+    expect(reconnecting).toBe(1);
+    advanceUntilNextSocket(count); // a retry is scheduled, not a dead end
+  });
+
+  it("'online' fires a pending backoff retry immediately", () => {
+    enterRoom().drop();
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("online"));
+
+    // No timer advance: the reconnect attempt must be synchronous with the
+    // event — the whole point is not waiting out a 10s backoff ceiling
+    // after the network just came back.
+    expect(FakeWS.instances.length).toBe(count + 1);
+    const ws = openAndJoin();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me2", peers: [] });
+    expect(entered).toBe(2);
+  });
+
+  it("'online' with a socket still reporting OPEN treats it as suspect and closes it", () => {
+    // No 'offline' ever fired (silent path death, then a network change) —
+    // the held socket may be a zombie. Closing it costs one rejoin cycle
+    // if it was healthy; keeping it costs the call forever if it wasn't.
+    enterRoom();
+    const ws = lastWS();
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("online"));
+
+    expect(ws.readyState).toBe(3);
+    advanceUntilNextSocket(count);
+  });
+
+  it("stop() removes the listeners — no reconnect activity from later events", () => {
+    enterRoom();
+    client.stop();
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+
+    expect(FakeWS.instances.length).toBe(count);
+  });
+});
+
+// close() on a DEAD path stalls in the CLOSING handshake — Chrome waits ~60s
+// for a close reply that can never arrive (observed in the proxy repro:
+// readyState sat at 2 the whole outage; recovery began a minute late). The
+// event handlers must detach and drive recovery themselves, never wait for
+// onclose; the ws-identity guard makes the eventual late onclose a no-op.
+describe("network liveness events x stalled close handshake", () => {
+  function stall(ws: FakeWS): void {
+    ws.close = () => {
+      ws.readyState = 2; // CLOSING forever — no onclose
+    };
+  }
+
+  it("'offline' drives recovery immediately even when close() stalls", () => {
+    let reconnecting = 0;
+    client.events.on("reconnecting", () => reconnecting++);
+    const ws = enterRoom();
+    stall(ws);
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("offline"));
+
+    expect(reconnecting).toBe(1);
+    advanceUntilNextSocket(count); // retry scheduled without waiting for onclose
+  });
+
+  it("'online' against a stalled-CLOSING socket reconnects immediately", () => {
+    const ws = enterRoom();
+    stall(ws);
+    window.dispatchEvent(new Event("offline")); // enters recovery, socket stuck CLOSING
+    // burn the scheduled retry so no timer is pending, then simulate the
+    // network returning while the old socket still reports CLOSING
+    const count0 = FakeWS.instances.length;
+    advanceUntilNextSocket(count0);
+    lastWS().drop(); // that retry fails too (still offline)
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("online"));
+
+    expect(FakeWS.instances.length).toBe(count + 1); // synchronous reconnect
+    const fresh = openAndJoin();
+    fresh.serverSays({ v: 1, t: "joined", selfId: "me2", peers: [] });
+    expect(entered).toBe(2);
+  });
+
+  it("a late onclose from the detached socket never double-schedules", () => {
+    let reconnecting = 0;
+    client.events.on("reconnecting", () => reconnecting++);
+    const ws = enterRoom();
+    stall(ws);
+    const count = FakeWS.instances.length;
+
+    window.dispatchEvent(new Event("offline"));
+    // the stalled handshake finally times out much later
+    ws.readyState = 3;
+    ws.onclose?.();
+
+    expect(reconnecting).toBe(1); // not 2
+    advanceUntilNextSocket(count);
+    expect(FakeWS.instances.length).toBe(count + 1); // exactly one retry in flight
+  });
+});
