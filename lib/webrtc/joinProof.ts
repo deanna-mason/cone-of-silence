@@ -58,16 +58,18 @@
 //     xfer frames, stream, roster) stays closed for the whole retry window.
 
 import { base64url } from "../base64url";
-import { TOKEN_RE } from "../roomLink";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const NONCE_BYTES = 16;
 const RESPONSE_LABEL = "resp";
-// Wire nonce format, shared with lib/roomLink.ts's room-secret token format:
-// exactly 22-char base64url (16 raw bytes, no padding). Any inbound `nonce`
-// that doesn't match this — wrong length, foreign charset, or (the pre-auth
-// oracle concern) attacker-inflated to megabytes — is malformed, full stop.
-const NONCE_RE = TOKEN_RE;
+// Wire nonce format: exactly 22-char base64url (NONCE_BYTES=16 raw bytes, no
+// padding). Any inbound `nonce` that doesn't match this — wrong length,
+// foreign charset, or (the pre-auth oracle concern) attacker-inflated to
+// megabytes — is malformed, full stop. Deliberately NOT aliased to
+// lib/roomLink.ts's TOKEN_RE even though the two coincide today (both 16
+// bytes): this module owns its wire format, and a future room-secret length
+// change must not silently retune pre-auth nonce validation (5D ledger).
+const NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
 
 export type ProofPhase = "pending" | "proven" | "failed";
 

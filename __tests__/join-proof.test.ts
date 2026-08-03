@@ -535,6 +535,36 @@ describe("JoinProof", () => {
   });
 
   // ---------------------------------------------------------------------
+  // pinned mac vector — locks the length-prefixed byte layout itself
+  // ---------------------------------------------------------------------
+  describe("pinned computeMac vector", () => {
+    // 5D final-review ledger item: the canonicalization PoC below is guarded
+    // entirely by NONCE_RE (a crafted variable-length nonce dies at parse and
+    // never reaches macInput), so reverting the length-prefix layout would
+    // break NOTHING else in this suite. This literal pins the layout
+    //   u32be(len nonce) ‖ utf8(nonce) ‖ u32be(len id) ‖ utf8(id) ‖ utf8("resp")
+    // end to end through the public wire surface. Recompute one-liner
+    // (node): key = raw bytes 0..31 as HMAC-SHA256; input as above with
+    // nonce "A"x22, id "peer-b"; base64url(sign) — the unprefixed layout
+    // yields ujrQjuN9XPliDdmgISYHEGy5TuM00lOtEOWz9FLKYec, so a match on the
+    // literal below is proof the prefixes are still in the signed bytes.
+    it("a challenge answered by peer-b under the all-zeros-…-31 key yields the pinned mac", async () => {
+      const keyBytes = new Uint8Array(32).map((_, i) => i);
+      const proofKey = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, [
+        "sign",
+        "verify",
+      ]);
+      const events = new BusEvents();
+      const b = new JoinProof({ proofKey, selfPeerId: "peer-b", remotePeerId: "peer-a", events });
+      b.handleMessage(JSON.stringify({ t: "prf/challenge", nonce: "AAAAAAAAAAAAAAAAAAAAAA" }));
+      await waitFor(() => events.sent.length === 1);
+      const response = parseProofMsg(events.sent[0]!);
+      expect(response?.t).toBe("prf/response");
+      expect((response as { mac: string }).mac).toBe("V1wjhI2rZSnEmk6bH3kAO2zGN3npddnSR4wtTUyW_gU");
+    });
+  });
+
+  // ---------------------------------------------------------------------
   // finding 1: answerChallenge canonicalization bypass — RED-first regression
   // ---------------------------------------------------------------------
   describe("finding 1 — pre-auth signing oracle / canonicalization bypass", () => {
