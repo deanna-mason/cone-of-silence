@@ -13,7 +13,7 @@ export type PodcastPanelState =
   /** Two chairs and a vault, but the data channel to the other chair is down —
    *  a proposal sent now would be dropped, never acked, and never rolled. */
   | { kind: "link-down" }
-  | { kind: "armed"; canSend: boolean }
+  | { kind: "armed"; canSend: boolean; delivered?: boolean }
   | { kind: "countdown"; secondsLeft: number }
   | {
       kind: "rolling";
@@ -168,10 +168,18 @@ export default function PodcastPanel({
       return (
         <div className={ROW}>
           <p className="kicker flex-1 text-sienna">◈ Ready to Roll</p>
-          {state.canSend && (
-            <button type="button" onClick={onSendEpisode} className={GHOST_BUTTON}>
-              Send Episode
-            </button>
+          {/* Once this take has been delivered, a static in-theme marker
+              (text-brass = static positive) replaces Send Episode — a second
+              send of an all-committed episode is an instant "0.0 MB filed."
+              no-op. Roll Tape stays: record another take to send again. */}
+          {state.delivered ? (
+            <p className="kicker shrink-0 text-brass">◈ Episode Delivered</p>
+          ) : (
+            state.canSend && (
+              <button type="button" onClick={onSendEpisode} className={GHOST_BUTTON}>
+                Send Episode
+              </button>
+            )
           )}
           <button type="button" onClick={onRoll} className={CTA_BUTTON}>
             Roll Tape
@@ -314,7 +322,7 @@ export default function PodcastPanel({
           </p>
           <p className="flex-1 truncate font-body text-sm text-ink-soft">{`${mbNum(state.totalBytes)} MB filed.`}</p>
           <button type="button" onClick={onDismissXfer} className={GHOST_BUTTON}>
-            File Away
+            Dismiss
           </button>
         </div>
       );

@@ -858,6 +858,58 @@ describe("useEpisodeExchange", () => {
     expect(view.result.current.state).toBeNull();
   });
 
+  test("delivered: once a send completes, canSend stays off and delivered is true across dismissal; a fresh take re-arms", async () => {
+    const takeId = "take-delivered";
+    const audio = await makePart("audio.part000", 80, 4);
+    H.state.plans.set(takeId, [
+      { base: "audio", parts: [audio.entry] },
+      { base: "video", parts: [] },
+    ]);
+    H.state.partBytes.set(`${takeId}:audio.part000`, audio.bytes);
+
+    const { port, view } = setup({ lastTakeId: takeId });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+    expect(view.result.current.canSend).toBe(true);
+    expect(view.result.current.delivered).toBe(false);
+
+    const farReceiver = new EpisodeReceiver(PEER, farLink(port, PEER), new FarReceiverStore(), {
+      onPhase: vi.fn(),
+      onProgress: vi.fn(),
+    }, TEST_XFER_KEY);
+    port.wirePeer(PEER, farReceiver);
+
+    act(() => view.result.current.actions.send());
+    await waitFor(() => expect(view.result.current.state?.kind).toBe("xfer-done"));
+
+    // Delivered — Send must not re-offer, even though a peer + open channel
+    // remain (a second send would land an instant "0.0 MB filed." no-op).
+    expect(view.result.current.delivered).toBe(true);
+    expect(view.result.current.canSend).toBe(false);
+
+    // Dismissing the done card keeps the delivered marker for this take.
+    act(() => view.result.current.actions.dismiss());
+    expect(view.result.current.state).toBeNull();
+    expect(view.result.current.delivered).toBe(true);
+    expect(view.result.current.canSend).toBe(false);
+
+    // Recording a fresh take (a new lastTakeId) re-arms Send.
+    act(() => {
+      view.rerender({
+        enabled: true,
+        xfer: port,
+        peerIds: [PEER],
+        myCodename: "Nightingale",
+        partnerCodename: "Falcon",
+        lastTakeId: "take-delivered-2",
+        takeActive: false,
+        dcOpen: true,
+        xferKey: TEST_XFER_KEY,
+      });
+    });
+    expect(view.result.current.delivered).toBe(false);
+    expect(view.result.current.canSend).toBe(true);
+  });
+
   // Ledgered edge case (Task 10 carry-in): lastTakeId can name a take with
   // zero tape on disk (stop landed mid-start-chain). send() on such a take:
   // readSendPlan rejects, the sender faults with a plan error, and the
@@ -975,14 +1027,22 @@ describe("useEpisodeExchange", () => {
     }
   });
 
-  test("(f) mergePanel: armed gains canSend from the exchange when no exchange state is showing", () => {
+  test("(f) mergePanel: armed gains canSend and delivered from the exchange when no exchange state is showing", () => {
     expect(mergePanel({ kind: "armed", canSend: false }, fakeExchange({ canSend: true }))).toEqual({
       kind: "armed",
       canSend: true,
+      delivered: false,
     });
     expect(mergePanel({ kind: "armed", canSend: true }, fakeExchange({ canSend: false }))).toEqual({
       kind: "armed",
       canSend: false,
+      delivered: false,
+    });
+    // A delivered exchange marks the armed card delivered (and Send stays off).
+    expect(mergePanel({ kind: "armed", canSend: false }, fakeExchange({ canSend: false, delivered: true }))).toEqual({
+      kind: "armed",
+      canSend: false,
+      delivered: true,
     });
   });
 
@@ -1005,6 +1065,7 @@ function fakeExchange(overrides: Partial<EpisodeExchange>): EpisodeExchange {
     state: null,
     busy: false,
     canSend: false,
+    delivered: false,
     actions: { send: vi.fn(), resend: vi.fn(), dismiss: vi.fn() },
     debug: { kind: null, sentBytes: 0, committedBytes: 0, totalBytes: 0, resumedParts: null },
     ...overrides,

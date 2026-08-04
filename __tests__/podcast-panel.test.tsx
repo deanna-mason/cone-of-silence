@@ -84,6 +84,15 @@ describe("PodcastPanel", () => {
     expect(cb.onRoll).not.toHaveBeenCalled();
   });
 
+  test("armed — delivered shows a static Episode Delivered marker and no Send Episode", () => {
+    renderState({ kind: "armed", canSend: true, delivered: true });
+    expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
+    // Even with canSend true, a delivered take never re-offers Send.
+    expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
+    // Roll Tape stays — record another take to send again.
+    expect(screen.getByRole("button", { name: "Roll Tape" })).toBeDefined();
+  });
+
   test("countdown — shows the seconds remaining", () => {
     renderState({ kind: "countdown", secondsLeft: 2 });
     expect(screen.getByText("2")).toBeDefined();
@@ -252,11 +261,11 @@ describe("PodcastPanel", () => {
     expect(screen.getByRole("button", { name: "Stand Down" })).toBeDefined();
   });
 
-  test("xfer-done (send) — Episode Delivered, File Away fires onDismissXfer", () => {
+  test("xfer-done (send) — Episode Delivered, Dismiss fires onDismissXfer", () => {
     const cb = renderState({ kind: "xfer-done", direction: "send", totalBytes: 7_800_000 });
     expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
     expect(screen.getByText("7.8 MB filed.")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "File Away" }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(cb.onDismissXfer).toHaveBeenCalledTimes(1);
   });
 
