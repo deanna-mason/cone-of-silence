@@ -57,6 +57,20 @@ test("the self tile stays muted and renders no audio controls", async () => {
   expect(screen.queryByRole("button")).toBeNull();
 });
 
+test("self tile with a cut mic shows a loud persistent badge + vermilion border", async () => {
+  const { container, rerender } = render(
+    <VideoTile stream={fakeStream()} label="You" isSelf micCut />,
+  );
+  const figure = container.querySelector("figure")!;
+  expect(screen.getByText(/your mic is cut/i)).toBeDefined();
+  expect(figure.className).toContain("ring-vermilion");
+
+  // Live mic (micCut false): no badge, no vermilion border.
+  rerender(<VideoTile stream={fakeStream()} label="You" isSelf />);
+  expect(screen.queryByText(/your mic is cut/i)).toBeNull();
+  expect(container.querySelector("figure")!.className).not.toContain("ring-vermilion");
+});
+
 test("blocked autoplay falls back to muted playback + Restore Audio treatment", async () => {
   installPlay(blockUnmuted);
   const { container } = render(<VideoTile stream={fakeStream()} label="Agent 13" />);

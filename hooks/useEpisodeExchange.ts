@@ -50,7 +50,13 @@ export type ExchangePanelState =
 export interface EpisodeExchange {
   state: ExchangePanelState | null; // null = no exchange in flight or shown
   busy: boolean; // sending or receiving RIGHT NOW → feeds holdRolls
-  canSend: boolean; // lastTakeId && exactly one peer && that peer's xfer channel open && no take active
+  canSend: boolean; // lastTakeId && exactly one peer && that peer's xfer channel open && no take active && not already delivered
+  // The current lastTakeId has already been delivered to the partner this
+  // session — the armed card shows a delivered marker instead of re-offering
+  // Send (a second send of an all-committed episode streams nothing and
+  // lands an instant confusing "0.0 MB filed." no-op). Cleared by recording
+  // a fresh take (a new lastTakeId).
+  delivered: boolean;
   actions: { send(): void; resend(): void; dismiss(): void };
   debug: { kind: string | null; sentBytes: number; committedBytes: number; totalBytes: number; resumedParts: number | null };
 }
@@ -212,6 +218,12 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   const senderPeerRef = useRef<string | null>(null);
   const senderEpisodeIdRef = useRef<string | null>(null);
   const senderRateRef = useRef<RateState>(RATE_IDLE);
+  // The episodeId whose SEND reached "done" — set once delivery completes and
+  // kept across the operator dismissing the done card, so `delivered` below
+  // stays true for that episode and the armed card never re-offers Send for
+  // an already-delivered take. A fresh take (different lastTakeId) makes
+  // `delivered` false again on its own; no reset needed here.
+  const deliveredEpisodeIdRef = useRef<string | null>(null);
 
   const receiverRef = useRef<EpisodeReceiver | null>(null);
   const receiverPeerRef = useRef<string | null>(null);
@@ -245,6 +257,9 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
 
   function handleSenderPhase(phase: SenderPhase, detail?: string): void {
     if (phase === "offering") senderRateRef.current = RATE_IDLE;
+    // Delivery reached "done": remember which episode, so the armed card
+    // marks it delivered rather than re-offering Send after dismissal.
+    if (phase === "done") deliveredEpisodeIdRef.current = senderEpisodeIdRef.current;
     setSenderView((prev) => ({ ...prev, phase, faultReason: phase === "fault" ? (detail ?? "") : null }));
   }
 
@@ -429,9 +444,12 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   const receivingBusy = receiverView.phase === "receiving";
   const busy = sendingBusy || receivingBusy;
 
+  // This session already delivered the current take to the partner — hold
+  // Send off so a second press can't fire the instant "0.0 MB filed." no-op.
+  const delivered = lastTakeId !== null && deliveredEpisodeIdRef.current === lastTakeId;
   // `dcOpen` (review fix round 2): see EpisodeExchangeArgs's doc — closes the
   // sub-second sendable-but-refused window during a 4C re-proof.
-  const canSend = lastTakeId !== null && singlePeerId !== null && xferOpen && dcOpen && !takeActive;
+  const canSend = lastTakeId !== null && singlePeerId !== null && xferOpen && dcOpen && !takeActive && !delivered;
 
   const receiverEffectivePhase: ReceiverPhase | "idle" = receiverView.dismissed ? "idle" : receiverView.phase;
 
@@ -534,6 +552,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     state,
     busy,
     canSend,
+    delivered,
     actions: {
       send: () => {
         if (!canSend || singlePeerId === null || lastTakeId === null) return;
@@ -585,6 +604,6 @@ export function mergePanel(take: PodcastPanelState, xchg: EpisodeExchange): Podc
     return take;
   }
   if (xchg.state !== null) return xchg.state;
-  if (take.kind === "armed") return { kind: "armed", canSend: xchg.canSend };
+  if (take.kind === "armed") return { kind: "armed", canSend: xchg.canSend, delivered: xchg.delivered };
   return take;
 }

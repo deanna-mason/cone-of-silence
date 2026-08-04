@@ -601,9 +601,9 @@ async function stopSelfVideoTrack(page) {
     // Deviation 2 (see header note): B's own fault banner never self-clears
     // (A's beacon keeps carrying camera-lost forever), so B has no Cut button
     // until B ALSO stands down. Adapted: both stand down, then B cuts.
-    await pageA.getByRole("button", { name: "Stand Down" }).click();
+    await pageA.getByRole("button", { name: "Acknowledge" }).click();
     await waitPod(pageA, "rolling", 3000);
-    await pageB.getByRole("button", { name: "Stand Down" }).click();
+    await pageB.getByRole("button", { name: "Acknowledge" }).click();
     await waitPod(pageB, "rolling", 3000);
     check(true, "A stands down (back to rolling), B stands down (back to rolling)");
 

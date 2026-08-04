@@ -31,18 +31,32 @@ import { pinStudioRoom } from "@/lib/studioRoom";
 
 type Stage = "parsing" | "no-channel" | "green-room" | "in-room";
 
-const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
+// A distinct second-line pointer for the failures an OS-level block can cause
+// (a tester allowed the browser and still hit repeat failures without finding
+// the old inline hint, 8/3). Some OS blocks surface as NotReadableError
+// ("unavailable"), not a denial — so it rides both cards.
+const OS_POINTER = {
+  heading: "Still Locked Out After Allowing?",
+  intro: "Your operating system may be blocking the browser itself.",
+  macOS: "macOS: System Settings → Privacy & Security → Camera and Microphone.",
+  windows: "Windows: Settings → Privacy & security → Camera / Microphone.",
+};
+
+const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string; osPointer: boolean }> = {
   denied: {
     title: "Surveillance Equipment Compromised",
-    hint: "The browser was refused access to your camera and microphone. Re-arm permissions in the address bar (camera icon), then retry. Already allowed there? Your operating system may be blocking the browser itself — on macOS, check System Settings → Privacy & Security → Camera and Microphone.",
+    hint: "The browser was refused access to your camera and microphone. Re-arm permissions in the address bar (camera icon), then retry.",
+    osPointer: true,
   },
   "no-devices": {
     title: "No Equipment Detected",
     hint: "No camera or microphone was found on this machine. Connect your gear and retry.",
+    osPointer: false,
   },
   unavailable: {
     title: "Equipment Malfunction",
     hint: "Your camera or microphone could not be started — another application may be holding it. Close it and retry.",
+    osPointer: true,
   },
 };
 
@@ -263,6 +277,14 @@ export default function RoomPage() {
         <p className="kicker text-vermilion">◈ Equipment Check Failed</p>
         <h1 className="mt-3 font-display text-5xl tracking-[0.04em] text-ink">{copy.title}</h1>
         <p className="mx-auto mt-3 max-w-md font-body text-ink-soft">{copy.hint}</p>
+        {copy.osPointer && (
+          <div className="hairline mx-auto mt-5 max-w-md border border-vermilion/40 bg-inset p-4 text-left">
+            <p className="kicker text-vermilion">◈ {OS_POINTER.heading}</p>
+            <p className="mt-2 font-body text-sm text-ink-soft">{OS_POINTER.intro}</p>
+            <p className="mt-2 font-body text-sm text-ink-soft">{OS_POINTER.macOS}</p>
+            <p className="font-body text-sm text-ink-soft">{OS_POINTER.windows}</p>
+          </div>
+        )}
         <button
           type="button"
           onClick={media.retry}
@@ -381,12 +403,17 @@ export default function RoomPage() {
   }
 
   // No-scroll rule (Deanna, 2026-07-25): every face visible at once on a
-  // phone. Height = 100dvh minus the fixed chrome above this block — sticky
+  // phone. Height = 100svh minus the fixed chrome above this block — sticky
   // NavBar (py-4 + 1.5rem logo row ≈ 3.5rem) + main's top padding (py-12 =
   // 3rem) ≈ 6.5rem. 7rem is the measured-good value, not a derived one: the
   // e2e geometry assertion at 390×844 caught the 6.5rem estimate landing the
   // wrapper 8px below the fold, and where those 8px come from was never
   // pinned down. The footer intentionally falls below the fold in-call.
+  // svh (small viewport height), not dvh: dvh grows/shrinks as the mobile
+  // address bar retracts on scroll, which made the tiles jump size mid-call
+  // (7/30 testers). svh is the stable chrome-visible height, so the grid
+  // holds one size regardless of scroll. At a fixed 390×844 (headless e2e,
+  // no retractable UA chrome) svh == dvh, so the pinned geometry is unchanged.
   const tileCount = 1 + Math.max(call.peers.length, 1);
   const gridClass =
     tileCount <= 2
@@ -394,7 +421,7 @@ export default function RoomPage() {
       : "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]";
 
   return (
-    <div className="flex h-[calc(100dvh-7rem)] min-h-[20rem] flex-col gap-3">
+    <div className="flex h-[calc(100svh-7rem)] min-h-[20rem] flex-col gap-3">
       {authed && (
         <PodcastPanel
           state={mergePanel(podcast.panel, exchange)}
@@ -424,6 +451,7 @@ export default function RoomPage() {
           mirrored
           isSelf
           camOff={!media.camOn}
+          micCut={!media.micOn}
           episodeFrame={podcastLocked}
         />
         {call.peers.map((p, i) => (

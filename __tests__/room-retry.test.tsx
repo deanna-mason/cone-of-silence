@@ -38,6 +38,12 @@ function denied(): Promise<MediaStream> {
   return Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
 }
 
+// An OS-level block can surface as NotReadableError (unavailable), not a
+// denial — the Equipment Malfunction card.
+function unreadable(): Promise<MediaStream> {
+  return Promise.reject(new DOMException("Could not start video source", "NotReadableError"));
+}
+
 class FakeMediaStream extends EventTarget {
   private tracks = [
     { kind: "audio", enabled: true, stop() {} },
@@ -75,6 +81,26 @@ test("the denied card points at OS-level privacy settings, not just the browser"
   await screen.findByRole("button", { name: /retry equipment check/i });
 
   expect(screen.getByText(/system settings/i)).toBeDefined();
+});
+
+test("the denied card's OS pointer is a distinct headed block naming both macOS and Windows paths", async () => {
+  getUserMedia.mockImplementation(denied);
+  render(<RoomPage />);
+  await screen.findByRole("button", { name: /retry equipment check/i });
+
+  expect(screen.getByText(/still locked out after allowing/i)).toBeDefined();
+  expect(screen.getByText(/macOS: System Settings → Privacy & Security/i)).toBeDefined();
+  expect(screen.getByText(/windows: settings/i)).toBeDefined();
+});
+
+test("the Equipment Malfunction (NotReadableError) card carries the same OS pointer", async () => {
+  getUserMedia.mockImplementation(unreadable);
+  render(<RoomPage />);
+  await screen.findByRole("button", { name: /retry equipment check/i });
+
+  expect(screen.getByText(/equipment malfunction/i)).toBeDefined();
+  expect(screen.getByText(/still locked out after allowing/i)).toBeDefined();
+  expect(screen.getByText(/windows: settings/i)).toBeDefined();
 });
 
 test("retry that is denied again lands back on the error card, never the green room", async () => {

@@ -779,11 +779,11 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
       "check 6 (deviation note 2): Resume Transmission correctly absent while the xfer channel is provably open — the recovered peerId is fresh, not the parked sender's bound peer",
     );
 
-    await pageA.getByRole("button", { name: "Stand Down" }).click();
+    await pageA.getByRole("button", { name: "Dismiss" }).click();
     await waitPod(pageA, "armed", 5000);
     await pageA.getByRole("button", { name: "Send Episode" }).waitFor({ timeout: 5000 });
     await pageA.getByRole("button", { name: "Send Episode" }).click();
-    check(true, "check 6: A stands down the parked sender, then sends again at the fresh peer");
+    check(true, "check 6: A dismisses the parked sender, then sends again at the fresh peer");
 
     await waitXfer(pageA, "done", 60000);
     await waitXfer(pageB, "done", 20000);
