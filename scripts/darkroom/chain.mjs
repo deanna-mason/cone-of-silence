@@ -23,6 +23,13 @@ import { DarkroomError } from "./errors.mjs";
 
 export const LOUDNORM_TARGET = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
+// The darkroom reassembles and enhances parts received from the remote peer,
+// so its inputs are semi-untrusted. ffmpeg auto-detects format from content and
+// some demuxers can open external file://,http:// resources — pin every input
+// pass to local file + pipe only. Mirrors server ffmpegArgs.ts (S6 F1) and
+// keeps the measure-pass argv parity with server.measureArgs intact.
+const INPUT_PROTOCOLS = ["-protocol_whitelist", "file,pipe"];
+
 /** Character-identical to server/src/studio/ffmpegArgs.ts chainFilter(). */
 export function chainFilter(model) {
   return [
@@ -79,7 +86,7 @@ function parseLoudnormStderr(stderr) {
  */
 export async function measureStem(runner, input, model, extraFilter) {
   const af = `${chainWithExtra(model, extraFilter)},${LOUDNORM_TARGET}:print_format=json`;
-  const argv = ["-hide_banner", "-nostdin", "-i", input, "-af", af, "-f", "null", "-"];
+  const argv = ["-hide_banner", "-nostdin", ...INPUT_PROTOCOLS, "-i", input, "-af", af, "-f", "null", "-"];
   const { stderr } = await runner.run(argv);
   return parseLoudnormStderr(stderr);
 }
@@ -96,7 +103,7 @@ export function applyStemArgs(input, model, m, out, extraFilter) {
     `${chainWithExtra(model, extraFilter)},${LOUDNORM_TARGET}:measured_I=${m.input_i}:measured_TP=${m.input_tp}` +
     `:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`;
   return [
-    "-hide_banner", "-nostdin", "-y", "-i", input, "-vn",
+    "-hide_banner", "-nostdin", "-y", ...INPUT_PROTOCOLS, "-i", input, "-vn",
     "-af", af,
     "-ar", "48000", "-c:a", "aac", "-b:a", "192k", out,
   ];
@@ -115,7 +122,7 @@ function mixFilterComplex(delayFilterA, delayFilterB, tail) {
 export function mixMeasureArgs(a, b, delayFilterA, delayFilterB) {
   const filterComplex = mixFilterComplex(delayFilterA, delayFilterB, `${LOUDNORM_TARGET}:print_format=json`);
   return [
-    "-hide_banner", "-nostdin", "-i", a, "-i", b,
+    "-hide_banner", "-nostdin", ...INPUT_PROTOCOLS, "-i", a, ...INPUT_PROTOCOLS, "-i", b,
     "-filter_complex", filterComplex,
     "-f", "null", "-",
   ];
@@ -133,7 +140,7 @@ export function mixApplyArgs(a, b, delayFilterA, delayFilterB, m, out) {
     `:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`;
   const filterComplex = mixFilterComplex(delayFilterA, delayFilterB, tail);
   return [
-    "-hide_banner", "-nostdin", "-y", "-i", a, "-i", b,
+    "-hide_banner", "-nostdin", "-y", ...INPUT_PROTOCOLS, "-i", a, ...INPUT_PROTOCOLS, "-i", b,
     "-filter_complex", filterComplex,
     "-ar", "48000", "-c:a", "aac", "-b:a", "192k", out,
   ];
