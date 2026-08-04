@@ -11,9 +11,8 @@
 // exists; hiding it locally after 5 minutes does not revoke it, and nothing
 // server-side enforces single use. See docs/drills/podcast-dress-rehearsal.md.
 //
-// TODO(Deanna): the approved mockup places this surface at /home. To avoid a
-// routing change right before the deadline it is mounted as the logged-in
-// landing on /studio (above the recordings library). Confirm /home vs /studio.
+// This surface is the logged-in landing on /studio (above the recordings
+// library) — Deanna's confirmed home for it (the mockup's /home was not adopted).
 
 import { useEffect, useRef, useState } from "react";
 import { buildInviteLink, type RoomKeys } from "@/lib/roomLink";
