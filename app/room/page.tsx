@@ -31,18 +31,32 @@ import { pinStudioRoom } from "@/lib/studioRoom";
 
 type Stage = "parsing" | "no-channel" | "green-room" | "in-room";
 
-const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string }> = {
+// A distinct second-line pointer for the failures an OS-level block can cause
+// (a tester allowed the browser and still hit repeat failures without finding
+// the old inline hint, 8/3). Some OS blocks surface as NotReadableError
+// ("unavailable"), not a denial — so it rides both cards.
+const OS_POINTER = {
+  heading: "Still Locked Out After Allowing?",
+  intro: "Your operating system may be blocking the browser itself.",
+  macOS: "macOS: System Settings → Privacy & Security → Camera and Microphone.",
+  windows: "Windows: Settings → Privacy & security → Camera / Microphone.",
+};
+
+const FAILURE_COPY: Record<MediaFailure, { title: string; hint: string; osPointer: boolean }> = {
   denied: {
     title: "Surveillance Equipment Compromised",
-    hint: "The browser was refused access to your camera and microphone. Re-arm permissions in the address bar (camera icon), then retry. Already allowed there? Your operating system may be blocking the browser itself — on macOS, check System Settings → Privacy & Security → Camera and Microphone.",
+    hint: "The browser was refused access to your camera and microphone. Re-arm permissions in the address bar (camera icon), then retry.",
+    osPointer: true,
   },
   "no-devices": {
     title: "No Equipment Detected",
     hint: "No camera or microphone was found on this machine. Connect your gear and retry.",
+    osPointer: false,
   },
   unavailable: {
     title: "Equipment Malfunction",
     hint: "Your camera or microphone could not be started — another application may be holding it. Close it and retry.",
+    osPointer: true,
   },
 };
 
@@ -263,6 +277,14 @@ export default function RoomPage() {
         <p className="kicker text-vermilion">◈ Equipment Check Failed</p>
         <h1 className="mt-3 font-display text-5xl tracking-[0.04em] text-ink">{copy.title}</h1>
         <p className="mx-auto mt-3 max-w-md font-body text-ink-soft">{copy.hint}</p>
+        {copy.osPointer && (
+          <div className="hairline mx-auto mt-5 max-w-md border border-vermilion/40 bg-inset p-4 text-left">
+            <p className="kicker text-vermilion">◈ {OS_POINTER.heading}</p>
+            <p className="mt-2 font-body text-sm text-ink-soft">{OS_POINTER.intro}</p>
+            <p className="mt-2 font-body text-sm text-ink-soft">{OS_POINTER.macOS}</p>
+            <p className="font-body text-sm text-ink-soft">{OS_POINTER.windows}</p>
+          </div>
+        )}
         <button
           type="button"
           onClick={media.retry}
