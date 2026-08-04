@@ -908,7 +908,11 @@ describe("JoinProof", () => {
 // this mix: they yield to the microtask queue between each virtual tick, so
 // a real pending crypto.subtle promise still gets to resolve.
 describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
-  beforeEach(() => vi.useFakeTimers());
+  // Explicit toFake list: setImmediate must stay REAL so waitForFake below can
+  // yield a genuine event-loop turn for crypto.subtle's thread-pool completions
+  // (vitest's default fakes setImmediate too — that starved slow CI runners).
+  beforeEach(() =>
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] }));
   afterEach(() => vi.useRealTimers());
 
   class FakeLink implements MeshLink {
@@ -1121,11 +1125,15 @@ describe("join-proof gating (Task 5) — the Mesh/session wiring", () => {
   }
 
   /** Advances the fake clock in small async-aware steps until `predicate`
-   *  holds, yielding to the microtask queue each step so a real in-flight
-   *  crypto.subtle promise gets a chance to settle (see the describe header). */
-  async function waitForFake(predicate: () => boolean, maxTicks = 200): Promise<void> {
+   *  holds. Microtask yields alone are NOT enough for the real crypto.subtle
+   *  HMAC underneath: its completion lands as a thread-pool macrotask, which
+   *  on a loaded CI runner can arrive after any fixed number of microtask
+   *  drains (real CI-only flake, run 30948081135). Awaiting the deliberately
+   *  unfaked setImmediate forces a genuine event-loop turn per tick. */
+  async function waitForFake(predicate: () => boolean, maxTicks = 1000): Promise<void> {
     for (let i = 0; i < maxTicks; i++) {
       if (predicate()) return;
+      await new Promise<void>((r) => setImmediate(r));
       await vi.advanceTimersByTimeAsync(0);
     }
     throw new Error("waitForFake: condition not met within maxTicks");

@@ -228,9 +228,13 @@ function wireHonestPeer(proofKey: CryptoKey, cosChannel: FakeChannel): void {
  *  underneath, same reasoning as join-proof.test.ts's waitForFake) until
  *  `predicate` holds, wrapped in `act` so any React state updates the real
  *  CallSession/hook makes along the way are flushed and not warned about. */
-async function waitFor(predicate: () => boolean, maxTicks = 200): Promise<void> {
+async function waitFor(predicate: () => boolean, maxTicks = 1000): Promise<void> {
   for (let i = 0; i < maxTicks; i++) {
     if (predicate()) return;
+    // Real event-loop turn first (setImmediate is unfaked in toFake below) so
+    // crypto.subtle thread-pool completions can land on loaded CI runners —
+    // microtask drains alone starved them (see session/join-proof waiters).
+    await new Promise<void>((r) => setImmediate(r));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
