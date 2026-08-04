@@ -244,7 +244,7 @@ export default function PodcastPanel({
             onClick={onDismissFault}
             className="kicker shrink-0 border border-cream/50 px-4 py-2 text-cream transition hover:bg-cream/10"
           >
-            Stand Down
+            Acknowledge
           </button>
         </div>
       );
@@ -309,7 +309,7 @@ export default function PodcastPanel({
             </button>
           )}
           <button type="button" onClick={onDismissXfer} className={GHOST_BUTTON}>
-            Stand Down
+            Dismiss
           </button>
         </div>
       );
@@ -343,7 +343,7 @@ export default function PodcastPanel({
             onClick={onDismissXfer}
             className="kicker shrink-0 border border-cream/50 px-4 py-2 text-cream transition hover:bg-cream/10"
           >
-            Stand Down
+            Acknowledge
           </button>
         </div>
       );

@@ -124,7 +124,7 @@ describe("PodcastPanel", () => {
     expect(screen.getByText("You 0.0MB · Partner 0.0MB")).toBeDefined();
   });
 
-  test("fault — lists a local AND a remote fault, Stand Down fires onDismissFault", () => {
+  test("fault — lists a local AND a remote fault, Acknowledge fires onDismissFault", () => {
     const cb = renderState({
       kind: "fault",
       partnerCodename: "Falcon",
@@ -138,7 +138,7 @@ describe("PodcastPanel", () => {
     expect(screen.getByText("◈ Tape Fault")).toBeDefined();
     expect(screen.getByText("YOUR CAMERA DROPPED")).toBeDefined();
     expect(screen.getByText("Falcon: WENT SILENT")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Stand Down" }));
+    fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
     expect(cb.onDismissFault).toHaveBeenCalledTimes(1);
   });
 
@@ -238,7 +238,7 @@ describe("PodcastPanel", () => {
     expect(screen.getByText(/video\.part000/)).toBeDefined();
   });
 
-  test("xfer-interrupted (send, canResend) — Resume Transmission fires onResendEpisode; Stand Down fires onDismissXfer", () => {
+  test("xfer-interrupted (send, canResend) — Resume Transmission fires onResendEpisode; Dismiss fires onDismissXfer", () => {
     const cb = renderState({ kind: "xfer-interrupted", direction: "send", canResend: true });
     expect(screen.getByText("◈ Transmission Interrupted")).toBeDefined();
     expect(
@@ -246,7 +246,7 @@ describe("PodcastPanel", () => {
     ).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Resume Transmission" }));
     expect(cb.onResendEpisode).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Stand Down" }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(cb.onDismissXfer).toHaveBeenCalledTimes(1);
   });
 
@@ -258,7 +258,7 @@ describe("PodcastPanel", () => {
   test("xfer-interrupted (receive) — never offers Resume Transmission even if canResend were true", () => {
     renderState({ kind: "xfer-interrupted", direction: "receive", canResend: true });
     expect(screen.queryByRole("button", { name: "Resume Transmission" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Stand Down" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDefined();
   });
 
   test("xfer-done (send) — Episode Delivered, Dismiss fires onDismissXfer", () => {
@@ -275,7 +275,7 @@ describe("PodcastPanel", () => {
     expect(screen.getByText("0.1 MB filed.")).toBeDefined();
   });
 
-  test("xfer-fault — hash-mismatch reason gets the damaged-reel copy; alert role; Stand Down fires onDismissXfer", () => {
+  test("xfer-fault — hash-mismatch reason gets the damaged-reel copy; alert role; Acknowledge fires onDismissXfer", () => {
     const cb = renderState({ kind: "xfer-fault", reason: "hash-mismatch:audio.part000" });
     const banner = screen.getByRole("alert");
     expect(banner).toBeDefined();
@@ -283,7 +283,7 @@ describe("PodcastPanel", () => {
     expect(
       screen.getByText("A reel arrived damaged and was burned. Resume to send it again."),
     ).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Stand Down" }));
+    fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
     expect(cb.onDismissXfer).toHaveBeenCalledTimes(1);
   });
 
