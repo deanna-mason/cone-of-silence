@@ -4,6 +4,9 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { getSession, type StoredSession } from "@/lib/authApi";
 import { listRecordings, StudioApiError, uploadRecording, type RecordingDto } from "@/lib/studioApi";
+import { type RoomKeys } from "@/lib/roomLink";
+import { readStudioRoom } from "@/lib/studioRoom";
+import StandingOrders from "@/components/StandingOrders";
 import RecordingRow from "@/components/RecordingRow";
 
 const ACCEPT = ".mp3,.m4a,.wav,.aac,.flac,.ogg,.webm,.mp4,.mov,.mkv";
@@ -11,6 +14,10 @@ const ACCEPT = ".mp3,.m4a,.wav,.aac,.flac,.ogg,.webm,.mp4,.mov,.mkv";
 export default function StudioPage() {
   const [session, setSession] = useState<StoredSession | null>(null);
   const [ready, setReady] = useState(false);
+
+  // The pinned standing room (flow B). Read in an effect so the server render
+  // never touches localStorage; null until mount, and when nothing is pinned.
+  const [pinned, setPinned] = useState<RoomKeys | null>(null);
 
   const [recordings, setRecordings] = useState<RecordingDto[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -23,6 +30,7 @@ export default function StudioPage() {
 
   useEffect(() => {
     setSession(getSession());
+    setPinned(readStudioRoom());
     setReady(true);
   }, []);
 
@@ -106,6 +114,8 @@ export default function StudioPage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-8">
+      {pinned && <StandingOrders room={pinned} />}
+
       <section className="hairline border bg-inset p-6">
         <p className="kicker text-sienna">Development Desk</p>
         <h1 className="mt-2 font-display text-4xl tracking-[0.04em] text-ink">Studio</h1>
