@@ -27,6 +27,7 @@ import {
   type RoomKeys,
 } from "@/lib/roomLink";
 import { type MediaFailure } from "@/lib/webrtc/media";
+import { pinStudioRoom } from "@/lib/studioRoom";
 
 type Stage = "parsing" | "no-channel" | "green-room" | "in-room";
 
@@ -103,6 +104,7 @@ export default function RoomPage() {
   const [stage, setStage] = useState<Stage>("parsing");
   const [keys, setKeys] = useState<RoomKeys | null>(null);
   const [copied, setCopied] = useState(false);
+  const [studioPinned, setStudioPinned] = useState(false);
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys, media.stream, stage === "in-room", forceRelay);
@@ -217,6 +219,14 @@ export default function RoomPage() {
     router.push("/");
   }
 
+  // Pin this room as the host's standing Studio room (flow B). The E2EE secret
+  // only ever moves from localStorage/fragment into localStorage — no network.
+  function pinStudio() {
+    if (!keys) return;
+    pinStudioRoom(keys);
+    setStudioPinned(true);
+  }
+
   if (stage === "parsing") {
     return <p className="kicker text-ink-soft">Decrypting channel…</p>;
   }
@@ -327,6 +337,15 @@ export default function RoomPage() {
             {media.camOn ? "Lens Open" : "Lens Capped"}
           </button>
         </div>
+        {authed && (
+          <button
+            type="button"
+            onClick={pinStudio}
+            className="kicker w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
+          >
+            {studioPinned ? "PINNED TO YOUR STUDIO" : "Pin as my Studio"}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setStage("in-room")}

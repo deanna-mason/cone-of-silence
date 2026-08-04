@@ -10,11 +10,21 @@ import {
   signup,
   type StoredSession,
 } from "@/lib/authApi";
+import { parseInviteFragment, pinStudioRoom, type InviteFragment } from "@/lib/studioRoom";
+import { buildInviteLink } from "@/lib/roomLink";
 
 export default function AccountPage() {
   const [session, setSession] = useState<StoredSession | null>(null);
   const [ready, setReady] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
+
+  // First-run "Seal Broken" screen: a combined invite carries the signup token
+  // + room key. Claiming registers, pins the studio, and lands in the room.
+  const [invite, setInvite] = useState<InviteFragment | null>(null);
+  const [claimCodename, setClaimCodename] = useState("");
+  const [claimPassphrase, setClaimPassphrase] = useState("");
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimError, setClaimError] = useState<string | null>(null);
 
   // Signup card state
   const [signupToken, setSignupToken] = useState("");
@@ -33,6 +43,34 @@ export default function AccountPage() {
     setSession(getSession());
     setReady(true);
   }, []);
+
+  // Combined first-run invite: `#invite=<token>&r=<id>&s=<secret>` opens the
+  // Seal Broken screen. The fragment is scrubbed via replaceState so the E2EE
+  // secret never lingers in history — same idiom as the room page's arrival scrub.
+  useEffect(() => {
+    const parsed = parseInviteFragment(window.location.hash);
+    if (!parsed) return;
+    setInvite(parsed);
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+
+  // Claim your Studio — one act: register with the carried token, pin the
+  // studio, then land the new host inside the room via a full page load (the
+  // hash-navigation rule). On success the page navigates away, so busy stays set.
+  async function handleClaim(e: React.FormEvent) {
+    e.preventDefault();
+    if (!invite || claimBusy) return;
+    setClaimError(null);
+    setClaimBusy(true);
+    try {
+      await signup(invite.signupToken, claimCodename.trim(), claimPassphrase);
+      pinStudioRoom(invite.room);
+      window.location.assign(buildInviteLink(invite.room, window.location.origin));
+    } catch (err) {
+      setClaimError(err instanceof AuthApiError ? err.message : "channel unavailable");
+      setClaimBusy(false);
+    }
+  }
 
   async function handleSignup(e: React.FormEvent) {
     e.preventDefault();
@@ -82,6 +120,69 @@ export default function AccountPage() {
   }
 
   if (!ready) return null;
+
+  // First run, from the one invite link: a sealed, single-use transfer. Breaking
+  // the seal sets the new host's credentials and seats them in the studio.
+  if (invite && !session) {
+    return (
+      <section className="hairline mx-auto max-w-lg border bg-inset p-6">
+        <p className="kicker text-sienna">◈ Sealed Transfer — Single Use</p>
+        <h1 className="mt-2 font-display text-4xl tracking-[0.04em] text-ink">Seal Broken</h1>
+        <p className="mt-4 font-display text-2xl tracking-[0.03em] text-ink">
+          You&rsquo;ve been issued a studio
+        </p>
+        <p className="mt-3 font-body text-ink-soft">
+          The operator has posted you to a standing studio. Set your credentials — this link
+          seats you there the moment you&rsquo;re cleared.
+        </p>
+        <form className="mt-6 space-y-5" onSubmit={handleClaim}>
+          <div>
+            <label htmlFor="claim-username" className="kicker block text-ink-soft">
+              Codename
+            </label>
+            <input
+              id="claim-username"
+              value={claimCodename}
+              onChange={(e) => setClaimCodename(e.target.value)}
+              className="mt-2 w-full border-b-2 border-ink-faint/40 bg-transparent pb-2 font-type text-base tracking-wide text-ink focus:border-brass focus:outline-none"
+            />
+          </div>
+          <div>
+            <label htmlFor="claim-password" className="kicker block text-ink-soft">
+              Passphrase
+            </label>
+            <input
+              id="claim-password"
+              type="password"
+              value={claimPassphrase}
+              onChange={(e) => setClaimPassphrase(e.target.value)}
+              className="mt-2 w-full border-b-2 border-ink-faint/40 bg-transparent pb-2 font-type text-base tracking-wide text-ink focus:border-brass focus:outline-none"
+            />
+          </div>
+          <p className="font-body text-sm italic text-ink-soft">
+            Codename: 3–20 characters, a–z 0–9 _. Passphrase: 8+ characters. There is no
+            recovery — a lost passphrase can only be reset by the operator.
+          </p>
+          {claimError && (
+            <p role="alert" className="kicker text-vermilion">
+              ✕ {claimError}
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={claimBusy || !claimCodename.trim() || !claimPassphrase}
+            className="cta-glow group flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span>{claimBusy ? "CLEARING…" : "Claim your Studio"}</span>
+            <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
+              ➔
+            </span>
+          </button>
+        </form>
+        <p className="kicker mt-4 text-ink-soft">Token accepted · burns on use</p>
+      </section>
+    );
+  }
 
   if (session) {
     return (
