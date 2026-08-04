@@ -51,9 +51,15 @@ export class SupabaseAccountStore implements AccountStore {
       .from("sessions")
       .select("user_id, expires_at, users(username)")
       .eq("token_hash", tokenHash)
+      // Expiry is enforced in the query so an expired session can never leave
+      // the database, even if this process's clock is wrong or a later refactor
+      // drops the JS check below.
+      .gt("expires_at", new Date().toISOString())
       .maybeSingle<{ user_id: string; expires_at: string; users: { username: string } }>();
     if (error) this.fail("getSession", error.message);
     if (!data) return null;
+    // Belt and suspenders: still re-checked here, since this is the invariant
+    // the AccountStore contract (and the in-memory fake) is written against.
     if (Date.parse(data.expires_at) <= Date.now()) {
       await this.deleteSession(tokenHash); // lazy cleanup
       return null;

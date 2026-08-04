@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -150,9 +150,42 @@ describe("admin CRUD", () => {
       restore: async () => { throw new StoreUnavailableError("db down"); },
       purge: async () => { throw new StoreUnavailableError("db down"); },
     };
-    const { app } = await setup(broken);
-    const res = await request(app).post("/admin/tokens").set(auth).send({ label: "x" });
-    expect(res.status).toBe(503);
-    expect(res.body).toEqual({ error: "channel unavailable" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app } = await setup(broken);
+      const res = await request(app).post("/admin/tokens").set(auth).send({ label: "x" });
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: "channel unavailable" });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("logs the cause of a store failure instead of swallowing it behind the 503", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app, store } = await setup();
+      vi.spyOn(store, "list").mockRejectedValueOnce(new Error("connection reset"));
+
+      const res = await request(app).get("/admin/tokens").set(auth);
+
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: "channel unavailable" });
+      expect(errorSpy).toHaveBeenCalled(); // logs the cause, without pinning the tag/signature
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("a missing grant still 404s quietly — not every failure is an outage", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app } = await setup();
+      const res = await request(app).delete("/admin/tokens/nope").set(auth);
+      expect(res.status).toBe(404);
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

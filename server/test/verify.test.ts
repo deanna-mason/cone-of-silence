@@ -64,6 +64,38 @@ describe("POST /tokens/verify", () => {
     expect(missing.body).toEqual({ valid: false, reason: "invalid" });
   });
 
+  it("locks out repeated failed probes from one IP after 5 tries, mirroring login's lockout", async () => {
+    // Unauthenticated credential oracle: without a limiter, the 22-char token
+    // space can be hammered from one IP at line rate. Same thresholds and 429
+    // body as /auth/login.
+    const { app } = await setup();
+    const bogus = "a".repeat(22);
+    for (let i = 0; i < 5; i++) {
+      const res = await request(app).post("/tokens/verify").send({ token: bogus });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ valid: false, reason: "invalid" });
+    }
+    const locked = await request(app).post("/tokens/verify").send({ token: bogus });
+    expect(locked.status).toBe(429);
+    expect(locked.body).toEqual({ error: "too many attempts" });
+  });
+
+  it("a successful verify clears the failure count", async () => {
+    const { app, store } = await setup();
+    const { token } = await store.mint("dave");
+    const bogus = "a".repeat(22);
+    for (let i = 0; i < 4; i++) {
+      await request(app).post("/tokens/verify").send({ token: bogus });
+    }
+    const good = await request(app).post("/tokens/verify").send({ token });
+    expect(good.status).toBe(200);
+    // Counter reset: four more failures still sit below the threshold.
+    for (let i = 0; i < 4; i++) {
+      const res = await request(app).post("/tokens/verify").send({ token: bogus });
+      expect(res.status).toBe(200);
+    }
+  });
+
   it("store outage → 503 channel unavailable (fail closed)", async () => {
     const broken: TokenStore = {
       verify: async () => { throw new StoreUnavailableError("db down"); },
