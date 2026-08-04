@@ -8,6 +8,7 @@ import VideoTile from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
+import InCallDeviceBar from "@/components/InCallDeviceBar";
 import PodcastPanel from "@/components/PodcastPanel";
 import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
@@ -421,6 +422,16 @@ export default function RoomPage() {
         ))}
         {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}
       </div>
+      <InCallDeviceBar
+        mics={media.devices.mics}
+        cameras={media.devices.cameras}
+        choice={media.choice}
+        hasCamera={media.hasCamera}
+        locked={podcastLocked}
+        onSelectMic={(id) => void media.switchDevice("audio", id)}
+        onSelectCamera={(id) => void media.switchDevice("video", id)}
+        onFlip={() => void media.flipCamera()}
+      />
       <CallControls
         micOn={media.micOn}
         camOn={media.camOn}

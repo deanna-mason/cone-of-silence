@@ -5,6 +5,11 @@
 export interface MediaDeviceChoice {
   audioDeviceId?: string;
   videoDeviceId?: string;
+  // Phone front/back flip: honored only when no explicit videoDeviceId is set
+  // (a deviceId names one physical camera, so the two never combine). Requested
+  // as *ideal* — a device that can't offer the asked-for facing degrades to
+  // whatever it has rather than hard-failing, same philosophy as VIDEO_QUALITY.
+  facingMode?: "user" | "environment";
 }
 
 export interface DeviceLists {
@@ -35,11 +40,14 @@ const VIDEO_QUALITY: MediaTrackConstraints = {
 };
 
 function toConstraints(choice: MediaDeviceChoice): MediaStreamConstraints {
+  const video: MediaTrackConstraints = choice.videoDeviceId
+    ? { deviceId: { exact: choice.videoDeviceId }, ...VIDEO_QUALITY }
+    : choice.facingMode
+      ? { facingMode: { ideal: choice.facingMode }, ...VIDEO_QUALITY }
+      : { ...VIDEO_QUALITY };
   return {
     audio: choice.audioDeviceId ? { deviceId: { exact: choice.audioDeviceId } } : true,
-    video: choice.videoDeviceId
-      ? { deviceId: { exact: choice.videoDeviceId }, ...VIDEO_QUALITY }
-      : { ...VIDEO_QUALITY },
+    video,
   };
 }
 
@@ -132,6 +140,7 @@ export function readStashedDeviceChoice(): MediaDeviceChoice {
     return {
       audioDeviceId: typeof val.audioDeviceId === "string" ? val.audioDeviceId : undefined,
       videoDeviceId: typeof val.videoDeviceId === "string" ? val.videoDeviceId : undefined,
+      facingMode: val.facingMode === "user" || val.facingMode === "environment" ? val.facingMode : undefined,
     };
   } catch {
     return {};

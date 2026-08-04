@@ -64,3 +64,24 @@ test("the mic-only fallback keeps video disabled", async () => {
   expect(getUserMedia).toHaveBeenCalledTimes(2);
   expect(getUserMedia.mock.calls[1][0].video).toBe(false);
 });
+
+test("a facingMode choice requests it as ideal alongside ideal quality (phone flip)", async () => {
+  getUserMedia.mockResolvedValue(fakeStream);
+
+  await getLocalStream({ facingMode: "environment" });
+
+  const video = getUserMedia.mock.calls[0][0].video as MediaTrackConstraints;
+  expect(video).toMatchObject({ facingMode: { ideal: "environment" }, ...IDEAL_QUALITY });
+  // ideal, never exact — a facing the device can't offer degrades, never hard-fails.
+  expect(video).not.toHaveProperty("deviceId");
+});
+
+test("an explicit camera deviceId wins over facingMode (no conflicting constraints)", async () => {
+  getUserMedia.mockResolvedValue(fakeStream);
+
+  await getLocalStream({ videoDeviceId: "cam-1", facingMode: "user" });
+
+  const video = getUserMedia.mock.calls[0][0].video as MediaTrackConstraints;
+  expect(video).toMatchObject({ deviceId: { exact: "cam-1" }, ...IDEAL_QUALITY });
+  expect(video).not.toHaveProperty("facingMode");
+});
