@@ -38,11 +38,39 @@ survives in-call recovery without a reload. So the mic was cut by a click
 (his own, possibly in the green room) and nobody noticed the state.
 Action → Phase 6: make your-own-mic-is-cut much louder in-call.
 
-**F3 — operator heard a Mic Cut participant speak while sitting next to
-him.** With `track.enabled = false` WebRTC transmits silence; no remote
-seat reported hearing him. Almost certainly room acoustics from the
-co-located seats, not a transmit leak. No action; re-test with separated
-seats if it ever recurs.
+**F3 — a Mic Cut participant's voice came through the operator's machine
+(both co-located seats heard it from the speakers — NOT room acoustics;
+corrected from this report's first draft).** Full transmit-path audit
+performed same night; the app cannot send audio from a cut mic:
+
+- `toggleMic` disables the audio track objects on the live stream
+  (`hooks/useLocalMedia.ts:116-122`); every `PeerLink` sends those same
+  objects (`pc.addTrack(track, opts.localStream)`, `lib/webrtc/peer.ts:152`)
+  — no `clone()` anywhere in the webrtc path.
+- A disabled track makes the browser's sender emit silence at the engine
+  level, upstream of the E2EE transform (which only sees encoded frames).
+- `switchDevice` stops old tracks (stopped = silent) and new tracks reach
+  every link via `session.ts:514-515` → `mesh.replaceStreamAll`; links
+  built later (including 4C rebuilds) read the session's current stream
+  via the late-bound factory (`lib/webrtc/mesh.ts:310-311`).
+- The only second mic capture in the codebase (podcast `recordGraph`) is
+  login-gated, exactly-2, local-only — not active in the drill.
+
+Remaining hypothesis: his voice entered through the OTHER live mic in the
+room — the operator's, one seat away — reached the remote seats, was
+played on an open-speaker seat and re-captured by its mic (echo
+cancellation is per-machine and imperfect), and returned to everyone,
+including the operator's speakers. His mic being cut is a red herring on
+this path; the loop never uses it.
+
+**Discriminator (5 min, 3 seats, two co-located + one remote with
+speakers on):** co-located seat A cuts mic and speaks → voice heard
+through machines. Then co-located seat B (operator) cuts THEIR mic too →
+if the voice vanishes, the echo path is proven and the app is exonerated;
+if it persists with both room mics cut, it IS a transmit leak — stop and
+capture (webrtc-internals dump on the speaking seat, audio levels on
+`outbound-rtp`). If echo is confirmed: consider a drill/call note that
+co-located seats need headphones; no code change indicated.
 
 **F4 — audio-on-join behaved.** Every join on every device was audible
 immediately; the "◈ Audio Blocked by Browser" fallback never appeared for
