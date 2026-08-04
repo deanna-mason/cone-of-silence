@@ -964,4 +964,13 @@ describe("VideoTile episode framing", () => {
     expect(video.className).toContain("object-cover");
     expect(video.className).not.toContain("object-contain");
   });
+
+  it("keeps the same <video> node when episodeFrame toggles mid-stream", () => {
+    const { container, rerender } = render(<VideoTile stream={stream} label="You" />);
+    const before = container.querySelector("video")!;
+    rerender(<VideoTile stream={stream} label="You" episodeFrame />);
+    expect(container.querySelector("video")).toBe(before);
+    rerender(<VideoTile stream={stream} label="You" />);
+    expect(container.querySelector("video")).toBe(before);
+  });
 });
