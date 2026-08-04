@@ -325,3 +325,45 @@ describe("darkroom tone: findMarksWindowed", () => {
     ).toThrowError(expect.objectContaining({ code: "tone-end-missing" }));
   });
 });
+
+describe("darkroom tone: conversation-level background noise (take-20260804-0106-4f4c regression)", () => {
+  // The real 8/3 take with the professor: both end-mark beeps on tape at
+  // full energy and relatively quiet DURING the beeps, but loud speech/room
+  // audio immediately AROUND them (they were mid-conversation at roll-stop).
+  // An analysis frame equal to the 120ms beep has at most one hop fully
+  // inside the beep — and only if the decode's sample grid happens to align;
+  // every other hop straddles a beep edge, drags adjacent speech into its
+  // floor, and fails the 6x band test. The pipeline's own tail decode found
+  // beep 1 and missed beep 2 entirely -> tone-one-beep, while a probe decode
+  // of the same file at a different -ss found both. Detection must not hinge
+  // on decode alignment: sweep the mark placement across the full 10ms hop
+  // grid and require both marks found at every alignment.
+  it("finds both marks at every sub-hop alignment with speech hard against the beep edges", () => {
+    const mark = synthesizeMark();
+    const beepLen = Math.round((BEEP_MS / 1000) * SAMPLE_RATE);
+    const gapLen = Math.round((BEEP_GAP_MS / 1000) * SAMPLE_RATE);
+    const burstAmp = 1.0; // "speech": loud broadband, right up to the beep boundary
+    const burstLen = Math.round(0.5 * SAMPLE_RATE);
+    for (let shiftMs = 0; shiftMs < 10; shiftMs += 1) {
+      const shiftS = shiftMs / 1000;
+      const startS = 0.6 + shiftS;
+      const endS = 39.0 + shiftS;
+      const pcm = new Float32Array(Math.round(41 * SAMPLE_RATE));
+      addNoise(pcm, 0.1, NOISE_SEED + shiftMs); // quiet baseline everywhere, beeps included
+      const burst = (from: number, len: number) => {
+        const next = makeLcg(NOISE_SEED ^ from);
+        for (let i = 0; i < len && from + i < pcm.length; i++) pcm[from + i] += (next() * 2 - 1) * burstAmp;
+      };
+      for (const markS of [startS, endS]) {
+        const at = Math.round(markS * SAMPLE_RATE);
+        for (let i = 0; i < mark.length && at + i < pcm.length; i++) pcm[at + i] += mark[i];
+        burst(at - burstLen, burstLen); // speech ending exactly at beep 1's onset
+        burst(at + beepLen, gapLen); // speech filling the 180ms inter-beep gap
+        burst(at + mark.length, burstLen); // speech resuming exactly at beep 2's end
+      }
+      const marks = findMarks(pcm);
+      expect(Math.abs(marks.start - Math.round(startS * SAMPLE_RATE))).toBeLessThanOrEqual(96); // ±2ms
+      expect(Math.abs(marks.end - Math.round(endS * SAMPLE_RATE))).toBeLessThanOrEqual(96);
+    }
+  }, 60000);
+});

@@ -26,7 +26,17 @@ export const SEARCH_WINDOW_S = 20;
 const BEEP_S = BEEP_MS / 1000;
 const GAP_S = BEEP_GAP_MS / 1000;
 
-const FRAME_S = 0.12; // 120ms Goertzel analysis frame
+// 60ms Goertzel frame — deliberately HALF the 120ms beep, not equal to it.
+// At 120ms only a perfectly-aligned hop sits fully inside a beep; every
+// other hop's floor is contaminated by the neighboring room audio, so under
+// conversation-level background (the real 8/3 take with continuous speech)
+// each beep had at most ONE passing hop — or zero, depending on how the
+// decoder's sample grid landed. Half-length frames give ~6 fully-inside
+// hops per beep whose floor is beep-only, making candidacy independent of
+// decode alignment. Frequency resolution stays ample (bandwidth ~17Hz vs
+// the 584Hz band split), and the matched-filter refine (±60ms) absorbs the
+// coarser onset estimate.
+const FRAME_S = 0.06;
 const HOP_S = 0.01; // 10ms hop
 const FRAME_LEN = Math.round(FRAME_S * SAMPLE_RATE);
 const HOP_LEN = Math.round(HOP_S * SAMPLE_RATE);
