@@ -109,13 +109,56 @@ describe("JobRunner", () => {
 
     // First kick() hits the rejection — drain returns quietly
     runner.kick();
-    await vi.waitFor(async () => expect((await store.get(rec.id))?.status).toBe("queued"));
-    // Wait for the first drain's finally handler to set running = false
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Barrier, not a sleep: setImmediate runs on the macrotask queue, which Node
+    // reaches only once every pending microtask — including the first drain's
+    // finally handler, which sets running = false — has already run.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect((await store.get(rec.id))?.status).toBe("queued");
+    expect(calls).toHaveLength(0);
 
     // Second kick() retries — should process normally
     runner.kick();
     await vi.waitFor(async () => expect((await store.get(rec.id))?.status).toBe("done"));
+    expect(calls).toHaveLength(3); // measure, apply, waveform
+  });
+
+  it("does not lose a kick() that lands after the drain's last claim came up empty", async () => {
+    // The missed-wakeup window: drain()'s final claimNextQueued() has already
+    // decided there is nothing left, but `running` is still true — so a kick()
+    // arriving now used to be dropped and the just-queued job sat until the
+    // next upload. The hook fires inside that window, deterministically.
+    class WindowStore extends FakeRecordingStore {
+      onEmptyClaim?: () => Promise<void>;
+      async claimNextQueued() {
+        const job = await super.claimNextQueued();
+        if (!job && this.onEmptyClaim) {
+          const hook = this.onEmptyClaim;
+          this.onEmptyClaim = undefined;
+          await hook();
+        }
+        return job;
+      }
+    }
+
+    const calls: string[][] = [];
+    const runFfmpeg = async (args: string[]) => {
+      calls.push(args);
+      const isMeasure = args.join(" ").includes("print_format=json");
+      return { code: 0, stderr: isMeasure ? MEASURE_JSON : "" };
+    };
+
+    const store = new WindowStore();
+    const runner = new JobRunner(store, { uploadDir: "/up", rnnoiseModel: "/m/std.rnnn", runFfmpeg });
+
+    let late: { id: string } | undefined;
+    store.onEmptyClaim = async () => {
+      late = await store.create("u1", "late.mp3", ".mp3");
+      runner.kick(); // lands while `running` is still true
+    };
+
+    runner.kick(); // queue is empty — this drain claims nothing
+    await vi.waitFor(() => expect(late).toBeDefined());
+    await vi.waitFor(async () => expect((await store.get(late!.id))?.status).toBe("done"));
     expect(calls).toHaveLength(3); // measure, apply, waveform
   });
 

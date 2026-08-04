@@ -38,6 +38,10 @@ export interface RunnerOptions {
 
 export class JobRunner {
   private running = false;
+  /** A kick() that arrived while a drain was in flight. The drain may already
+   * have made its final claimNextQueued() call by then, so the new job would be
+   * missed; re-checking this flag when the drain settles closes that window. */
+  private pendingKick = false;
   private readonly runFfmpeg: FfmpegRunner;
 
   constructor(
@@ -48,10 +52,15 @@ export class JobRunner {
   }
 
   kick(): void {
-    if (this.running) return;
+    if (this.running) {
+      this.pendingKick = true;
+      return;
+    }
     this.running = true;
+    this.pendingKick = false;
     void this.drain().finally(() => {
       this.running = false;
+      if (this.pendingKick) this.kick();
     });
   }
 

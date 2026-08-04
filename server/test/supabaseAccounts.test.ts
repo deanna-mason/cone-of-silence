@@ -15,13 +15,20 @@ if (url && key) {
     // Node 20 lacks native WebSocket; supabase-js's constructor requires one even though this store never uses realtime. Remove when the runtime is Node >= 22.
     realtime: { transport: ws as WebSocketLikeConstructor },
   });
+  // Every username the contract creates carries this marker, so cleanup can be
+  // scoped to rows these tests own — a blanket delete would wipe whatever
+  // project the creds happen to point at. No SQL LIKE wildcards ("%", "_") in
+  // it, or the pattern below would widen past the test rows.
+  const TEST_PREFIX = "costest";
+
   describe("SupabaseAccountStore (contract)", () => {
     accountStoreContract(async () => {
-      // isolate runs: wipe rows from prior test runs (service role bypasses RLS).
+      // isolate runs: wipe only this suite's rows, including any left by a
+      // crashed prior run (service role bypasses RLS).
       // sessions cascade-delete via users' FK, so clearing users is sufficient.
-      await client.from("users").delete().neq("username", "");
+      await client.from("users").delete().like("username", `${TEST_PREFIX}%`);
       return new SupabaseAccountStore(client);
-    });
+    }, TEST_PREFIX);
   });
 } else {
   describe("SupabaseAccountStore (skipped)", () => {

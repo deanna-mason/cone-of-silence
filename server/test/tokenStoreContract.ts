@@ -2,17 +2,21 @@ import { describe, expect, it } from "vitest";
 import type { TokenStore } from "../src/tokens/types.js";
 import { GrantNotFoundError } from "../src/tokens/types.js";
 
-/** Every TokenStore implementation must pass this exact suite. */
+/** Every TokenStore implementation must pass this exact suite.
+ *
+ * `prefix` is prepended to every label the suite mints so a store backed by a
+ * shared database can scope its own cleanup to rows this suite owns. */
 export function runTokenStoreContract(
   name: string,
   makeStore: () => Promise<TokenStore>,
+  prefix = "",
 ) {
   describe(`TokenStore contract: ${name}`, () => {
     it("mints a grant and returns the plaintext token once", async () => {
       const store = await makeStore();
-      const { token, grant } = await store.mint("alice");
+      const { token, grant } = await store.mint(`${prefix}alice`);
       expect(token).toMatch(/^[A-Za-z0-9_-]{22}$/);
-      expect(grant.label).toBe("alice");
+      expect(grant.label).toBe(`${prefix}alice`);
       expect(grant.revokedAt).toBeNull();
       expect(grant.lastUsedAt).toBeNull();
       const listed = await store.list();
@@ -23,7 +27,7 @@ export function runTokenStoreContract(
 
     it("verifies a minted token and touches lastUsedAt", async () => {
       const store = await makeStore();
-      const { token, grant } = await store.mint("bob");
+      const { token, grant } = await store.mint(`${prefix}bob`);
       const result = await store.verify(token);
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.grant.id).toBe(grant.id);
@@ -33,7 +37,7 @@ export function runTokenStoreContract(
 
     it("verify with touch:false does not update lastUsedAt", async () => {
       const store = await makeStore();
-      const { token, grant } = await store.mint("carol");
+      const { token, grant } = await store.mint(`${prefix}carol`);
       const result = await store.verify(token, { touch: false });
       expect(result.ok).toBe(true);
       const after = (await store.list()).find((g) => g.id === grant.id);
@@ -42,31 +46,31 @@ export function runTokenStoreContract(
 
     it("rejects an unknown token as invalid", async () => {
       const store = await makeStore();
-      await store.mint("dave");
+      await store.mint(`${prefix}dave`);
       const result = await store.verify("AAAAAAAAAAAAAAAAAAAAAA");
       expect(result).toEqual({ ok: false, reason: "invalid" });
     });
 
     it("records a minted event", async () => {
       const store = await makeStore();
-      const { grant } = await store.mint("eve");
+      const { grant } = await store.mint(`${prefix}eve`);
       const events = await store.listEvents(grant.id);
       expect(events.map((e) => e.event)).toEqual(["minted"]);
     });
 
     it("relabels and records the change", async () => {
       const store = await makeStore();
-      const { grant } = await store.mint("frank");
-      const updated = await store.relabel(grant.id, "frank-laptop");
-      expect(updated.label).toBe("frank-laptop");
+      const { grant } = await store.mint(`${prefix}frank`);
+      const updated = await store.relabel(grant.id, `${prefix}frank-laptop`);
+      expect(updated.label).toBe(`${prefix}frank-laptop`);
       const events = await store.listEvents(grant.id);
       expect(events.map((e) => e.event)).toEqual(["minted", "relabeled"]);
-      expect(events[1]?.detail).toEqual({ from: "frank", to: "frank-laptop" });
+      expect(events[1]?.detail).toEqual({ from: `${prefix}frank`, to: `${prefix}frank-laptop` });
     });
 
     it("revoked tokens fail verify with reason revoked; restore reactivates", async () => {
       const store = await makeStore();
-      const { token, grant } = await store.mint("grace");
+      const { token, grant } = await store.mint(`${prefix}grace`);
       await store.revoke(grant.id);
       expect(await store.verify(token)).toEqual({ ok: false, reason: "revoked" });
       const restored = await store.restore(grant.id);
@@ -79,7 +83,7 @@ export function runTokenStoreContract(
 
     it("purge removes the grant and its events", async () => {
       const store = await makeStore();
-      const { token, grant } = await store.mint("heidi");
+      const { token, grant } = await store.mint(`${prefix}heidi`);
       await store.purge(grant.id);
       expect((await store.list()).map((g) => g.id)).not.toContain(grant.id);
       expect(await store.verify(token)).toEqual({ ok: false, reason: "invalid" });
@@ -95,13 +99,13 @@ export function runTokenStoreContract(
 
     it("mints room-creation by default and carries kind on the grant", async () => {
       const store = await makeStore();
-      const { grant } = await store.mint("default-kind");
+      const { grant } = await store.mint(`${prefix}default-kind`);
       expect(grant.kind).toBe("room-creation");
     });
 
     it("verify rejects a kind mismatch as invalid", async () => {
       const store = await makeStore();
-      const { token } = await store.mint("signup-tok", "signup");
+      const { token } = await store.mint(`${prefix}signup-tok`, "signup");
       expect(await store.verify(token)).toEqual({ ok: false, reason: "invalid" });
       const ok = await store.verify(token, { kind: "signup", touch: false });
       expect(ok.ok).toBe(true);
@@ -109,7 +113,7 @@ export function runTokenStoreContract(
 
     it("redeem burns a signup token exactly once", async () => {
       const store = await makeStore();
-      const { token, grant } = await store.mint("one-shot", "signup");
+      const { token, grant } = await store.mint(`${prefix}one-shot`, "signup");
       const first = await store.redeem(token);
       expect(first.ok).toBe(true);
       const second = await store.redeem(token);
@@ -120,7 +124,7 @@ export function runTokenStoreContract(
 
     it("redeem refuses room-creation tokens", async () => {
       const store = await makeStore();
-      const { token } = await store.mint("not-signup");
+      const { token } = await store.mint(`${prefix}not-signup`);
       expect(await store.redeem(token)).toEqual({ ok: false, reason: "invalid" });
     });
   });
