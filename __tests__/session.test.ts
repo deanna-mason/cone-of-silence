@@ -201,11 +201,16 @@ function wireHonestPeer(proofKey: CryptoKey, remotePeerId: string, selfPeerId: s
 
 /** Polls the fake clock in small async-aware steps until `predicate` holds —
  *  real crypto.subtle HMAC underneath (same reasoning as join-proof.test.ts's
- *  waitForFake); vitest 4's *Async timer APIs yield to the microtask queue
- *  between steps so a pending crypto promise still gets to resolve. */
-async function waitFor(predicate: () => boolean, maxTicks = 200): Promise<void> {
+ *  waitForFake). Microtask yields alone are NOT enough: crypto.subtle work
+ *  finishes on Node's thread pool and its completion lands as a macrotask, so
+ *  on a loaded machine (CI) it can arrive after any fixed number of microtask
+ *  drains — that was a real CI-only flake (runs 30947360000/30947579926).
+ *  setImmediate is deliberately absent from toFake below, so awaiting it
+ *  forces a genuine event-loop turn where thread-pool completions can land. */
+async function waitFor(predicate: () => boolean, maxTicks = 1000): Promise<void> {
   for (let i = 0; i < maxTicks; i++) {
     if (predicate()) return;
+    await new Promise<void>((r) => setImmediate(r));
     await vi.advanceTimersByTimeAsync(0);
   }
   throw new Error("waitFor: condition not met within maxTicks");
