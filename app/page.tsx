@@ -54,46 +54,62 @@ export default function LobbyPage() {
 
   const canCreate = clearance.state !== "none" && clearance.state !== "inactive";
 
+  // 4A "Case-File Cover" (design CS-DR-04): the lobby IS the folder — a tabbed
+  // manila cover on the deeper paper tone, typed dossier rows, a rotated
+  // CLASSIFIED cover stamp, and a one-gesture join.
   return (
-    <div className="space-y-10">
-      {/* Hero */}
-      <header className="relative overflow-hidden">
-        {/* Gun-barrel target motif */}
-        <svg
-          aria-hidden
-          viewBox="0 0 200 200"
-          className="barrel-spin pointer-events-none absolute -right-16 -top-20 h-64 w-64 text-vermilion/25"
-        >
-          <circle cx="100" cy="100" r="94" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          <circle cx="100" cy="100" r="72" fill="none" stroke="currentColor" strokeWidth="6" />
-          <circle cx="100" cy="100" r="46" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          <line x1="100" y1="0" x2="100" y2="200" stroke="currentColor" strokeWidth="1" />
-          <line x1="0" y1="100" x2="200" y2="100" stroke="currentColor" strokeWidth="1" />
-        </svg>
+    <div className="rise mx-auto max-w-xl" style={{ animationDelay: "0.1s" }}>
+      <div className="relative pt-6">
+        {/* Folder tab */}
+        <span className="hairline absolute left-6 top-0 border border-b-0 bg-field-deep px-3 py-1 font-type text-[0.6rem] uppercase tracking-[0.22em] text-ink-soft">
+          Case CS-001 · Active
+        </span>
 
-        <p className="kicker rise text-sienna" style={{ animationDelay: "0.05s" }}>
-          ◈ Secure Channel — Eyes Only
-        </p>
-        <h1
-          className="rise font-display text-6xl leading-[0.9] tracking-[0.04em] text-ink sm:text-7xl"
-          style={{ animationDelay: "0.15s" }}
-        >
-          Enter the
-          <br />
-          <span className="text-vermilion">Cone of Silence</span>
-        </h1>
-        <p
-          className="rise mt-4 max-w-md font-body text-lg leading-relaxed text-ink-soft"
-          style={{ animationDelay: "0.28s" }}
-        >
-          A private line for up to four. No recordings. No logs. No trace. When the call
-          ends, it never happened.
-        </p>
-      </header>
+        {/* Folder cover */}
+        <section className="hairline relative overflow-hidden border bg-field-deep p-6 sm:p-8">
+          {/* Rotated cover stamp */}
+          <span
+            aria-hidden
+            className="stamp pointer-events-none absolute right-4 top-8 -rotate-6 text-vermilion opacity-80"
+          >
+            CLASSIFIED
+          </span>
 
-      <div className="rise space-y-6" style={{ animationDelay: "0.4s" }}>
-        <ClearanceBadge clearance={clearance} onBurn={handleBurn} />
-        <RoomControls canCreate={canCreate} />
+          <p className="kicker text-sienna">◈ Central Registry</p>
+          <h1 className="mt-3 font-display text-5xl uppercase leading-[0.9] tracking-[0.04em] text-ink sm:text-6xl">
+            Cone of
+            <br />
+            <span className="text-vermilion">Silence</span>
+          </h1>
+
+          {/* Typed dossier rows — each a real fact. Clearance is the badge. */}
+          <dl className="mt-7 font-type text-[0.68rem] uppercase tracking-[0.1em] text-ink-soft">
+            <div className="flex items-center justify-between gap-4 border-b border-dotted border-ink-faint/45 py-2">
+              <dt>Subject</dt>
+              <dd className="text-right text-ink">Encrypted line, four seats</dd>
+            </div>
+            <div className="flex items-center justify-between gap-4 border-b border-dotted border-ink-faint/45 py-2">
+              <dt>Retention</dt>
+              <dd className="text-right">
+                {/* 4C flourish: hover to declassify */}
+                <span
+                  title="Hover to declassify"
+                  className="cursor-help bg-ink px-1 text-transparent transition-colors hover:bg-transparent hover:text-vermilion"
+                >
+                  None — burned on exit
+                </span>
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-4 border-b border-dotted border-ink-faint/45 py-2">
+              <dt>Clearance</dt>
+              <dd className="text-right text-ink">
+                <ClearanceBadge clearance={clearance} onBurn={handleBurn} />
+              </dd>
+            </div>
+          </dl>
+
+          <RoomControls canCreate={canCreate} />
+        </section>
       </div>
     </div>
   );
