@@ -180,12 +180,12 @@ export default function StudioPage() {
             ✕ {listError}
           </p>
         )}
-        <ul className="mt-4 space-y-4">
+        <ul className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
           {recordings.map((r) => (
             <RecordingRow key={r.id} recording={r} onDeleted={handleDeleted} />
           ))}
           {recordings.length === 0 && !listError && (
-            <li className="hairline border p-6 text-center font-body italic text-ink-soft">
+            <li className="hairline border p-6 text-center font-body italic text-ink-soft md:col-span-2">
               No recordings yet.
             </li>
           )}
