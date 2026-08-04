@@ -8,7 +8,7 @@
 // other protocols can share the same channel later; anything else (foreign
 // "t", or unparseable JSON) is silently ignored.
 import type { CallBus } from "@/hooks/useCallSession";
-import type { Beacon } from "./watchdog";
+import type { Beacon, FaultCause } from "./watchdog";
 import { MARK_TOTAL_MS } from "./toneMark";
 
 export const COUNTDOWN_MS = 3_500; // proposer lead: countdown + schedule slack
@@ -69,6 +69,43 @@ type BeaconMsg = { t: "pod/beacon" } & Beacon;
 
 type WireMsg = HelloMsg | PingMsg | PongMsg | RollMsg | RollAckMsg | StopMsg | BeaconMsg;
 
+// Every literal of watchdog.ts's FaultCause union, kept here (not derived
+// mechanically — TS has no runtime reflection over a type) so parseWireMsg
+// can enforce enum MEMBERSHIP, not just typeof === "string". A member-lint
+// mismatch here would be caught by TS: FAULT_CAUSES is typed
+// `ReadonlySet<FaultCause>`, so a typo'd or stale literal fails to compile.
+const FAULT_CAUSES: ReadonlySet<FaultCause> = new Set<FaultCause>([
+  "camera-lost",
+  "mic-lost",
+  "encoder-stalled",
+  "disk-error",
+  "encoder-error",
+  "partner-fault",
+  "partner-silent",
+]);
+
+/** Mirrors lib/podcast/transfer.ts's isValidOffer's enum-membership style
+ *  (`rec.base === "audio" || rec.base === "video"`) — a string that ISN'T
+ *  one of these literals must be rejected, not merely any string. An
+ *  unvalidated `fault` would reach components/PodcastPanel.tsx's
+ *  `CAUSE_COPY[fault]` lookup and render "PARTNER: undefined" for any cause
+ *  a malformed or adversarial peer named. */
+function isFaultCause(x: unknown): x is FaultCause {
+  return typeof x === "string" && FAULT_CAUSES.has(x as FaultCause);
+}
+
+/** Parses one wire message. Returns null for unparseable JSON, a non-object,
+ *  an unrecognized/foreign `t`, or a recognized `t` with a malformed field —
+ *  every rejection path is silent, never throws, mirroring
+ *  lib/webrtc/joinProof.ts's parseProofMsg. Field guards per message type
+ *  (mirroring lib/podcast/transfer.ts's isValidOffer/isValidPartFrame) are
+ *  load-bearing beyond mere type safety: a non-number startAtMs/markAtMs
+ *  reaching scheduleRoll()/scheduleStop() untouched produces a NaN delay,
+ *  and setTimeout clamps a NaN delay to 0 per spec — so a malformed pod/roll
+ *  wouldn't just be ignored, it would fire the take almost immediately
+ *  instead of respecting the countdown. Number.isFinite (not just
+ *  typeof === "number") excludes NaN/Infinity themselves from ever reaching
+ *  that arithmetic in the first place. */
 function parseWireMsg(text: string): WireMsg | null {
   let msg: unknown;
   try {
@@ -77,9 +114,56 @@ function parseWireMsg(text: string): WireMsg | null {
     return null;
   }
   if (!msg || typeof msg !== "object") return null;
-  const t = (msg as { t?: unknown }).t;
+  const m = msg as Record<string, unknown>;
+  const t = m.t;
   if (typeof t !== "string" || !t.startsWith("pod/")) return null;
-  return msg as WireMsg;
+
+  switch (t) {
+    case "pod/hello": {
+      if (typeof m.codename !== "string") return null;
+      return { t: "pod/hello", codename: m.codename };
+    }
+    case "pod/ping": {
+      if (typeof m.sentAt !== "number" || !Number.isFinite(m.sentAt)) return null;
+      return { t: "pod/ping", sentAt: m.sentAt };
+    }
+    case "pod/pong": {
+      if (typeof m.sentAt !== "number" || !Number.isFinite(m.sentAt)) return null;
+      return { t: "pod/pong", sentAt: m.sentAt };
+    }
+    case "pod/roll": {
+      if (typeof m.takeId !== "string") return null;
+      if (typeof m.startAtMs !== "number" || !Number.isFinite(m.startAtMs)) return null;
+      return { t: "pod/roll", takeId: m.takeId, startAtMs: m.startAtMs };
+    }
+    case "pod/roll-ack": {
+      if (typeof m.takeId !== "string") return null;
+      return { t: "pod/roll-ack", takeId: m.takeId };
+    }
+    case "pod/stop": {
+      if (typeof m.takeId !== "string") return null;
+      if (typeof m.markAtMs !== "number" || !Number.isFinite(m.markAtMs)) return null;
+      return { t: "pod/stop", takeId: m.takeId, markAtMs: m.markAtMs };
+    }
+    case "pod/beacon": {
+      if (typeof m.rolling !== "boolean") return null;
+      if (typeof m.bytes !== "number" || !Number.isFinite(m.bytes)) return null;
+      if (typeof m.camOk !== "boolean") return null;
+      if (typeof m.micOk !== "boolean") return null;
+      const fault = m.fault;
+      if (fault !== null && !isFaultCause(fault)) return null;
+      return {
+        t: "pod/beacon",
+        rolling: m.rolling,
+        bytes: m.bytes,
+        camOk: m.camOk,
+        micOk: m.micOk,
+        fault,
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 function pad2(n: number): string {

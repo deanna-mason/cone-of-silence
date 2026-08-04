@@ -159,6 +159,41 @@ describe("auth routes", () => {
     expect(res.status).toBe(401);
   });
 
+  it("an Authorization header without the Bearer scheme is 401, never parsed as a token", async () => {
+    const res = await request(ctx.app).get("/auth/me").set("Authorization", "nope");
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "denied" });
+  });
+
+  it("logout with no Authorization header is 401 — the gate runs before the delete", async () => {
+    const res = await request(ctx.app).post("/auth/logout");
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "denied" });
+  });
+
+  it("login does not length-check the password: both too-short and over-72 are a plain 401", async () => {
+    // Signup enforces 8-72 (400); login deliberately does not, so password
+    // length can't be used to distinguish "no such account" from "wrong
+    // password". These pin that split, they don't ask to change it.
+    const token = await signupToken();
+    const short = await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token, username: "deanna", password: "short" });
+    expect(short.status).toBe(400);
+    expect(short.body).toEqual({ error: "password: 8-72 characters" });
+    const long = await request(ctx.app)
+      .post("/auth/signup")
+      .send({ token, username: "deanna", password: "p".repeat(73) });
+    expect(long.status).toBe(400);
+    expect(long.body).toEqual({ error: "password: 8-72 characters" });
+
+    for (const password of ["short", "p".repeat(73)]) {
+      const res = await request(ctx.app).post("/auth/login").send({ username: "deanna", password });
+      expect(res.status, password.length.toString()).toBe(401);
+      expect(res.body).toEqual({ error: "denied" });
+    }
+  });
+
   it("session-store outage during the userAuth gate fails closed with 503 on a studio route", async () => {
     const token = await signupToken();
     const signup = await request(ctx.app)

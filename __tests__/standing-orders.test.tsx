@@ -70,3 +70,24 @@ test("Transfer of Custody reveals a copyable invite link with a burn countdown",
     expect(writeText).toHaveBeenCalledWith(buildInviteLink(ROOM, "https://coneofsilence.app")),
   );
 });
+
+test("a blocked clipboard swaps the button label to a visible failure state, not a silent no-op", async () => {
+  const writeText = vi.fn(async () => {
+    throw new DOMException("write permission denied", "NotAllowedError");
+  });
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { ...window.location, origin: "https://coneofsilence.app" },
+  });
+
+  render(<StandingOrders room={ROOM} />);
+  fireEvent.click(screen.getByRole("button", { name: /hand off to another device/i }));
+  await screen.findByText(/burns in/i);
+
+  fireEvent.click(screen.getByRole("button", { name: /copy link/i }));
+  await waitFor(() => expect(writeText).toHaveBeenCalled());
+
+  expect(await screen.findByRole("button", { name: /copy failed/i })).toBeDefined();
+  expect(screen.queryByRole("button", { name: /^copy link$/i })).toBeNull();
+});

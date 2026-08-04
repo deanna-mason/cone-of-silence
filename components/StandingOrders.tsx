@@ -37,6 +37,7 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [remainingMs, setRemainingMs] = useState(BURN_MS);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const deadlineRef = useRef<number>(0);
 
   useEffect(() => {
@@ -79,9 +80,13 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
     try {
       await navigator.clipboard.writeText(inviteLink);
       setCopied(true);
+      setCopyFailed(false);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      // clipboard blocked — leave the label unchanged
+      // clipboard blocked — the label swaps to a visible failure state so
+      // the host knows to select and copy the link by hand.
+      setCopyFailed(true);
+      window.setTimeout(() => setCopyFailed(false), 2000);
     }
   }
 
@@ -168,7 +173,7 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
                 onClick={() => void copyLink()}
                 className="kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal"
               >
-                {copied ? "LINK COPIED" : "Copy link"}
+                {copied ? "LINK COPIED" : copyFailed ? "COPY FAILED — SELECT MANUALLY" : "Copy link"}
               </button>
             </div>
             <p className="mt-3 font-body text-xs italic text-ink-soft">

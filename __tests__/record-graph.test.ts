@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProcessedAudioError, buildRecordGraph } from "@/lib/podcast/recordGraph";
 
 function fakes(settings: Partial<MediaTrackSettings> = {}) {
@@ -34,6 +34,17 @@ function fakes(settings: Partial<MediaTrackSettings> = {}) {
 }
 
 describe("record graph", () => {
+  const NOW = new Date("2026-01-01T00:00:00.000Z").getTime();
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("requests a raw mono capture of the chosen device at 48 kHz", async () => {
     const { deps, gum, ctxOpts, destTrack, rawTrack, ctx, stream } = fakes();
     const graph = await buildRecordGraph("mic-1", deps);
@@ -64,14 +75,12 @@ describe("record graph", () => {
     expect(ctx.close).toHaveBeenCalled();
   });
 
-  it("playMark() routes the tone into BOTH the recorded destination and speakers, ~50ms out", async () => {
+  it("playMark() routes the tone into BOTH the recorded destination and speakers, exactly 50ms out", async () => {
     const { deps, ctx, gains } = fakes();
     const graph = await buildRecordGraph(undefined, deps);
     const destNode = ctx.createMediaStreamDestination.mock.results[0]!.value;
 
-    const before = Date.now();
     const startedAt = graph.playMark();
-    const after = Date.now();
 
     // Regression guard: every tone-beep gain must fan out to the recorded
     // destination AND ctx.destination — dropping either connect() call would
@@ -82,12 +91,13 @@ describe("record graph", () => {
       expect(gain.connect).toHaveBeenCalledWith(ctx.destination);
     }
 
-    // Scheduled ~50ms (MARK_LEAD_S) out from ctx.currentTime, on the ctx clock.
+    // Scheduled exactly 50ms (MARK_LEAD_S) out from ctx.currentTime, on the ctx clock.
     const scheduledStart = gains[0]!.gain.setValueAtTime.mock.calls[0]![1];
     expect(scheduledStart).toBeCloseTo(ctx.currentTime + 0.05, 5);
 
-    // Returned wall-clock ms is Date.now() + ~50ms, within a small tolerance.
-    expect(startedAt).toBeGreaterThanOrEqual(before + 45);
-    expect(startedAt).toBeLessThanOrEqual(after + 60);
+    // Returned wall-clock ms is exactly Date.now() + 50ms (MARK_LEAD_S * 1000)
+    // — pinned exactly under the fixed system time, no tolerance window
+    // papering over an unmocked, genuinely-variable Date.now().
+    expect(startedAt).toBe(NOW + 50);
   });
 });

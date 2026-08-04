@@ -1,22 +1,15 @@
 import { Router, type Request, type Response } from "express";
 import { GrantNotFoundError, type TokenStore } from "../tokens/types.js";
+import { createRun } from "./run.js";
 import { hasExactKeys, parseKind, parseLabel } from "./validate.js";
 
 export function createAdminRouter(store: TokenStore): Router {
   const router = Router();
 
-  const run = async (res: Response, fn: () => Promise<void>): Promise<void> => {
-    try {
-      await fn();
-    } catch (err) {
-      if (err instanceof GrantNotFoundError) {
-        res.status(404).json({ error: "not found" });
-        return;
-      }
-      // any store failure fails CLOSED
-      res.status(503).json({ error: "channel unavailable" });
-    }
-  };
+  // Anything that isn't a missing grant fails CLOSED with a logged 503.
+  const run = createRun("[admin]", (err) =>
+    err instanceof GrantNotFoundError ? { status: 404, error: "not found" } : null,
+  );
 
   router.get("/tokens", (_req: Request, res: Response) =>
     run(res, async () => {

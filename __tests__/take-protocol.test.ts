@@ -119,18 +119,35 @@ interface LogEntry {
   arg?: unknown;
 }
 
-function makeCb(): { cb: TakeCallbacks; log: LogEntry[] } {
+// No `: TakeCallbacks` annotation on `cb` (and no explicit return type on
+// makeCb) — an explicit interface annotation here would WIDEN each vi.fn()
+// back down to the interface's plain `(name: string) => void` shape, erasing
+// the Mock-specific members (mockClear, mock.calls, ...) that callers below
+// rely on. `satisfies` checks the same structural compatibility TakeCoordinator
+// needs without that widening, matching the suite's existing typed-mock idiom
+// (vi.fn<Sig>(), e.g. __tests__/room-pin-studio.test.tsx's `getUserMedia`).
+function makeCb() {
   const log: LogEntry[] = [];
-  const cb: TakeCallbacks = {
-    onPartnerCodename: vi.fn((name: string) => log.push({ name: "onPartnerCodename", at: Date.now(), arg: name })),
-    onCountdown: vi.fn((msLeft: number) => log.push({ name: "onCountdown", at: Date.now(), arg: msLeft })),
-    onStartRecorders: vi.fn((takeId: string) => log.push({ name: "onStartRecorders", at: Date.now(), arg: takeId })),
-    onMark: vi.fn(() => log.push({ name: "onMark", at: Date.now() })),
-    onStopMark: vi.fn(() => log.push({ name: "onStopMark", at: Date.now() })),
-    onStopRecorders: vi.fn((takeId: string) => log.push({ name: "onStopRecorders", at: Date.now(), arg: takeId })),
-    onAborted: vi.fn((takeId: string) => log.push({ name: "onAborted", at: Date.now(), arg: takeId })),
-    onBeacon: vi.fn((b: Beacon) => log.push({ name: "onBeacon", at: Date.now(), arg: b })),
-  };
+  const cb = {
+    onPartnerCodename: vi.fn<(name: string) => void>((name) =>
+      log.push({ name: "onPartnerCodename", at: Date.now(), arg: name }),
+    ),
+    onCountdown: vi.fn<(msLeft: number) => void>((msLeft) =>
+      log.push({ name: "onCountdown", at: Date.now(), arg: msLeft }),
+    ),
+    onStartRecorders: vi.fn<(takeId: string) => void>((takeId) =>
+      log.push({ name: "onStartRecorders", at: Date.now(), arg: takeId }),
+    ),
+    onMark: vi.fn<() => void>(() => log.push({ name: "onMark", at: Date.now() })),
+    onStopMark: vi.fn<() => void>(() => log.push({ name: "onStopMark", at: Date.now() })),
+    onStopRecorders: vi.fn<(takeId: string) => void>((takeId) =>
+      log.push({ name: "onStopRecorders", at: Date.now(), arg: takeId }),
+    ),
+    onAborted: vi.fn<(takeId: string) => void>((takeId) =>
+      log.push({ name: "onAborted", at: Date.now(), arg: takeId }),
+    ),
+    onBeacon: vi.fn<(b: Beacon) => void>((b) => log.push({ name: "onBeacon", at: Date.now(), arg: b })),
+  } satisfies TakeCallbacks;
   return { cb, log };
 }
 
@@ -1154,5 +1171,133 @@ describe("peerId scoping fix round (Task 9 review)", () => {
 
     a.dispose();
     b.dispose();
+  });
+});
+
+describe("parseWireMsg field validation (malformed messages silently ignored)", () => {
+  // Table of malformed variants per message type — wrong-type fields, missing
+  // fields, and outright junk. Pre-fix, parseWireMsg only checks the "pod/"
+  // t-prefix and hands the raw parsed object back as WireMsg untouched, so
+  // e.g. a pod/roll with a non-number startAtMs reaches scheduleRoll(), whose
+  // arithmetic (startLocalMs - scheduledAt) produces NaN; setTimeout clamps a
+  // NaN delay to 0 per spec, so the bogus roll fires essentially immediately
+  // instead of respecting the countdown (or never, for other shapes) — never
+  // silently ignored like every other malformed wire message in this file.
+  const CASES: { label: string; text: string }[] = [
+    // pod/hello
+    { label: "pod/hello missing codename", text: JSON.stringify({ t: "pod/hello" }) },
+    { label: "pod/hello codename wrong type (number)", text: JSON.stringify({ t: "pod/hello", codename: 42 }) },
+    // pod/ping
+    { label: "pod/ping missing sentAt", text: JSON.stringify({ t: "pod/ping" }) },
+    { label: "pod/ping sentAt wrong type (string)", text: JSON.stringify({ t: "pod/ping", sentAt: "soon" }) },
+    // pod/pong
+    { label: "pod/pong missing sentAt", text: JSON.stringify({ t: "pod/pong" }) },
+    { label: "pod/pong sentAt wrong type (null)", text: JSON.stringify({ t: "pod/pong", sentAt: null }) },
+    // pod/roll — the case straight from the bug report
+    { label: "pod/roll missing takeId", text: JSON.stringify({ t: "pod/roll", startAtMs: 1000 }) },
+    { label: "pod/roll missing startAtMs", text: JSON.stringify({ t: "pod/roll", takeId: "take-x" }) },
+    {
+      label: "pod/roll startAtMs wrong type (string) — the NaN-timer bug report",
+      text: JSON.stringify({ t: "pod/roll", takeId: "take-x", startAtMs: "soon" }),
+    },
+    { label: "pod/roll takeId wrong type (number)", text: JSON.stringify({ t: "pod/roll", takeId: 5, startAtMs: 1000 }) },
+    // pod/roll-ack
+    { label: "pod/roll-ack missing takeId", text: JSON.stringify({ t: "pod/roll-ack" }) },
+    { label: "pod/roll-ack takeId wrong type (boolean)", text: JSON.stringify({ t: "pod/roll-ack", takeId: true }) },
+    // pod/stop
+    { label: "pod/stop missing takeId", text: JSON.stringify({ t: "pod/stop", markAtMs: 1000 }) },
+    { label: "pod/stop missing markAtMs", text: JSON.stringify({ t: "pod/stop", takeId: "take-x" }) },
+    {
+      label: "pod/stop markAtMs wrong type (array)",
+      text: JSON.stringify({ t: "pod/stop", takeId: "take-x", markAtMs: [] }),
+    },
+    // pod/beacon
+    {
+      label: "pod/beacon missing bytes",
+      text: JSON.stringify({ t: "pod/beacon", rolling: true, camOk: true, micOk: true, fault: null }),
+    },
+    {
+      label: "pod/beacon rolling wrong type (string)",
+      text: JSON.stringify({ t: "pod/beacon", rolling: "yes", bytes: 1, camOk: true, micOk: true, fault: null }),
+    },
+    {
+      label: "pod/beacon camOk wrong type (number)",
+      text: JSON.stringify({ t: "pod/beacon", rolling: true, bytes: 1, camOk: 1, micOk: true, fault: null }),
+    },
+    {
+      label: "pod/beacon fault wrong type (number)",
+      text: JSON.stringify({ t: "pod/beacon", rolling: true, bytes: 1, camOk: true, micOk: true, fault: 7 }),
+    },
+    {
+      // Review finding: a string that ISN'T one of watchdog.ts's FaultCause
+      // literals must be rejected too, not just a wrong TYPE — a raw
+      // typeof === "string" check lets this straight through to
+      // components/PodcastPanel.tsx's CAUSE_COPY[fault] lookup, which
+      // renders "PARTNER: undefined" for any cause the sender didn't
+      // actually name (or fabricated).
+      label: "pod/beacon fault is a string but not a valid FaultCause literal",
+      text: JSON.stringify({ t: "pod/beacon", rolling: true, bytes: 1, camOk: true, micOk: true, fault: "gremlins" }),
+    },
+    // junk overall — already-covered conventions, kept here to pin them
+    { label: "unparseable JSON", text: "{not json" },
+    { label: "foreign t prefix", text: JSON.stringify({ t: "xfr/offer", episodeId: "x" }) },
+    { label: "t missing pod/ prefix entirely", text: JSON.stringify({ t: "roll", takeId: "x", startAtMs: 1000 }) },
+  ];
+
+  for (const { label, text } of CASES) {
+    it(`ignores: ${label}`, () => {
+      const pair = new FakeBusPair();
+      const { cb } = makeCb();
+      const a = new TakeCoordinator(pair.bus(0), "Alpha", cb);
+      // Pin a partner directly through the coordinator's own subscription —
+      // the malformed message below is injected FROM that same peerId, so
+      // every per-type handler's peerId-pinning gate is already satisfied
+      // and field validation is the only thing left standing between the
+      // malformed input and a state change.
+      pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "Bravo" }), pair.peerIds[1]);
+      cb.onPartnerCodename.mockClear();
+
+      pair.injectRaw(0, text, pair.peerIds[1]);
+
+      // A NaN-delay setTimeout clamps to 0 and fires on the very next tick —
+      // check immediately (advance 0) to catch that shape of failure, not
+      // just the "never fires" shape.
+      vi.advanceTimersByTime(0);
+      vi.advanceTimersByTime(COUNTDOWN_MS + MARK_TOTAL_MS + 10_000);
+
+      expect(cb.onPartnerCodename).not.toHaveBeenCalled();
+      expect(cb.onCountdown).not.toHaveBeenCalled();
+      expect(cb.onStartRecorders).not.toHaveBeenCalled();
+      expect(cb.onMark).not.toHaveBeenCalled();
+      expect(cb.onStopMark).not.toHaveBeenCalled();
+      expect(cb.onStopRecorders).not.toHaveBeenCalled();
+      expect(cb.onAborted).not.toHaveBeenCalled();
+      expect(cb.onBeacon).not.toHaveBeenCalled();
+
+      a.dispose();
+    });
+  }
+
+  it("a well-formed pod/roll immediately after a run of malformed ones still schedules normally", () => {
+    const pair = new FakeBusPair();
+    const { cb } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cb);
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "Bravo" }), pair.peerIds[1]);
+
+    // A few malformed messages first — must leave no residue (no bogus timer,
+    // no corrupted partner/take state).
+    pair.injectRaw(0, JSON.stringify({ t: "pod/roll", takeId: "bad", startAtMs: "soon" }), pair.peerIds[1]);
+    pair.injectRaw(0, JSON.stringify({ t: "pod/roll" }), pair.peerIds[1]);
+    vi.advanceTimersByTime(0);
+    expect(cb.onStartRecorders).not.toHaveBeenCalled();
+
+    const startAtMs = Date.now() + COUNTDOWN_MS;
+    pair.injectRaw(0, JSON.stringify({ t: "pod/roll", takeId: "take-good", startAtMs }), pair.peerIds[1]);
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+
+    expect(cb.onStartRecorders).toHaveBeenCalledWith("take-good");
+    expect(cb.onMark).toHaveBeenCalledTimes(1);
+
+    a.dispose();
   });
 });

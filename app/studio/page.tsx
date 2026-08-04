@@ -53,10 +53,13 @@ export default function StudioPage() {
   }, [ready, session]);
 
   // Poll every 3s only while something is queued/processing; stop otherwise.
+  // Depends on the derived boolean, not `recordings` itself — `recordings` is
+  // a fresh array identity every poll tick (setRecordings below), so keying
+  // the effect on it directly would tear down and re-arm the interval every
+  // 3s instead of running one steady interval for the whole pending window.
+  const hasPending = recordings.some((r) => r.status === "queued" || r.status === "processing");
   useEffect(() => {
-    if (!session) return;
-    const hasPending = recordings.some((r) => r.status === "queued" || r.status === "processing");
-    if (!hasPending) return;
+    if (!session || !hasPending) return;
     const interval = setInterval(() => {
       listRecordings()
         .then(setRecordings)
@@ -65,7 +68,7 @@ export default function StudioPage() {
         });
     }, 3000);
     return () => clearInterval(interval);
-  }, [session, recordings]);
+  }, [session, hasPending]);
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();

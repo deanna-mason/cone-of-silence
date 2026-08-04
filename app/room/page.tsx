@@ -133,6 +133,7 @@ export default function RoomPage() {
   const [stage, setStage] = useState<Stage>("parsing");
   const [keys, setKeys] = useState<RoomKeys | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [studioPinned, setStudioPinned] = useState(false);
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
@@ -240,9 +241,16 @@ export default function RoomPage() {
     try {
       await navigator.clipboard.writeText(buildInviteLink(keys, window.location.origin));
       setCopied(true);
+      setCopyFailed(false);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      // clipboard blocked — leave the button label unchanged
+      // clipboard blocked — CallControls' own button only knows "Copy
+      // Invite"/"Link Secured ✓" (it's a component owned elsewhere), so the
+      // visible signal lives here instead: the same role="alert" idiom this
+      // file's sibling page (app/studio/page.tsx's uploadError/listError)
+      // already uses for a failure the user needs to notice and act on.
+      setCopyFailed(true);
+      window.setTimeout(() => setCopyFailed(false), 2000);
     }
   }
 
@@ -512,6 +520,11 @@ export default function RoomPage() {
         onLeave={leave}
         disabled={podcastLocked}
       />
+      {copyFailed && (
+        <p role="alert" className="kicker text-vermilion">
+          ✕ Clipboard blocked — copy the invite link manually.
+        </p>
+      )}
     </div>
   );
 }

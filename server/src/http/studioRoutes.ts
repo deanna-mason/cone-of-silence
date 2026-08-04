@@ -15,6 +15,7 @@ import {
   WAVEFORM_NAME,
 } from "../studio/paths.js";
 import { dirSizeBytes } from "../studio/usage.js";
+import { createRun } from "./run.js";
 
 export interface StudioDeps {
   uploadDir: string;
@@ -38,14 +39,7 @@ export function createStudioRouter(store: RecordingStore, deps: StudioDeps): Rou
     },
   });
 
-  const run = async (res: Response, fn: () => Promise<void>): Promise<void> => {
-    try {
-      await fn();
-    } catch (err) {
-      console.error("[studio]", err); // fail closed, but don't swallow the cause
-      res.status(503).json({ error: "channel unavailable" });
-    }
-  };
+  const run = createRun("[studio]");
 
   const sessionOf = (res: Response): SessionInfo => res.locals.session as SessionInfo;
 

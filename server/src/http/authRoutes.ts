@@ -11,6 +11,7 @@ import { hashToken } from "../tokens/crypto.js";
 import type { TokenStore } from "../tokens/types.js";
 import { hasExactKeys } from "./validate.js";
 import { Lockout } from "./lockout.js";
+import { createRun } from "./run.js";
 import { createUserAuth } from "./userAuth.js";
 
 const MAX_FAILURES = 5;
@@ -38,14 +39,7 @@ export function createAuthRouter(accounts: AccountStore, tokens: TokenStore): Ro
   const failures = new Lockout(MAX_FAILURES, LOCKOUT_MS);
   const signupFailures = new Lockout(MAX_FAILURES, LOCKOUT_MS);
 
-  const run = async (res: Response, fn: () => Promise<void>): Promise<void> => {
-    try {
-      await fn();
-    } catch (err) {
-      console.error("[auth]", err); // fail closed, but don't swallow the cause
-      res.status(503).json({ error: "channel unavailable" });
-    }
-  };
+  const run = createRun("[auth]");
 
   router.post("/signup", (req: Request, res: Response) =>
     run(res, async () => {
