@@ -58,7 +58,7 @@ export default function LobbyPage() {
   // manila cover on the deeper paper tone, typed dossier rows, a rotated
   // CLASSIFIED cover stamp, and a one-gesture join.
   return (
-    <div className="rise mx-auto max-w-xl" style={{ animationDelay: "0.1s" }}>
+    <div className="rise mx-auto max-w-xl lg:max-w-2xl" style={{ animationDelay: "0.1s" }}>
       <div className="relative pt-6">
         {/* Folder tab */}
         <span className="hairline absolute left-6 top-0 border border-b-0 bg-field-deep px-3 py-1 font-type text-[0.6rem] uppercase tracking-[0.22em] text-ink-soft">
@@ -66,7 +66,7 @@ export default function LobbyPage() {
         </span>
 
         {/* Folder cover */}
-        <section className="hairline relative overflow-hidden border bg-field-deep p-6 sm:p-8">
+        <section className="hairline relative overflow-hidden border bg-field-deep p-6 sm:p-8 lg:p-10">
           {/* Rotated cover stamp */}
           <span
             aria-hidden
@@ -76,7 +76,7 @@ export default function LobbyPage() {
           </span>
 
           <p className="kicker text-sienna">◈ Central Registry</p>
-          <h1 className="mt-3 font-display text-5xl uppercase leading-[0.9] tracking-[0.04em] text-ink sm:text-6xl">
+          <h1 className="mt-3 font-display text-5xl uppercase leading-[0.9] tracking-[0.04em] text-ink sm:text-6xl lg:text-7xl">
             Cone of
             <br />
             <span className="text-vermilion">Silence</span>
