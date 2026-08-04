@@ -403,12 +403,17 @@ export default function RoomPage() {
   }
 
   // No-scroll rule (Deanna, 2026-07-25): every face visible at once on a
-  // phone. Height = 100dvh minus the fixed chrome above this block — sticky
+  // phone. Height = 100svh minus the fixed chrome above this block — sticky
   // NavBar (py-4 + 1.5rem logo row ≈ 3.5rem) + main's top padding (py-12 =
   // 3rem) ≈ 6.5rem. 7rem is the measured-good value, not a derived one: the
   // e2e geometry assertion at 390×844 caught the 6.5rem estimate landing the
   // wrapper 8px below the fold, and where those 8px come from was never
   // pinned down. The footer intentionally falls below the fold in-call.
+  // svh (small viewport height), not dvh: dvh grows/shrinks as the mobile
+  // address bar retracts on scroll, which made the tiles jump size mid-call
+  // (7/30 testers). svh is the stable chrome-visible height, so the grid
+  // holds one size regardless of scroll. At a fixed 390×844 (headless e2e,
+  // no retractable UA chrome) svh == dvh, so the pinned geometry is unchanged.
   const tileCount = 1 + Math.max(call.peers.length, 1);
   const gridClass =
     tileCount <= 2
@@ -416,7 +421,7 @@ export default function RoomPage() {
       : "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]";
 
   return (
-    <div className="flex h-[calc(100dvh-7rem)] min-h-[20rem] flex-col gap-3">
+    <div className="flex h-[calc(100svh-7rem)] min-h-[20rem] flex-col gap-3">
       {authed && (
         <PodcastPanel
           state={mergePanel(podcast.panel, exchange)}
