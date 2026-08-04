@@ -78,15 +78,17 @@ export async function renderBackdrop(chromePath, templatePath, { left, right }, 
  *  correction (setpts, remote only), optional start delay (tpad — the
  *  earlier side is pushed later so both marks land on the same output
  *  timestamp; alignment() always hands back a non-negative delay, so this
- *  is always a pad, never a trim), then the object-fit: CONTAIN pair —
- *  scale-to-fit + center pad into the pane's own w/h (§5A honest framing:
- *  never crop, never stretch). Returns `[label]`. */
+ *  is always a pad, never a trim), then the object-fit: COVER pair —
+ *  scale-to-cover + center crop into the pane's own w/h (design 2026-08-03:
+ *  the mp4 product crops so faces fill the full-frame tiles; §5A's
+ *  never-crop rule now applies to the RAW vault recordings, which remain
+ *  the complete, uncropped archival record). Returns `[label]`. */
 function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
   const filters = [];
   if (setpts) filters.push(setpts);
   if (delayMs) filters.push(`tpad=start_duration=${(delayMs / 1000).toFixed(3)}`);
-  filters.push(`scale=${pane.w}:${pane.h}:force_original_aspect_ratio=decrease`);
-  filters.push(`pad=${pane.w}:${pane.h}:(ow-iw)/2:(oh-ih)/2`);
+  filters.push(`scale=${pane.w}:${pane.h}:force_original_aspect_ratio=increase`);
+  filters.push(`crop=${pane.w}:${pane.h}`);
   return `[${inputIdx}:v]${filters.join(",")}[${sinkLabel}]`;
 }
 
@@ -96,10 +98,10 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
  * Argv for the final side-by-side composite:
  * - backdrop: `-loop 1` still-image input (the aged-dossier field + wells +
  *   labels + stamp, already rendered by renderBackdrop).
- * - local (LEFT pane, D14): contain scale+pad, optional tpad delay if IT is
+ * - local (LEFT pane, D14): cover scale+crop, optional tpad delay if IT is
  *   the earlier side. Never setpts — local is the reference timeline.
  * - remote (RIGHT pane, D14): remoteSetpts (drift-ratio rate correction)
- *   THEN its own tpad delay, both strictly before the contain scale/pad.
+ *   THEN its own tpad delay, both strictly before the cover scale/crop.
  * - Two-stage overlay, REMOTE FIRST then LOCAL LAST (Task 7 review, round 2
  *   — the round-1 fix below was itself wrong; both are logged in
  *   task-7-report.md's fix-report addendum for the full derivation):

@@ -1,6 +1,6 @@
 // @vitest-environment node
 //
-// Task 5: composite arg-builder cases only (contain-scale+pad, remote-only
+// Task 5: composite arg-builder cases only (cover-scale+crop, remote-only
 // setpts ordering, audio/encoding invariants). renderBackdrop launches real
 // headless Chrome and is exercised by the e2e (e2e/darkroom-e2e.js, Task 7)
 // and by the one-off local hand-check render — not unit-tested here.
@@ -61,7 +61,7 @@ function segmentFor(filterComplex: string, inputLabel: string): string {
 }
 
 describe("composite.mjs — compositeArgs", () => {
-  it("contain-scale+pad into both pane rects, overlay coords from layout", () => {
+  it("cover-scale+crop into both pane rects, overlay coords from layout", () => {
     const args = compositeArgs(
       "/tmp/backdrop.png",
       "/tmp/local.webm",
@@ -73,11 +73,15 @@ describe("composite.mjs — compositeArgs", () => {
     );
     const fc = filterComplexOf(args);
 
-    // object-fit: contain == scale-to-fit (decrease) + center pad, per pane's OWN w/h.
-    expect(fc).toContain("scale=820:615:force_original_aspect_ratio=decrease");
-    expect(fc).toContain("pad=820:615:(ow-iw)/2:(oh-ih)/2");
-    expect(fc).toContain("scale=800:600:force_original_aspect_ratio=decrease");
-    expect(fc).toContain("pad=800:600:(ow-iw)/2:(oh-ih)/2");
+    // object-fit: cover == scale-to-cover (increase) + center crop, per pane's
+    // OWN w/h (design 2026-08-03: full-frame tiles; raw stays uncropped).
+    expect(fc).toContain("scale=820:615:force_original_aspect_ratio=increase");
+    expect(fc).toContain("crop=820:615");
+    expect(fc).toContain("scale=800:600:force_original_aspect_ratio=increase");
+    expect(fc).toContain("crop=800:600");
+    expect(fc).not.toContain("force_original_aspect_ratio=decrease");
+    expect(fc).not.toContain("pad=820");
+    expect(fc).not.toContain("pad=800");
 
     // Overlay placement comes straight from the layout, not baked constants.
     expect(fc).toContain("overlay=86:180");
@@ -105,16 +109,16 @@ describe("composite.mjs — compositeArgs", () => {
     expect(localSeg).not.toContain("setpts");
 
     // Remote gets setpts, THEN its delay (tpad), both strictly before the
-    // contain scale/pad that feeds the overlay.
+    // cover scale/crop that feeds the overlay.
     expect(remoteSeg).toContain("setpts=PTS*0.999800000");
     const setptsPos = remoteSeg.indexOf("setpts=PTS*0.999800000");
     const tpadPos = remoteSeg.indexOf("tpad=");
     const scalePos = remoteSeg.indexOf("scale=");
-    const padPos = remoteSeg.indexOf("pad=800:600");
+    const cropPos = remoteSeg.indexOf("crop=800:600");
     expect(tpadPos).toBeGreaterThan(-1);
     expect(setptsPos).toBeLessThan(tpadPos);
     expect(tpadPos).toBeLessThan(scalePos);
-    expect(scalePos).toBeLessThan(padPos);
+    expect(scalePos).toBeLessThan(cropPos);
   });
 
   it("local carries its own delay (tpad) when it is the earlier side — still never setpts", () => {
