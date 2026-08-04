@@ -12,12 +12,22 @@ import type { RemotePeer } from "@/lib/webrtc/session";
 interface RemoteTileProps {
   peer: RemotePeer;
   label: string;
+  /** While a take rolls, the composite cover-crops BOTH cameras — so the
+   *  honest preview crops the partner tile too (CS-DR-04 2B "Iris Pan"). */
+  episodeFrame?: boolean;
 }
 
-export default function RemoteTile({ peer, label }: RemoteTileProps) {
+export default function RemoteTile({ peer, label, episodeFrame = false }: RemoteTileProps) {
   const signalLost = useSignalLostBadge(peer.connectionState);
   const speaking = useSpeaking(peer.stream);
   return (
-    <VideoTile fill stream={peer.stream} label={label} signalLost={signalLost} speaking={speaking} />
+    <VideoTile
+      fill
+      stream={peer.stream}
+      label={label}
+      signalLost={signalLost}
+      speaking={speaking}
+      episodeFrame={episodeFrame}
+    />
   );
 }

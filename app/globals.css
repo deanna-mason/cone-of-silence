@@ -145,3 +145,66 @@ body::after {
   opacity: 0;
   animation: rise-in 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
 }
+
+/* ── Room speaking indicators (CS-DR-04) — brass only; vermilion is danger ── */
+
+/* 1A "Lamplight Bloom" — remote/partner is speaking. A 3px full-opacity brass
+   ring plus an outer glow. `.is-breathing` adds a ~2s breathing pulse; it is
+   withheld under reduced motion, leaving the static ring+glow as the cue. */
+.speaking-bloom {
+  box-shadow:
+    0 0 0 3px var(--brass),
+    0 0 18px 3px color-mix(in srgb, var(--brass) 55%, transparent);
+}
+.speaking-bloom.is-breathing {
+  animation: lamplight-bloom 2s ease-in-out infinite;
+}
+@keyframes lamplight-bloom {
+  0%, 100% {
+    box-shadow:
+      0 0 0 3px var(--brass),
+      0 0 10px 0 color-mix(in srgb, var(--brass) 35%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px var(--brass),
+      0 0 26px 7px color-mix(in srgb, var(--brass) 65%, transparent);
+  }
+}
+
+/* 3C "Needle Tick" — you are speaking. A subdued 1px INNER brass line; the
+   pulse lives on the caption dot (Tailwind animate-pulse), not the frame. */
+.speaking-tick {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brass) 70%, transparent);
+}
+
+/* 2B "Iris Pan" — ease the roll-tape crop by transitioning the viewport's
+   width & height (plain cqw/cqh lengths), never aspect-ratio. */
+.iris-viewport {
+  transition:
+    width 420ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    height 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* 2B slate stamp — a clapper flash when the tape starts rolling. */
+@keyframes slate-flash {
+  0% { opacity: 0; transform: translateY(-3px); }
+  14% { opacity: 1; transform: translateY(0); }
+  72% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-2px); }
+}
+.slate-flash {
+  animation: slate-flash 1.6s ease-out forwards;
+}
+
+/* Reduced-motion safety net: even if a motion class is applied (matchMedia
+   race, or a class that ships static + animated together), never move. */
+@media (prefers-reduced-motion: reduce) {
+  .speaking-bloom,
+  .speaking-bloom.is-breathing,
+  .slate-flash,
+  .iris-viewport {
+    animation: none !important;
+    transition: none !important;
+  }
+}

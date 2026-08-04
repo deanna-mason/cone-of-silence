@@ -952,13 +952,15 @@ describe("VideoTile episode framing", () => {
     );
     // The viewport mirrors the darkroom pane shape — what you frame is what ships.
     const viewport = getByTestId("episode-viewport");
-    expect(viewport.style.aspectRatio).toBe("930 / 1008");
-    expect(viewport.style.height).toBe(""); // no height pin — it must follow aspect-ratio's auto axis
+    // Iris Pan (CS-DR-04 2B): width AND height are eased as plain cqw/cqh
+    // lengths — aspect-ratio is NEVER animated, so it must be absent.
+    expect(viewport.style.aspectRatio).toBe("");
     // jsdom's CSSOM can't round-trip a cqw/cqh-mixed min()/calc() value
     // through element.style (it silently drops the whole declaration), so
-    // the width formula is pinned against its source function instead —
+    // the formulas are pinned against their source function instead —
     // the same one the JSX calls to build this element's style.
-    expect(episodeViewportStyle().width).toBe("min(100cqw, calc(100cqh * (930 / 1008)))");
+    expect(episodeViewportStyle(true).width).toBe("min(100cqw, calc(100cqh * (930 / 1008)))");
+    expect(episodeViewportStyle(true).height).toBe("min(100cqh, calc(100cqw * (1008 / 930)))");
     const video = container.querySelector("video")!;
     expect(video.className).toContain("object-cover");
   });

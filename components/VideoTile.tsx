@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
+import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 
 interface VideoTileProps {
   stream: MediaStream | null;
@@ -29,18 +30,28 @@ interface VideoTileProps {
 }
 
 /** The episode viewport's inline style (exported so the regression test can
- *  pin the exact width formula directly — jsdom's CSSOM can't round-trip a
+ *  pin the exact formulas directly — jsdom's CSSOM can't round-trip a
  *  cqw/cqh-mixed min()/calc() value through element.style, so asserting on
  *  the rendered DOM's style.width isn't possible there; this function is
- *  the source of truth the DOM style is built from). Width is the min of
- *  the container's own width and its height scaled by the pane ratio, both
- *  read via container-query units — so whichever tile dimension binds, the
- *  box keeps the pane shape. Height then follows from aspect-ratio on its
- *  auto axis. */
-export function episodeViewportStyle(): CSSProperties {
+ *  the source of truth the DOM style is built from).
+ *
+ *  Iris Pan (CS-DR-04 2B): BOTH width and height are plain cqw/cqh lengths so
+ *  the roll-tape crop can EASE between the two states on a persistent node —
+ *  aspect-ratio is NEVER animated (interpolating it jumps). `rolling` picks
+ *  the target:
+ *    • rolling  → the pane-shaped crop: width = min(own width, own height x
+ *      pane ratio); height = the inverse min. Whichever tile dimension binds,
+ *      the box keeps the 930:1008 pane shape and centres, letterboxed.
+ *    • not rolling → a plain full fill (100cqw x 100cqh) — the same box the
+ *      un-cropped tile always showed, but expressed in the same length family
+ *      as the crop so the transition has two interpolable endpoints. */
+export function episodeViewportStyle(rolling: boolean): CSSProperties {
+  if (!rolling) {
+    return { width: "100cqw", height: "100cqh" };
+  }
   return {
     width: `min(100cqw, calc(100cqh * (${EPISODE_PANE_W} / ${EPISODE_PANE_H})))`,
-    aspectRatio: `${EPISODE_PANE_W} / ${EPISODE_PANE_H}`,
+    height: `min(100cqh, calc(100cqw * (${EPISODE_PANE_H} / ${EPISODE_PANE_W})))`,
   };
 }
 
@@ -112,33 +123,50 @@ export default function VideoTile({
 
   const hasVideoTrack = stream !== null && stream.getVideoTracks().length > 0;
   const covered = !hasVideoTrack || camOff;
+  const reducedMotion = usePrefersReducedMotion();
+
+  // Two-tier speaking grammar (CS-DR-04). A cut own-mic outranks both — you
+  // can't be speaking into a cut mic — so it wins the border outright.
+  //   • self  → "Needle Tick" (3C): a subdued 1px INNER brass line, plus a
+  //     pulsing brass dot in the caption. Never the full bloom.
+  //   • remote → "Lamplight Bloom" (1A): a 3px full-opacity brass ring + a
+  //     breathing outer glow (breathes only when motion is allowed).
+  const showTick = speaking && isSelf && !micCut;
+  const showBloom = speaking && !isSelf && !micCut;
+  const speakingClass = micCut
+    ? "ring-2 ring-vermilion"
+    : showTick
+      ? "speaking-tick"
+      : showBloom
+        ? `speaking-bloom${reducedMotion ? "" : " is-breathing"}`
+        : "";
 
   return (
     <figure
       className={`hairline relative overflow-hidden border bg-inset ${
         fill ? "h-full min-h-0 w-full" : "aspect-video"
-      } ${
-        // A cut own-mic outranks the speaking ring (you can't be speaking into
-        // a cut mic anyway) — a loud, persistent vermilion border.
-        micCut ? "ring-2 ring-vermilion" : speaking ? "ring-2 ring-brass/70" : ""
-      }`}
+      } ${speakingClass}`}
     >
       {stream && (
         <div
-          className={episodeFrame ? "flex h-full w-full items-center justify-center" : "h-full w-full"}
-          style={episodeFrame ? { containerType: "size" } : undefined}
+          className="flex h-full w-full items-center justify-center"
+          style={{ containerType: "size" }}
         >
-          {/* episodeViewportStyle(): width = min(container width, container
-              height x pane ratio) via cqw/cqh container-query units, so BOTH
-              the width-bound and height-bound cases keep the pane shape;
-              height then follows from aspect-ratio on its auto axis.
-              Structure is IDENTICAL in both modes so the <video> node
-              survives the podcastLocked toggle (review round 1: remount
-              dropped srcObject). */}
+          {/* Iris Pan (CS-DR-04 2B): the viewport is ALWAYS this same node with
+              the SAME shape — a size container parent, one crop child, one
+              <video>. Only the child's inline width/height change between the
+              full fill and the 930:1008 pane crop (episodeViewportStyle), and
+              `iris-viewport` transitions those two cqw/cqh lengths over 420ms
+              so the crop eases in and out on the persistent node. Never a
+              branch/shape change: that would remount <video> and drop
+              srcObject (black tile — the pinned remount invariant). The crop
+              child clips the cover-cropped video; the parent centres it so the
+              letterbox falls evenly. testid is set only while framing so the
+              "no wrapper by default" contract holds. */}
           <div
             data-testid={episodeFrame ? "episode-viewport" : undefined}
-            className={episodeFrame ? "relative max-w-full overflow-hidden" : "h-full w-full"}
-            style={episodeFrame ? episodeViewportStyle() : undefined}
+            className={`relative max-w-full max-h-full overflow-hidden${reducedMotion ? "" : " iris-viewport"}`}
+            style={episodeViewportStyle(episodeFrame)}
           >
             <video
               ref={videoRef}
@@ -201,7 +229,29 @@ export default function VideoTile({
           </button>
         </div>
       )}
-      <figcaption className="kicker absolute bottom-2 left-2 bg-field/80 px-2 py-1 text-ink-soft">
+      {/* Iris Pan slate: a clapper-style flash on the roller's OWN tile when
+          the tape starts. One per viewer (their self tile), never duplicated
+          onto the partner tile. A pure overlay sibling — the video tree is
+          untouched. Suppressed under reduced motion (the flash IS the motion:
+          hard cut means it simply does not appear). */}
+      {episodeFrame && isSelf && !reducedMotion && (
+        <p
+          data-testid="slate-stamp"
+          role="status"
+          className="slate-flash kicker absolute right-2 top-2 flex items-center gap-2 bg-vermilion px-2.5 py-1 text-cream"
+        >
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-cream" />
+          Rolling — Take 01
+        </p>
+      )}
+      <figcaption className="kicker absolute bottom-2 left-2 flex items-center gap-2 bg-field/80 px-2 py-1 text-ink-soft">
+        {showTick && (
+          <span
+            data-testid="speaking-dot"
+            aria-hidden
+            className={`h-1.5 w-1.5 rounded-full bg-brass${reducedMotion ? "" : " animate-pulse"}`}
+          />
+        )}
         {label}
       </figcaption>
     </figure>

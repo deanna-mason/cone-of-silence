@@ -14,6 +14,7 @@ import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useCallSession } from "@/hooks/useCallSession";
 import { usePodcastTake } from "@/hooks/usePodcastTake";
+import { useSpeaking } from "@/hooks/useSpeaking";
 import { mergePanel, useEpisodeExchange } from "@/hooks/useEpisodeExchange";
 import { getSession } from "@/lib/authApi";
 import type { CallStatus } from "@/lib/webrtc/session";
@@ -122,6 +123,10 @@ export default function RoomPage() {
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys, media.stream, stage === "in-room", forceRelay);
+  // Self "Needle Tick" (CS-DR-04 3C): the same speaking detector the remote
+  // tiles use, run on the LOCAL stream. Unconditional hook — safe to compute
+  // even before the room mounts (returns false with no audio track).
+  const selfSpeaking = useSpeaking(media.stream);
 
   // Podcast mode is for logged-in hosts only; anonymous guests get the plain
   // call. `authed` is read in an effect so the server render never touches
@@ -450,6 +455,7 @@ export default function RoomPage() {
           label="You"
           mirrored
           isSelf
+          speaking={selfSpeaking}
           camOff={!media.camOn}
           micCut={!media.micOn}
           episodeFrame={podcastLocked}
@@ -465,6 +471,9 @@ export default function RoomPage() {
                 ? (podcast.partnerCodename ?? "Agent 2")
                 : `Agent ${i + 2}`
             }
+            // While the tape rolls the composite crops both cameras — crop the
+            // partner tile too so the preview is honest (CS-DR-04 2B).
+            episodeFrame={podcastLocked}
           />
         ))}
         {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}
