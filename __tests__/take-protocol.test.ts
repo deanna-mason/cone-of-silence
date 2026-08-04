@@ -119,18 +119,35 @@ interface LogEntry {
   arg?: unknown;
 }
 
-function makeCb(): { cb: TakeCallbacks; log: LogEntry[] } {
+// No `: TakeCallbacks` annotation on `cb` (and no explicit return type on
+// makeCb) — an explicit interface annotation here would WIDEN each vi.fn()
+// back down to the interface's plain `(name: string) => void` shape, erasing
+// the Mock-specific members (mockClear, mock.calls, ...) that callers below
+// rely on. `satisfies` checks the same structural compatibility TakeCoordinator
+// needs without that widening, matching the suite's existing typed-mock idiom
+// (vi.fn<Sig>(), e.g. __tests__/room-pin-studio.test.tsx's `getUserMedia`).
+function makeCb() {
   const log: LogEntry[] = [];
-  const cb: TakeCallbacks = {
-    onPartnerCodename: vi.fn((name: string) => log.push({ name: "onPartnerCodename", at: Date.now(), arg: name })),
-    onCountdown: vi.fn((msLeft: number) => log.push({ name: "onCountdown", at: Date.now(), arg: msLeft })),
-    onStartRecorders: vi.fn((takeId: string) => log.push({ name: "onStartRecorders", at: Date.now(), arg: takeId })),
-    onMark: vi.fn(() => log.push({ name: "onMark", at: Date.now() })),
-    onStopMark: vi.fn(() => log.push({ name: "onStopMark", at: Date.now() })),
-    onStopRecorders: vi.fn((takeId: string) => log.push({ name: "onStopRecorders", at: Date.now(), arg: takeId })),
-    onAborted: vi.fn((takeId: string) => log.push({ name: "onAborted", at: Date.now(), arg: takeId })),
-    onBeacon: vi.fn((b: Beacon) => log.push({ name: "onBeacon", at: Date.now(), arg: b })),
-  };
+  const cb = {
+    onPartnerCodename: vi.fn<(name: string) => void>((name) =>
+      log.push({ name: "onPartnerCodename", at: Date.now(), arg: name }),
+    ),
+    onCountdown: vi.fn<(msLeft: number) => void>((msLeft) =>
+      log.push({ name: "onCountdown", at: Date.now(), arg: msLeft }),
+    ),
+    onStartRecorders: vi.fn<(takeId: string) => void>((takeId) =>
+      log.push({ name: "onStartRecorders", at: Date.now(), arg: takeId }),
+    ),
+    onMark: vi.fn<() => void>(() => log.push({ name: "onMark", at: Date.now() })),
+    onStopMark: vi.fn<() => void>(() => log.push({ name: "onStopMark", at: Date.now() })),
+    onStopRecorders: vi.fn<(takeId: string) => void>((takeId) =>
+      log.push({ name: "onStopRecorders", at: Date.now(), arg: takeId }),
+    ),
+    onAborted: vi.fn<(takeId: string) => void>((takeId) =>
+      log.push({ name: "onAborted", at: Date.now(), arg: takeId }),
+    ),
+    onBeacon: vi.fn<(b: Beacon) => void>((b) => log.push({ name: "onBeacon", at: Date.now(), arg: b })),
+  } satisfies TakeCallbacks;
   return { cb, log };
 }
 
@@ -1210,6 +1227,16 @@ describe("parseWireMsg field validation (malformed messages silently ignored)", 
     {
       label: "pod/beacon fault wrong type (number)",
       text: JSON.stringify({ t: "pod/beacon", rolling: true, bytes: 1, camOk: true, micOk: true, fault: 7 }),
+    },
+    {
+      // Review finding: a string that ISN'T one of watchdog.ts's FaultCause
+      // literals must be rejected too, not just a wrong TYPE — a raw
+      // typeof === "string" check lets this straight through to
+      // components/PodcastPanel.tsx's CAUSE_COPY[fault] lookup, which
+      // renders "PARTNER: undefined" for any cause the sender didn't
+      // actually name (or fabricated).
+      label: "pod/beacon fault is a string but not a valid FaultCause literal",
+      text: JSON.stringify({ t: "pod/beacon", rolling: true, bytes: 1, camOk: true, micOk: true, fault: "gremlins" }),
     },
     // junk overall — already-covered conventions, kept here to pin them
     { label: "unparseable JSON", text: "{not json" },

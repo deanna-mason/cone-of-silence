@@ -8,7 +8,7 @@
 // other protocols can share the same channel later; anything else (foreign
 // "t", or unparseable JSON) is silently ignored.
 import type { CallBus } from "@/hooks/useCallSession";
-import type { Beacon } from "./watchdog";
+import type { Beacon, FaultCause } from "./watchdog";
 import { MARK_TOTAL_MS } from "./toneMark";
 
 export const COUNTDOWN_MS = 3_500; // proposer lead: countdown + schedule slack
@@ -69,6 +69,31 @@ type BeaconMsg = { t: "pod/beacon" } & Beacon;
 
 type WireMsg = HelloMsg | PingMsg | PongMsg | RollMsg | RollAckMsg | StopMsg | BeaconMsg;
 
+// Every literal of watchdog.ts's FaultCause union, kept here (not derived
+// mechanically — TS has no runtime reflection over a type) so parseWireMsg
+// can enforce enum MEMBERSHIP, not just typeof === "string". A member-lint
+// mismatch here would be caught by TS: FAULT_CAUSES is typed
+// `ReadonlySet<FaultCause>`, so a typo'd or stale literal fails to compile.
+const FAULT_CAUSES: ReadonlySet<FaultCause> = new Set<FaultCause>([
+  "camera-lost",
+  "mic-lost",
+  "encoder-stalled",
+  "disk-error",
+  "encoder-error",
+  "partner-fault",
+  "partner-silent",
+]);
+
+/** Mirrors lib/podcast/transfer.ts's isValidOffer's enum-membership style
+ *  (`rec.base === "audio" || rec.base === "video"`) — a string that ISN'T
+ *  one of these literals must be rejected, not merely any string. An
+ *  unvalidated `fault` would reach components/PodcastPanel.tsx's
+ *  `CAUSE_COPY[fault]` lookup and render "PARTNER: undefined" for any cause
+ *  a malformed or adversarial peer named. */
+function isFaultCause(x: unknown): x is FaultCause {
+  return typeof x === "string" && FAULT_CAUSES.has(x as FaultCause);
+}
+
 /** Parses one wire message. Returns null for unparseable JSON, a non-object,
  *  an unrecognized/foreign `t`, or a recognized `t` with a malformed field —
  *  every rejection path is silent, never throws, mirroring
@@ -125,14 +150,15 @@ function parseWireMsg(text: string): WireMsg | null {
       if (typeof m.bytes !== "number" || !Number.isFinite(m.bytes)) return null;
       if (typeof m.camOk !== "boolean") return null;
       if (typeof m.micOk !== "boolean") return null;
-      if (m.fault !== null && typeof m.fault !== "string") return null;
+      const fault = m.fault;
+      if (fault !== null && !isFaultCause(fault)) return null;
       return {
         t: "pod/beacon",
         rolling: m.rolling,
         bytes: m.bytes,
         camOk: m.camOk,
         micOk: m.micOk,
-        fault: m.fault as Beacon["fault"],
+        fault,
       };
     }
     default:
