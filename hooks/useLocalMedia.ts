@@ -26,6 +26,10 @@ export interface LocalMedia {
   hasCamera: boolean;
   failure: MediaFailure | null;
   switchDevice: (kind: "audio" | "video", deviceId: string) => Promise<void>;
+  /** Phone front/back flip: toggles facingMode (user⇄environment) and drops
+   *  any explicit camera choice, since a deviceId names one physical camera.
+   *  Re-acquires like switchDevice — mute state preserved, old track released. */
+  flipCamera: () => Promise<void>;
   toggleMic: () => void;
   toggleCam: () => void;
   retry: () => void;
@@ -80,14 +84,15 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
     };
   }, []);
 
-  async function switchDevice(kind: "audio" | "video", deviceId: string): Promise<void> {
+  // Shared re-acquire behind switchDevice/flipCamera: swap to `next`, keep the
+  // live mute state, release the old capture, and drop any stream a newer
+  // re-acquire has already superseded (switchGen). The stream state change
+  // propagates to the mesh via useCallSession's setLocalStream effect — no
+  // renegotiation, tracks are replaced in place.
+  async function reacquire(next: MediaDeviceChoice): Promise<void> {
     const gen = ++switchGen.current;
     const keepMicOn = micOn;
     const keepCamOn = camOn;
-    const next: MediaDeviceChoice = {
-      ...choiceRef.current,
-      [kind === "audio" ? "audioDeviceId" : "videoDeviceId"]: deviceId,
-    };
     choiceRef.current = next;
     setChoice(next);
     stashDeviceChoice(next);
@@ -111,6 +116,26 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
       if (switchGen.current !== gen) return;
       setFailure(err instanceof MediaError ? err.reason : "unavailable");
     }
+  }
+
+  async function switchDevice(kind: "audio" | "video", deviceId: string): Promise<void> {
+    // An explicit camera pick names one physical device — drop any facingMode
+    // (they'd conflict); an explicit mic pick leaves the camera choice as-is.
+    const next: MediaDeviceChoice =
+      kind === "audio"
+        ? { ...choiceRef.current, audioDeviceId: deviceId }
+        : { ...choiceRef.current, videoDeviceId: deviceId, facingMode: undefined };
+    await reacquire(next);
+  }
+
+  async function flipCamera(): Promise<void> {
+    const current = choiceRef.current.facingMode ?? "user";
+    const next: MediaDeviceChoice = {
+      ...choiceRef.current,
+      facingMode: current === "user" ? "environment" : "user",
+      videoDeviceId: undefined,
+    };
+    await reacquire(next);
   }
 
   function toggleMic(): void {
@@ -149,6 +174,7 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
     hasCamera: stream !== null && stream.getVideoTracks().length > 0,
     failure,
     switchDevice,
+    flipCamera,
     toggleMic,
     toggleCam,
     retry,
