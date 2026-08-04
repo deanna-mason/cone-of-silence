@@ -404,7 +404,7 @@ export default function RoomPage() {
           mirrored
           isSelf
           camOff={!media.camOn}
-          fullFrame={podcastLocked}
+          episodeFrame={podcastLocked}
         />
         {call.peers.map((p, i) => (
           <RemoteTile

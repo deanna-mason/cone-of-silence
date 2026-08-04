@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
 
 interface VideoTileProps {
   stream: MediaStream | null;
@@ -12,9 +13,12 @@ interface VideoTileProps {
   fill?: boolean; // Phase 4B: size from the parent grid cell instead of aspect-video
   signalLost?: boolean;
   speaking?: boolean;
-  /** Honest framing (spec §5A): letterbox instead of crop, so the monitor
-   *  shows exactly the frame the tape is recording. Self tile, while rolling. */
-  fullFrame?: boolean;
+  /** Episode framing (design 2026-08-03): while the tape rolls, show exactly
+   *  the mp4's visible region — a centered viewport at the darkroom pane
+   *  aspect with the video cover-cropped inside it, letterbox around it.
+   *  Replaces the old object-contain fullFrame monitor: the composite now
+   *  cover-crops, so the honest preview is the crop. */
+  episodeFrame?: boolean;
 }
 
 export default function VideoTile({
@@ -26,7 +30,7 @@ export default function VideoTile({
   fill = false,
   signalLost = false,
   speaking = false,
-  fullFrame = false,
+  episodeFrame = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
@@ -91,18 +95,33 @@ export default function VideoTile({
         fill ? "h-full min-h-0 w-full" : "aspect-video"
       } ${speaking ? "ring-2 ring-brass/70" : ""}`}
     >
-      {stream && (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          className={`h-full w-full ${fullFrame ? "object-contain" : "object-cover"} ${
-            mirrored ? "-scale-x-100" : ""
-          } ${covered ? "invisible" : ""} ${
-            audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""
-          }`}
-        />
-      )}
+      {stream &&
+        (() => {
+          const video = (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""} ${
+                covered ? "invisible" : ""
+              } ${audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""}`}
+            />
+          );
+          if (!episodeFrame) return video;
+          return (
+            <div className="flex h-full w-full items-center justify-center">
+              {/* aspect-ratio + max-width: whichever tile dimension binds,
+                  the box keeps the pane shape (CSS transferred-size rules). */}
+              <div
+                data-testid="episode-viewport"
+                className="relative max-w-full overflow-hidden"
+                style={{ aspectRatio: `${EPISODE_PANE_W} / ${EPISODE_PANE_H}`, height: "100%" }}
+              >
+                {video}
+              </div>
+            </div>
+          );
+        })()}
       {covered && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
           <svg aria-hidden viewBox="0 0 200 200" className="h-20 w-20 text-ink-faint/50">

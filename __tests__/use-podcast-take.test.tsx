@@ -934,7 +934,7 @@ describe("usePodcastTake", () => {
   });
 });
 
-describe("VideoTile honest framing", () => {
+describe("VideoTile episode framing", () => {
   beforeEach(() => {
     window.HTMLMediaElement.prototype.play = () => Promise.resolve();
   });
@@ -946,15 +946,20 @@ describe("VideoTile honest framing", () => {
     getVideoTracks: () => [{}],
   } as unknown as MediaStream;
 
-  it("letterboxes the frame when fullFrame is set", () => {
-    const { container } = render(<VideoTile stream={stream} label="You" fullFrame />);
+  it("shows the episode crop viewport when episodeFrame is set", () => {
+    const { container, getByTestId } = render(
+      <VideoTile stream={stream} label="You" episodeFrame />,
+    );
+    // The viewport mirrors the darkroom pane shape — what you frame is what ships.
+    const viewport = getByTestId("episode-viewport");
+    expect(viewport.style.aspectRatio).toBe("930 / 1008");
     const video = container.querySelector("video")!;
-    expect(video.className).toContain("object-contain");
-    expect(video.className).not.toContain("object-cover");
+    expect(video.className).toContain("object-cover");
   });
 
-  it("crops to fill by default", () => {
-    const { container } = render(<VideoTile stream={stream} label="You" />);
+  it("fills the tile edge-to-edge by default (no viewport wrapper)", () => {
+    const { container, queryByTestId } = render(<VideoTile stream={stream} label="You" />);
+    expect(queryByTestId("episode-viewport")).toBeNull();
     const video = container.querySelector("video")!;
     expect(video.className).toContain("object-cover");
     expect(video.className).not.toContain("object-contain");
