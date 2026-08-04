@@ -255,8 +255,14 @@ export default function PodcastPanel({
         <div className={ROW_BAR}>
           <div className="flex items-center gap-3">
             <p className="kicker shrink-0 text-sienna">◈ Transmitting</p>
-            <p className="flex-1 truncate font-body text-sm text-ink-soft">
-              {`${state.file} · ${mbNum(state.sentBytes)}/${mbNum(state.totalBytes)} MB · ${state.mbps.toFixed(1)} MB/s · ETA ${eta}`}
+            {/* Progress numbers lead (never ellipsized); the take file name
+                is dropped below sm and trails on the desktop line, so a
+                width-bound truncate eats the file name, not the numbers —
+                the "…transmission t…" bug (8/3). ProgressBar carries progress
+                visually regardless. */}
+            <p className="min-w-0 flex-1 truncate font-body text-sm text-ink-soft">
+              {`${mbNum(state.sentBytes)}/${mbNum(state.totalBytes)} MB · ${state.mbps.toFixed(1)} MB/s · ETA ${eta}`}
+              <span className="hidden sm:inline">{` · ${state.file}`}</span>
             </p>
           </div>
           <ProgressBar pct={pctOf(state.sentBytes, state.totalBytes)} />
@@ -270,8 +276,11 @@ export default function PodcastPanel({
         <div className={ROW_BAR}>
           <div className="flex items-center gap-3">
             <p className="kicker shrink-0 text-sienna">◈ Incoming Reel</p>
-            <p className="flex-1 truncate font-body text-sm text-ink-soft">
-              {`${state.fromCodename ?? "Partner"} transmits ${state.file} · ${mbNum(state.committedBytes)}/${mbNum(state.totalBytes)} MB · ETA ${eta}`}
+            {/* Same rule as xfer-sending: sender + progress numbers lead, the
+                part file name is dropped below sm and trails on desktop. */}
+            <p className="min-w-0 flex-1 truncate font-body text-sm text-ink-soft">
+              {`${state.fromCodename ?? "Partner"} · ${mbNum(state.committedBytes)}/${mbNum(state.totalBytes)} MB · ETA ${eta}`}
+              <span className="hidden sm:inline">{` · ${state.file}`}</span>
             </p>
           </div>
           <ProgressBar pct={pctOf(state.committedBytes, state.totalBytes)} />

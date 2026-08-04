@@ -167,7 +167,7 @@ describe("PodcastPanel", () => {
     expect(screen.getByText("Cutting the tape…")).toBeDefined();
   });
 
-  test("xfer-sending — kicker, progress copy with ETA, no buttons", () => {
+  test("xfer-sending — progress numbers lead the line, file name trails (dropped below sm), no buttons", () => {
     renderState({
       kind: "xfer-sending",
       file: "audio.part001",
@@ -177,9 +177,11 @@ describe("PodcastPanel", () => {
       etaS: 83,
     });
     expect(screen.getByText("◈ Transmitting")).toBeDefined();
-    expect(
-      screen.getByText("audio.part001 · 1.2/4.6 MB · 1.2 MB/s · ETA 01:23"),
-    ).toBeDefined();
+    // Numbers-first, so a narrow-width truncate eats the file name, not the
+    // progress readout (the "…transmission t…" bug, 8/3).
+    expect(screen.getByText("1.2/4.6 MB · 1.2 MB/s · ETA 01:23")).toBeDefined();
+    // The file name trails in its own drop-below-sm span.
+    expect(screen.getByText(/audio\.part001/)).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -192,7 +194,8 @@ describe("PodcastPanel", () => {
       mbps: 0,
       etaS: null,
     });
-    expect(screen.getByText("audio.part000 · 0.0/1.0 MB · 0.0 MB/s · ETA —")).toBeDefined();
+    expect(screen.getByText("0.0/1.0 MB · 0.0 MB/s · ETA —")).toBeDefined();
+    expect(screen.getByText(/audio\.part000/)).toBeDefined();
   });
 
   test("xfer-receiving — names the sender, no mbps in copy, no buttons", () => {
@@ -206,9 +209,9 @@ describe("PodcastPanel", () => {
       fromCodename: "Falcon",
     });
     expect(screen.getByText("◈ Incoming Reel")).toBeDefined();
-    expect(
-      screen.getByText("Falcon transmits video.part002 · 2.0/6.0 MB · ETA 00:40"),
-    ).toBeDefined();
+    // Sender + progress numbers lead; the part file name trails (dropped below sm).
+    expect(screen.getByText("Falcon · 2.0/6.0 MB · ETA 00:40")).toBeDefined();
+    expect(screen.getByText(/video\.part002/)).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -222,9 +225,8 @@ describe("PodcastPanel", () => {
       etaS: null,
       fromCodename: null,
     });
-    expect(
-      screen.getByText("Partner transmits video.part000 · 0.0/1.0 MB · ETA —"),
-    ).toBeDefined();
+    expect(screen.getByText("Partner · 0.0/1.0 MB · ETA —")).toBeDefined();
+    expect(screen.getByText(/video\.part000/)).toBeDefined();
   });
 
   test("xfer-interrupted (send, canResend) — Resume Transmission fires onResendEpisode; Stand Down fires onDismissXfer", () => {
