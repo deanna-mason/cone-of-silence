@@ -12,7 +12,17 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Agent worktrees: full nested repo copies, not source to lint.
+    ".claude/**",
+    ".superpowers/**",
   ]),
+  // e2e/ scripts are plain Node, run outside the TS toolchain.
+  {
+    files: ["e2e/**/*.js"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

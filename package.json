@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:all": "vitest run && npm --prefix server test",
     "darkroom": "node scripts/darkroom/index.mjs"
   },
   "dependencies": {

@@ -90,8 +90,20 @@ policies, so only the server's service-role key can read anything.
 
 ## Run locally
 
+**Prereqs:** Node 22; [ffmpeg](https://ffmpeg.org) built with the `arnndn`
+filter plus its RNNoise model, for Studio's noise-reduction pass; a Supabase
+project — the server refuses to start without `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY`, so lobby, calls, accounts, and studio are all
+unavailable without one.
+
+Copy the env examples and fill them in: [`env.example`](env.example)
+(frontend) and [`server/env.example`](server/env.example) (server).
+
 ```bash
-cd server && cp env.example .env && npm i && npm run dev   # API :8787
+# terminal 1 — server (repo root)
+cd server && cp env.example .env && npm i && npm run dev   # API + ws :8787
+
+# terminal 2 — web (repo root)
 npm i && npm run dev                                       # frontend :3000
 ```
 
@@ -99,3 +111,22 @@ Studio processing needs `ffmpeg` (with `arnndn`) plus `RNNOISE_MODEL` and
 `UPLOAD_DIR` in `server/.env`. Fresh database: `supabase db push`.
 
 Darkroom (episode post): the podcast Mac needs node, ffmpeg with arnndn, and the rnnoise model at server/models/std.rnnn — `npm run darkroom -- --vault <Tape Vault>`.
+
+## Tests
+
+```bash
+npm test                       # root: vitest (frontend units + darkroom)
+npm --prefix server test       # server: vitest (API, stores, ws, studio)
+npm run test:all               # both, one command
+```
+
+`e2e/*.js` are manual, macOS-bound headless-Chrome scripts (real WebRTC
+calls, real ffmpeg) — not part of any automated suite; each file's header
+comment has its run instructions.
+
+## Docs
+
+- [`docs/security-model.md`](docs/security-model.md) — threat model and
+  fail-closed guarantees
+- [`docs/drills/`](docs/drills) — live-call and podcast-take drill reports
+- [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) — droplet deploy and operations
