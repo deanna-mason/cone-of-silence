@@ -14,7 +14,19 @@ this is the human half of the same acceptance.
 | 3 | MOTIV Mix closed on both machines. |
 | 4 | Mic meters peak ≈ -12 on both sides before ROLL TAPE. |
 
-## Take drill
+## Echo discriminator (F3, 2026-08-03 drill) — run BEFORE the 40-minute take
+
+Proves whether the 8/3 "cut mic still audible" ghost was an echo loop or a
+real transmit leak (the code audit exonerated the transmit path — see
+`2026-08-03-drill-report.md` F3). Needs the two Macs co-located plus ONE
+extra seat in another room with speakers ON, no headphones (a phone on
+cellular is ideal). Ordinary call, ~5 minutes.
+
+| # | Step | Expect |
+|---|------|--------|
+| E1 | Host A cuts their mic and talks | The ghost reproduces: A's voice comes back through the machines after a beat |
+| E2 | Host B cuts their mic too (both room mics cut); A keeps talking | Machines go silent → echo loop proven, app cleared. Co-located seats wear headphones from here on (and for the take: open speakers would bleed call playback onto the raw tapes) |
+| E3 | Only if E2 still carries A's voice | STOP — real transmit leak. `chrome://webrtc-internals` on A's Mac → Create dump; do not proceed to the take; report |
 
 | # | Step | Expect |
 |---|------|--------|
