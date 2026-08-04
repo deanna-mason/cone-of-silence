@@ -37,6 +37,47 @@ join-only — the 90 s retry window expired and every client went terminal.
 - Linux seat media failure is unexplained until diagnostics exist; suspects
   range from codec support to network path — do not guess, measure.
 
+## Linux seat — investigation update (2026-08-03)
+
+Seat identified: Chromium 150.0.7871.128 (snap), Ubuntu 25.10, arm64
+(Lenovo Yoga Slim 7x, Snapdragon). Live two-person retest with the operator;
+still media-dead. Findings, measured server-side unless noted:
+
+- Camera: getUserMedia `NotFoundError` → app degraded to mic-only as
+  designed. No Linux driver for that webcam; permanent for this machine,
+  unrelated to the media failure (receiving needs no camera).
+- Ruled out: invite-link integrity (fresh links compared identical),
+  room mismatch, signaling (both clients' websockets observed connected on
+  the droplet), TURN reachability (4 TCP connections from his IP), TURN
+  auth (runbook verify + REST-minted creds both allocate; CreatePermission
+  traffic in syslog), server room state (operator's two-tab control call
+  connected in seconds), the shared wifi (other seats fine on it).
+- His ICE candidates include Docker bridge (172.17.0.1), 172.22.0.25, and
+  a Tailscale/CGNAT address (100.64.0.16). Tailscale was running;
+  `tailscale down` alone did not fix (no reboot tried — tun interface may
+  linger).
+- Net: signaling and TURN control traffic work from his machine; ICE never
+  completes. Everything app- and server-side is exonerated.
+
+Suspended 2026-08-03 (edge-case hardware, diminishing returns). If resumed:
+webrtc-internals dump per the operator playbook (ICE state chains +
+candidate types), reboot after tailscale down, Firefox A/B on the same
+machine.
+
+Two systemic findings from the retest, worth their own tickets:
+
+- Phase 5 proof-gating hides unproven peers, so a transport failure now
+  renders as an empty room with no card — the 7/30 symptom (tiles, dead
+  media) and tonight's (no tiles) are the SAME failure under different
+  frontends. Consider a "proving…" placeholder tile or surfacing proof
+  timeout.
+- The header shows "Agents present: 1" while status is still "connecting",
+  indistinguishable from a successful lonely join.
+- Vercel redeploys the frontend on every push; the droplet server deploys
+  only by hand — they skewed for days (frontend Phase 5D vs server 7/27).
+  Wire protocol happened to be unchanged, so no breakage this time. Deploy
+  the server alongside, or pin the frontend, before the next drill.
+
 ## Tester feedback (→ Phase 5/6 visual pass; record, don't fix)
 
 - Speaking glow works but is too subtle — thicker ring or brighter glow.
