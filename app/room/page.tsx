@@ -3,13 +3,27 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import VideoTile from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
 import InCallDeviceBar from "@/components/InCallDeviceBar";
-import PodcastPanel from "@/components/PodcastPanel";
+
+// The podcast deck (recorder, Tape Vault, exchange, tone marks) is a heavy
+// slice only two logged-in hosts ever use — code-split it so guests and plain
+// callers never download it. next/dynamic = React.lazy + Suspense; the `loading`
+// fallback genuinely renders while the chunk arrives (sized to the panel's row
+// to avoid layout shift).
+const PodcastPanel = dynamic(() => import("@/components/PodcastPanel"), {
+  loading: () => (
+    <div className="hairline flex h-12 items-center gap-3 border bg-inset px-4">
+      <p className="kicker shrink-0 text-ink-soft">◈ Studio Deck</p>
+      <p className="font-body text-sm text-ink-soft">Warming up the equipment…</p>
+    </div>
+  ),
+});
 import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useCallSession } from "@/hooks/useCallSession";
