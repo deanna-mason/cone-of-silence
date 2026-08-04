@@ -46,8 +46,8 @@ export default function RootLayout({
       <body className="flex min-h-full flex-col">
         <NavBar />
         <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-12">{children}</main>
-        <footer className="kicker mx-auto w-full max-w-3xl px-6 py-8 text-ink-soft">
-          <span className="hairline border-t pt-3 block">
+        <footer className="kicker mx-auto w-full max-w-3xl px-6 py-8 text-center text-ink-soft">
+          <span className="hairline block border-t pt-3">
             Cone of Silence · Property of the Bureau · Destroy after reading
           </span>
         </footer>
