@@ -55,7 +55,7 @@
 // What this check verifies instead (NARROWLY — see the "what this does NOT
 // verify" note below, added in review round 2): it builds a small
 // VERIFICATION mix directly from the developed episode's own
-// `raw/local-audio.webm` + `raw/remote-audio.webm` (the exact bytes
+// `raw/local-audio.mkv` + `raw/remote-audio.mkv` (the exact bytes
 // `developEpisode` reassembled from the vault's parts) using
 // `remoteAudioFilter(ratio)` and the `adelay` derived from `delayMs`/`who`
 // — read straight out of the just-written `develop.json`, and the SAME
@@ -241,8 +241,8 @@ async function ffprobeDuration(file) {
 // ---------------------------------------------------------------------
 
 async function verifyRawAlignment(rawDir, develop, truth, darkroom) {
-  const localRaw = path.join(rawDir, "local-audio.webm");
-  const remoteRaw = path.join(rawDir, "remote-audio.webm");
+  const localRaw = path.join(rawDir, "local-audio.mkv");
+  const remoteRaw = path.join(rawDir, "remote-audio.mkv");
   // Minor (Task 7 review round 2): this is scratch, not an episode product
   // — it lives in its own OS-temp dir (never under episodes/<id>/, and
   // never reusing pipeline.mjs's own work/ scratch dir, which is deleted by
@@ -407,8 +407,8 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
   // rate-corrected + delayed length) modulo encoder priming. A side-swap
   // bug (who computed backwards) would apply the delay to the wrong side
   // and throw this off independently of check 4's verification mix. ----
-  const localAudioDurationS = await ffprobeDuration(path.join(rawDir, "local-audio.webm"));
-  const remoteAudioDurationS = await ffprobeDuration(path.join(rawDir, "remote-audio.webm"));
+  const localAudioDurationS = await ffprobeDuration(path.join(rawDir, "local-audio.mkv"));
+  const remoteAudioDurationS = await ffprobeDuration(path.join(rawDir, "remote-audio.mkv"));
   const localDelayS = develop.who === "local" ? develop.delayMs / 1000 : 0;
   const remoteDelayS = develop.who === "remote" ? develop.delayMs / 1000 : 0;
   const expectedM4aDuration = Math.max(localAudioDurationS + localDelayS, remoteAudioDurationS * develop.ratio + remoteDelayS);
@@ -442,7 +442,7 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
   // delay term — needed now that episode-fix02 exercises who==="local",
   // where local's own chain (raw + its own tpad delay) is what the mp4's
   // video is actually pinned to, not local's raw length alone.
-  const localVideoDurationS = await ffprobeDuration(path.join(rawDir, "local-video.webm"));
+  const localVideoDurationS = await ffprobeDuration(path.join(rawDir, "local-video.mkv"));
   const localReferenceDuration = localVideoDurationS + localDelayS;
   const mp4Duration = Number(mp4Probe.format.duration);
   const durationDeltaS = Math.abs(mp4Duration - localReferenceDuration);

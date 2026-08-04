@@ -151,7 +151,10 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
     for (const stream of episode.streams) {
       const key = `${stream.host}-${stream.base}`;
       const concatPath = path.join(workDir, `${key}.concat`);
-      const finalPath = path.join(rawDir, `${key}.webm`);
+      // .mkv, not .webm: real takes record h264-in-webm (the 5A recorder's
+      // preferred mime), and ffmpeg's WebM MUXER refuses h264 even though it
+      // demuxes it fine. Matroska accepts h264, vp8/vp9, and opus alike.
+      const finalPath = path.join(rawDir, `${key}.mkv`);
       await reassemble(stream.entries, stream.dir, concatPath);
       await deps.runner.run(remuxArgs(concatPath, finalPath));
       await fsp.rm(concatPath, { force: true });

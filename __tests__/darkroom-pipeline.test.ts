@@ -512,10 +512,10 @@ describe("pipeline.mjs — developEpisode", () => {
     expect(fs.existsSync(finalMp4)).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "NIGHTINGALE.m4a"))).toBe(true);
-    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.webm"))).toBe(true);
-    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-video.webm"))).toBe(true);
-    expect(fs.existsSync(path.join(episodesRoot, "raw", "remote-audio.webm"))).toBe(true);
-    expect(fs.existsSync(path.join(episodesRoot, "raw", "remote-video.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.mkv"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-video.mkv"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "remote-audio.mkv"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "remote-video.mkv"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "develop.json"))).toBe(true);
     const onDisk = JSON.parse(await fsp.readFile(path.join(episodesRoot, "develop.json"), "utf8"));
     expect(onDisk).toEqual(receipt);
@@ -540,10 +540,10 @@ describe("pipeline.mjs — developEpisode", () => {
 
     expect(calls.length).toBe(12);
     expect(calls[0]).toEqual(["-version"]);
-    expect(lastArg(calls[1])).toBe(path.join(rawDir, "local-audio.webm"));
-    expect(lastArg(calls[2])).toBe(path.join(rawDir, "local-video.webm"));
-    expect(lastArg(calls[3])).toBe(path.join(rawDir, "remote-audio.webm"));
-    expect(lastArg(calls[4])).toBe(path.join(rawDir, "remote-video.webm"));
+    expect(lastArg(calls[1])).toBe(path.join(rawDir, "local-audio.mkv"));
+    expect(lastArg(calls[2])).toBe(path.join(rawDir, "local-video.mkv"));
+    expect(lastArg(calls[3])).toBe(path.join(rawDir, "remote-audio.mkv"));
+    expect(lastArg(calls[4])).toBe(path.join(rawDir, "remote-video.mkv"));
     expect(lastArg(calls[5])).toBe("-"); // measureStem(local)
     expect(lastArg(calls[6])).toBe(path.join(stemsDir, "CARDINAL.m4a")); // applyStemArgs(local)
     expect(lastArg(calls[7])).toBe("-"); // measureStem(remote)
@@ -737,7 +737,7 @@ describe("pipeline.mjs — developEpisode", () => {
     expect(fs.existsSync(path.join(episodesRoot, "develop.json"))).toBe(false);
     expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(false);
     // But the real, already-completed upstream work survives, re-runnable:
-    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.webm"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.mkv"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
   }, 20000);
 });
