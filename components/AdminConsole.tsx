@@ -321,7 +321,8 @@ export default function AdminConsole() {
         </div>
       )}
 
-      <table className="mt-6 w-full text-left font-type text-sm">
+      <div className="mt-6 overflow-x-auto">
+      <table className="w-full text-left font-type text-sm">
         <thead>
           <tr className="kicker text-ink-soft">
             <th className="pb-2">Label</th>
@@ -428,6 +429,7 @@ export default function AdminConsole() {
           )}
         </tbody>
       </table>
+      </div>
     </section>
   );
 }
