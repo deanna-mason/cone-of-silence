@@ -25,10 +25,21 @@ export class MediaError extends Error {
 
 const DEVICE_KEY = "cos-devices";
 
+// Episodes are YouTube-bound: ask for 1080p30, but only as *ideal* — ideal
+// never hard-fails, it degrades gracefully on weak devices. Capture resolution
+// drives recorder quality; call encodes self-adapt regardless.
+const VIDEO_QUALITY: MediaTrackConstraints = {
+  width: { ideal: 1920 },
+  height: { ideal: 1080 },
+  frameRate: { ideal: 30 },
+};
+
 function toConstraints(choice: MediaDeviceChoice): MediaStreamConstraints {
   return {
     audio: choice.audioDeviceId ? { deviceId: { exact: choice.audioDeviceId } } : true,
-    video: choice.videoDeviceId ? { deviceId: { exact: choice.videoDeviceId } } : true,
+    video: choice.videoDeviceId
+      ? { deviceId: { exact: choice.videoDeviceId }, ...VIDEO_QUALITY }
+      : { ...VIDEO_QUALITY },
   };
 }
 
@@ -81,7 +92,7 @@ export async function getLocalStream(choice: MediaDeviceChoice = {}): Promise<Me
   }
   if (hasExplicitChoice) {
     try {
-      return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: { ...VIDEO_QUALITY } });
     } catch (err) {
       if (!isMissingDevice(err)) throw toMediaError(err);
     }
