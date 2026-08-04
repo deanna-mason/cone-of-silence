@@ -303,8 +303,12 @@ describe("episodeStore", () => {
   it("(a) readSendPlan rejects when a sidecar is missing", async () => {
     const { dir, takeId } = await freshTakeDir();
     seedJson(dir, "audio.sidecar.json", { base: "audio", parts: [] });
-    // video.sidecar.json never seeded.
-    await expect(readSendPlan(takeId)).rejects.toBeTruthy();
+    // video.sidecar.json never seeded — readSidecarPlan's getFileHandle
+    // (no create:true) rejects with the real File System Access API's
+    // DOMException for a missing entry, propagated verbatim (readSendPlan
+    // has no try/catch of its own around it).
+    await expect(readSendPlan(takeId)).rejects.toBeInstanceOf(DOMException);
+    await expect(readSendPlan(takeId)).rejects.toMatchObject({ name: "NotFoundError" });
   });
 
   // -- (b) openPartReader --------------------------------------------------
@@ -505,7 +509,12 @@ describe("episodeStore", () => {
     seedFile(dir, "audio.sidecar.json", new TextEncoder().encode("{not valid json"));
     seedJson(dir, "video.sidecar.json", { base: "video", parts: [] });
 
-    await expect(writeManifest(takeId, { video: [], audio: [] }, null, { now: () => 1000 })).rejects.toBeTruthy();
+    // readLocalSidecarParts has no try/catch around JSON.parse — only around
+    // the getFileHandle absence check — so an unparseable sidecar propagates
+    // the native SyntaxError verbatim rather than being papered over.
+    await expect(
+      writeManifest(takeId, { video: [], audio: [] }, null, { now: () => 1000 }),
+    ).rejects.toBeInstanceOf(SyntaxError);
 
     expect(dir.files.has(MANIFEST_NAME)).toBe(false);
   });

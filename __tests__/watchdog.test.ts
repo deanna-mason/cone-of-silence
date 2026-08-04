@@ -385,11 +385,17 @@ describe("watchdog: localBeacon()", () => {
       audioTrack: { readyState: "ended", muted: false }, // mic-lost
       lastBytesChangeAt: now - STALL_MS - 100, // encoder-stalled
     });
-    // should return mic-lost since it's earlier than encoder-stalled in evaluate order
-    // actually, if both mic-lost AND encoder-stalled occur, we take the first one from evaluate
+    // Pin evaluate()'s exact fault list and order for this snapshot, not just
+    // "some fault happened" — mic-lost (row 2) is pushed before
+    // encoder-stalled (row 3), so localBeacon must report mic-lost, not
+    // merely "whatever evaluate() happened to put first" (which would still
+    // pass even if evaluate()'s row order silently changed).
     const faults = evaluate(snap3);
-    expect(faults.length).toBeGreaterThan(0);
-    expect(localBeacon(snap3).fault).toBe(faults[0].cause);
+    expect(faults).toEqual([
+      { side: "local", cause: "mic-lost" },
+      { side: "local", cause: "encoder-stalled" },
+    ]);
+    expect(localBeacon(snap3).fault).toBe("mic-lost");
   });
 
   it("localBeacon fault prioritizes first local fault (not remote)", () => {

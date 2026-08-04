@@ -24,7 +24,10 @@ function seedSession() {
 }
 
 // vitest globals are off — auto-cleanup never registers; unmount explicitly.
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   localStorage.clear();
@@ -67,4 +70,53 @@ test("Enter the Studio does a full-page load to the pinned room link", async () 
   fireEvent.click(enter);
 
   expect(assign).toHaveBeenCalledWith(buildInviteLink(KEYS, "https://coneofsilence.app"));
+});
+
+// Poll-interval identity regression: the effect used to depend on `recordings`
+// itself (a fresh array reference every fetch resolution, poll-triggered or
+// not), so its cleanup+recreate cycle tore down and re-armed the 3s interval
+// on every single tick. Depending on the derived `hasPending` boolean instead
+// means the interval is armed exactly once for the whole pending window,
+// which this test pins by counting setInterval calls, not just the poll's
+// eventual effect.
+test("the poll interval is armed once and stays armed while recordings remain pending", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  seedSession();
+  const pendingRecording = {
+    id: "r1",
+    originalName: "field-tape.wav",
+    sourceExt: "wav",
+    status: "processing",
+    error: null,
+    createdAt: new Date().toISOString(),
+  };
+  const fetchMock = vi.fn(
+    async () =>
+      ({ ok: true, status: 200, json: async () => ({ recordings: [{ ...pendingRecording }] }) }) as unknown as Response,
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+
+  render(<StudioPage />);
+  // Flush the initial listRecordings() fetch chain — several real Promise
+  // hops (fetch -> res.json() -> .then(setRecordings)) independent of the
+  // faked clock, so this loops a few small advances rather than trusting one.
+  // (screen.findByText's own internal waitFor polls via the now-faked
+  // setInterval/setTimeout, which never fire without an explicit advance —
+  // so a plain findByText here would hang instead of retrying.)
+  for (let i = 0; i < 5; i++) {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  expect(screen.getByText(/developing/i)).toBeDefined(); // proves the pending recording rendered
+
+  expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
+  // Three poll ticks, each resolving a fresh `recordings` array via
+  // setRecordings — the exact state change that used to reset the interval.
+  await vi.advanceTimersByTimeAsync(3000);
+  await vi.advanceTimersByTimeAsync(3000);
+  await vi.advanceTimersByTimeAsync(3000);
+
+  expect(fetchMock.mock.calls.length).toBeGreaterThan(1); // the poll actually fired
+  expect(setIntervalSpy).toHaveBeenCalledTimes(1); // still just the one interval
 });

@@ -8,8 +8,9 @@
 // glare; it carries the Phase 5/6 protocols later.
 
 import { vp9Preferences, type E2eeApi } from "./e2eeSupport";
+import { STUN_URL } from "../config";
 
-export const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+export const ICE_SERVERS: RTCIceServer[] = [{ urls: STUN_URL }];
 
 export type ChannelName = "cos" | "xfer";
 export type ChannelLifecycle = "open" | "closed" | "error";

@@ -11,6 +11,33 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
 }));
 
+// The clipboard-copy-fail test below needs to reach the "in-room" stage,
+// which the real useCallSession hook would drive over an actual WebSocket
+// (jsdom has none) — stub it to a steady "connected" state with no peers,
+// mirroring the shape hooks/useCallSession.ts's CallState actually returns.
+// Harmless to the other tests in this file: neither reaches "in-room" (both
+// stop in the green room), so nothing here observes call.status/peers/bus.
+vi.mock("@/hooks/useCallSession", () => ({
+  useCallSession: () => ({
+    status: "connected",
+    peers: [],
+    dcOpen: false,
+    bus: {
+      sendAll: () => {},
+      sendTo: () => false,
+      onMessage: () => () => {},
+      xfer: {
+        send: () => false,
+        bufferedAmount: () => -1,
+        onMessage: () => () => {},
+        onDrain: () => () => {},
+        onChannelState: () => () => {},
+      },
+    },
+    xferKey: null,
+  }),
+}));
+
 const ID = "A".repeat(22);
 const SECRET = "B".repeat(22);
 const getUserMedia = vi.fn<() => Promise<MediaStream>>();
@@ -70,4 +97,24 @@ test("an anonymous guest never sees the pin action", async () => {
   render(<RoomPage />);
   await screen.findByText(/enter the cone/i);
   expect(screen.queryByRole("button", { name: /pin as my studio/i })).toBeNull();
+});
+
+test("a blocked clipboard in-call shows a visible copy-failed notice, not a silent no-op", async () => {
+  const writeText = vi.fn(async () => {
+    throw new DOMException("write blocked", "NotAllowedError");
+  });
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+  render(<RoomPage />);
+  const enter = await screen.findByRole("button", { name: /enter the cone/i });
+  fireEvent.click(enter);
+
+  const copyInvite = await screen.findByRole("button", { name: /copy invite/i });
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  fireEvent.click(copyInvite);
+  await waitFor(() => expect(writeText).toHaveBeenCalled());
+
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toMatch(/copy the invite link manually/i);
 });

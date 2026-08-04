@@ -69,6 +69,18 @@ type BeaconMsg = { t: "pod/beacon" } & Beacon;
 
 type WireMsg = HelloMsg | PingMsg | PongMsg | RollMsg | RollAckMsg | StopMsg | BeaconMsg;
 
+/** Parses one wire message. Returns null for unparseable JSON, a non-object,
+ *  an unrecognized/foreign `t`, or a recognized `t` with a malformed field —
+ *  every rejection path is silent, never throws, mirroring
+ *  lib/webrtc/joinProof.ts's parseProofMsg. Field guards per message type
+ *  (mirroring lib/podcast/transfer.ts's isValidOffer/isValidPartFrame) are
+ *  load-bearing beyond mere type safety: a non-number startAtMs/markAtMs
+ *  reaching scheduleRoll()/scheduleStop() untouched produces a NaN delay,
+ *  and setTimeout clamps a NaN delay to 0 per spec — so a malformed pod/roll
+ *  wouldn't just be ignored, it would fire the take almost immediately
+ *  instead of respecting the countdown. Number.isFinite (not just
+ *  typeof === "number") excludes NaN/Infinity themselves from ever reaching
+ *  that arithmetic in the first place. */
 function parseWireMsg(text: string): WireMsg | null {
   let msg: unknown;
   try {
@@ -77,9 +89,55 @@ function parseWireMsg(text: string): WireMsg | null {
     return null;
   }
   if (!msg || typeof msg !== "object") return null;
-  const t = (msg as { t?: unknown }).t;
+  const m = msg as Record<string, unknown>;
+  const t = m.t;
   if (typeof t !== "string" || !t.startsWith("pod/")) return null;
-  return msg as WireMsg;
+
+  switch (t) {
+    case "pod/hello": {
+      if (typeof m.codename !== "string") return null;
+      return { t: "pod/hello", codename: m.codename };
+    }
+    case "pod/ping": {
+      if (typeof m.sentAt !== "number" || !Number.isFinite(m.sentAt)) return null;
+      return { t: "pod/ping", sentAt: m.sentAt };
+    }
+    case "pod/pong": {
+      if (typeof m.sentAt !== "number" || !Number.isFinite(m.sentAt)) return null;
+      return { t: "pod/pong", sentAt: m.sentAt };
+    }
+    case "pod/roll": {
+      if (typeof m.takeId !== "string") return null;
+      if (typeof m.startAtMs !== "number" || !Number.isFinite(m.startAtMs)) return null;
+      return { t: "pod/roll", takeId: m.takeId, startAtMs: m.startAtMs };
+    }
+    case "pod/roll-ack": {
+      if (typeof m.takeId !== "string") return null;
+      return { t: "pod/roll-ack", takeId: m.takeId };
+    }
+    case "pod/stop": {
+      if (typeof m.takeId !== "string") return null;
+      if (typeof m.markAtMs !== "number" || !Number.isFinite(m.markAtMs)) return null;
+      return { t: "pod/stop", takeId: m.takeId, markAtMs: m.markAtMs };
+    }
+    case "pod/beacon": {
+      if (typeof m.rolling !== "boolean") return null;
+      if (typeof m.bytes !== "number" || !Number.isFinite(m.bytes)) return null;
+      if (typeof m.camOk !== "boolean") return null;
+      if (typeof m.micOk !== "boolean") return null;
+      if (m.fault !== null && typeof m.fault !== "string") return null;
+      return {
+        t: "pod/beacon",
+        rolling: m.rolling,
+        bytes: m.bytes,
+        camOk: m.camOk,
+        micOk: m.micOk,
+        fault: m.fault as Beacon["fault"],
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 function pad2(n: number): string {

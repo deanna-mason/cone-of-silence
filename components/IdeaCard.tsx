@@ -15,6 +15,7 @@ export default function IdeaCard({ idea, expanded, onSelect }: IdeaCardProps) {
     <li className="hairline border bg-inset">
       <button
         type="button"
+        aria-expanded={expanded}
         onClick={() => onSelect(idea.id)}
         className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-field-deep"
       >
