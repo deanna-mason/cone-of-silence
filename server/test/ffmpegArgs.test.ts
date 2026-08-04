@@ -20,6 +20,23 @@ describe("ffmpeg args (Deanna's enhance chain, ported verbatim)", () => {
     expect(args.slice(-2)).toEqual(["null", "-"]);
   });
 
+  it("every untrusted-input pass whitelists file,pipe protocols immediately before its -i (S6 F1)", () => {
+    const m = { inputI: "-23.1", inputTp: "-5.2", inputLra: "9.9", inputThresh: "-33.5", targetOffset: "0.31" };
+    const passes: Record<string, string[]> = {
+      measure: measureArgs("/in/source.mp3", M),
+      apply: applyArgs("/in/source.mp4", M, m, "/out/enhanced.m4a"),
+      waveform: waveformArgs("/x/enhanced.m4a", "/x/waveform.png"),
+    };
+    for (const [name, args] of Object.entries(passes)) {
+      const iAt = args.indexOf("-i");
+      expect(iAt, `${name}: has -i`).toBeGreaterThan(0);
+      // -protocol_whitelist file,pipe must sit directly before -i so it binds this input
+      expect(args.slice(iAt - 2, iAt), `${name}: whitelist precedes -i`).toEqual([
+        "-protocol_whitelist", "file,pipe",
+      ]);
+    }
+  });
+
   it("apply pass embeds measured values, strips video, outputs 48k aac 192k", () => {
     const m = { inputI: "-23.1", inputTp: "-5.2", inputLra: "9.9", inputThresh: "-33.5", targetOffset: "0.31" };
     const joined = applyArgs("/in/source.mp4", M, m, "/out/enhanced.m4a").join(" ");

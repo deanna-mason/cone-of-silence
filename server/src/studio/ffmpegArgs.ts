@@ -18,9 +18,16 @@ export function chainFilter(model: string): string {
   ].join(",");
 }
 
+// Uploads are untrusted: ffmpeg auto-detects format from *content*, and some
+// demuxers (concat, hls, subfile, image2…) can open external file://,http://
+// resources. Without a protocol whitelist a crafted container could coerce a
+// read of droplet secrets (/proc/self/environ) muxed into the served output, or
+// SSRF. Pin every untrusted-input pass to local file + pipe only. (S6 F1.)
+const INPUT_PROTOCOLS = ["-protocol_whitelist", "file,pipe"];
+
 export function measureArgs(input: string, model: string): string[] {
   return [
-    "-hide_banner", "-nostdin", "-i", input,
+    "-hide_banner", "-nostdin", ...INPUT_PROTOCOLS, "-i", input,
     "-af", `${chainFilter(model)},${LOUDNORM_TARGET}:print_format=json`,
     "-f", "null", "-",
   ];
@@ -28,7 +35,7 @@ export function measureArgs(input: string, model: string): string[] {
 
 export function applyArgs(input: string, model: string, m: LoudnormMeasurement, out: string): string[] {
   return [
-    "-hide_banner", "-nostdin", "-y", "-i", input, "-vn",
+    "-hide_banner", "-nostdin", "-y", ...INPUT_PROTOCOLS, "-i", input, "-vn",
     "-af",
     // offset= from the measured target_offset — ffmpeg's own documented
     // 5-field two-pass recipe, matching the darkroom chain (chain.mjs).
@@ -40,7 +47,7 @@ export function applyArgs(input: string, model: string, m: LoudnormMeasurement, 
 
 export function waveformArgs(input: string, out: string): string[] {
   return [
-    "-hide_banner", "-nostdin", "-y", "-i", input,
+    "-hide_banner", "-nostdin", "-y", ...INPUT_PROTOCOLS, "-i", input,
     "-filter_complex", "showwavespic=s=1200x240:colors=0xC79A3B",
     "-frames:v", "1", out,
   ];
