@@ -23,6 +23,10 @@ export function createVerifyRouter(store: TokenStore): Router {
     }
     const token = (req.body as Record<string, unknown> | undefined)?.token;
     if (typeof token !== "string" || !TOKEN_RE.test(token)) {
+      // Deliberately stricter than authRoutes, which 400s shape-invalid input
+      // before its lockout check: this is an unauthenticated oracle, so
+      // shape-invalid tokens count toward lockout too. Don't "fix" this for
+      // consistency with authRoutes.
       failures.recordFailure(key);
       res.json({ valid: false, reason: "invalid" });
       return;

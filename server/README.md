@@ -39,7 +39,7 @@ open the lobby with `#create=<token>` once.
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | **always required** — accounts + studio (recordings) are Supabase-backed regardless of `TOKEN_STORE` |
 | `UPLOAD_DIR` | where uploaded/processed recording files + waveforms live on disk (default `data/uploads`) |
 | `RNNOISE_MODEL` | path to the RNNoise model consumed by ffmpeg's `arnndn` filter (default `models/std.rnnn`); the model binary is gitignored — copy it in locally, the box provisions it |
-| `TURN_SECRET`, `TURN_URLS`, `TURN_TTL_SECONDS` | optional TURN relay for calls on hostile networks; read together by `turnConfigFromEnv` — set all or none, unset means STUN-only |
+| `TURN_SECRET`, `TURN_URLS`, `TURN_TTL_SECONDS` | optional TURN relay for calls on hostile networks; `turnConfigFromEnv` requires `TURN_SECRET`+`TURN_URLS` together (both set or both unset, unset means STUN-only), while `TURN_TTL_SECONDS` is independently optional (default 43200s / 12h) |
 
 Frontend env (repo root, see `env.example`): `NEXT_PUBLIC_API_URL` (default
 `http://localhost:8787`), `NEXT_PUBLIC_SIGNALING_URL` (default
