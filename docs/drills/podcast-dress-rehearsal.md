@@ -93,3 +93,25 @@ half of the same acceptance. Two Macs, both hosts on the SAME invite link.
 | 23 | Watch the two original hosts while step 22 happens | Neither shows any card or interruption — the call continues exactly as before |
 | 24 | Restart the signaling service (or, on a dev box, kill/respawn per the RUNBOOK) mid-call | Both sides show "Signal lost — re-establishing…", then recover: video and audio resume automatically, no fresh invite needed |
 | 25 | Exchange a short episode after the restart in step 24 | Transfer completes; the receiving Mac's part hashes verify (Slice 5B drill) |
+
+## Studio Home standing-room note (flow B)
+
+The pinned Studio room (Studio Home's "Enter the Studio", or the green-room
+"Pin as my Studio") is a *standing* room: the same roomId/secret every time.
+A standing room only lives server-side while at least one host is seated — once
+the room empties, the switchboard strikes it. So the FIRST host to walk back in
+is re-CREATING the room server-side, which needs a room-creation clearance
+(`cos-create-token`) on that device. Without it that host gets ◈ Clearance
+Refused, and the second host then finds a dark corridor.
+
+Practical rule: **both hosts should hold creation grants** on the device they
+use to enter the standing room — don't rely on one host always being first in.
+
+**Transfer of Custody is UX, not a security boundary.** The "Hand off to another
+device" affordance reveals the studio's invite link with a "burns in 5:00"
+countdown. That countdown only *hides the link locally* when it runs out — it is
+a convenience, NOT a server-enforced one-time use or revocation. The invite link
+is a bearer capability from the moment it exists; anyone who copied it keeps
+access regardless of the clock. Treat the handoff link like any other invite.
+
+
