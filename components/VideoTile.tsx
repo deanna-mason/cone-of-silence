@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
 
 interface VideoTileProps {
@@ -19,6 +20,22 @@ interface VideoTileProps {
    *  Replaces the old object-contain letterbox monitor: the composite now
    *  cover-crops, so the honest preview is the crop. */
   episodeFrame?: boolean;
+}
+
+/** The episode viewport's inline style (exported so the regression test can
+ *  pin the exact width formula directly — jsdom's CSSOM can't round-trip a
+ *  cqw/cqh-mixed min()/calc() value through element.style, so asserting on
+ *  the rendered DOM's style.width isn't possible there; this function is
+ *  the source of truth the DOM style is built from). Width is the min of
+ *  the container's own width and its height scaled by the pane ratio, both
+ *  read via container-query units — so whichever tile dimension binds, the
+ *  box keeps the pane shape. Height then follows from aspect-ratio on its
+ *  auto axis. */
+export function episodeViewportStyle(): CSSProperties {
+  return {
+    width: `min(100cqw, calc(100cqh * (${EPISODE_PANE_W} / ${EPISODE_PANE_H})))`,
+    aspectRatio: `${EPISODE_PANE_W} / ${EPISODE_PANE_H}`,
+  };
 }
 
 export default function VideoTile({
@@ -96,15 +113,21 @@ export default function VideoTile({
       } ${speaking ? "ring-2 ring-brass/70" : ""}`}
     >
       {stream && (
-        <div className={episodeFrame ? "flex h-full w-full items-center justify-center" : "h-full w-full"}>
-          {/* aspect-ratio + max-width: whichever tile dimension binds,
-              the box keeps the pane shape (CSS transferred-size rules). Structure is
-              IDENTICAL in both modes so the <video> node survives the
-              podcastLocked toggle (review round 1: remount dropped srcObject). */}
+        <div
+          className={episodeFrame ? "flex h-full w-full items-center justify-center" : "h-full w-full"}
+          style={episodeFrame ? { containerType: "size" } : undefined}
+        >
+          {/* episodeViewportStyle(): width = min(container width, container
+              height x pane ratio) via cqw/cqh container-query units, so BOTH
+              the width-bound and height-bound cases keep the pane shape;
+              height then follows from aspect-ratio on its auto axis.
+              Structure is IDENTICAL in both modes so the <video> node
+              survives the podcastLocked toggle (review round 1: remount
+              dropped srcObject). */}
           <div
             data-testid={episodeFrame ? "episode-viewport" : undefined}
             className={episodeFrame ? "relative max-w-full overflow-hidden" : "h-full w-full"}
-            style={episodeFrame ? { aspectRatio: `${EPISODE_PANE_W} / ${EPISODE_PANE_H}`, height: "100%" } : undefined}
+            style={episodeFrame ? episodeViewportStyle() : undefined}
           >
             <video
               ref={videoRef}

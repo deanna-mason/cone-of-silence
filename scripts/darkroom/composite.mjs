@@ -96,8 +96,9 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
  * compositeArgs(backdropPng, localWebm, remoteWebm, layout, {remoteSetpts, delays}, audioM4a, outMp4) → string[]
  *
  * Argv for the final side-by-side composite:
- * - backdrop: `-loop 1` still-image input (the aged-dossier field + wells +
- *   labels + stamp, already rendered by renderBackdrop).
+ * - backdrop: `-loop 1` still-image input (the Humanym paper field + seal
+ *   and wordmark plaque + wells + invisible labels, already rendered by
+ *   renderBackdrop).
  * - local (LEFT pane, D14): cover scale+crop, optional tpad delay if IT is
  *   the earlier side. Never setpts — local is the reference timeline.
  * - remote (RIGHT pane, D14): remoteSetpts (drift-ratio rate correction)

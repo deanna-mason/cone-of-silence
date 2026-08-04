@@ -15,7 +15,7 @@ import type { CallBus } from "@/hooks/useCallSession";
 import { TakeCoordinator, type TakeCallbacks } from "@/lib/podcast/takeProtocol";
 import type { Beacon } from "@/lib/podcast/watchdog";
 import { soundKlaxon } from "@/lib/podcast/klaxon";
-import VideoTile from "@/components/VideoTile";
+import VideoTile, { episodeViewportStyle } from "@/components/VideoTile";
 import { LAST_TAKE_KEY, usePodcastTake } from "@/hooks/usePodcastTake";
 
 // ---------------------------------------------------------------------------
@@ -953,6 +953,12 @@ describe("VideoTile episode framing", () => {
     // The viewport mirrors the darkroom pane shape — what you frame is what ships.
     const viewport = getByTestId("episode-viewport");
     expect(viewport.style.aspectRatio).toBe("930 / 1008");
+    expect(viewport.style.height).toBe(""); // no height pin — it must follow aspect-ratio's auto axis
+    // jsdom's CSSOM can't round-trip a cqw/cqh-mixed min()/calc() value
+    // through element.style (it silently drops the whole declaration), so
+    // the width formula is pinned against its source function instead —
+    // the same one the JSX calls to build this element's style.
+    expect(episodeViewportStyle().width).toBe("min(100cqw, calc(100cqh * (930 / 1008)))");
     const video = container.querySelector("video")!;
     expect(video.className).toContain("object-cover");
   });
