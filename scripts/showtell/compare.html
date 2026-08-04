@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Raw vs Developed</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #101014; color: #e8e6e0; font: 15px/1.4 -apple-system, sans-serif; }
+  main { display: grid; grid-template-columns: 1fr 1.6fr; gap: 16px; padding: 16px; align-items: start; }
+  section { border: 3px solid #2a2a33; border-radius: 10px; padding: 10px; transition: border-color .15s; }
+  section.audible { border-color: #e0b64a; }
+  section h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #9a97a3; }
+  section.audible h2 { color: #e0b64a; }
+  video { width: 100%; display: block; border-radius: 6px; background: #000; }
+  #raw video + video { margin-top: 10px; }
+  footer { display: flex; gap: 14px; align-items: center; padding: 4px 16px 16px; }
+  button { font: inherit; padding: 10px 22px; border-radius: 8px; border: 1px solid #3a3a44; background: #1c1c22; color: inherit; cursor: pointer; }
+  #flip { background: #e0b64a; color: #14120a; font-weight: 700; border: none; }
+  input[type=range] { flex: 1; }
+  #clock { font-variant-numeric: tabular-nums; color: #9a97a3; min-width: 88px; text-align: right; }
+</style>
+</head>
+<body>
+<main>
+  <section id="raw">
+    <h2>Raw takes</h2>
+    <video id="rawLocal" playsinline preload="auto"></video>
+    <video id="rawRemote" playsinline preload="auto"></video>
+  </section>
+  <section id="processed">
+    <h2>Developed episode</h2>
+    <video id="ep" playsinline preload="auto"></video>
+  </section>
+</main>
+<footer>
+  <button id="play">Play</button>
+  <button id="flip">Hear the other side (F)</button>
+  <input id="seek" type="range" min="0" max="100" step="0.1" value="0">
+  <span id="clock">0:00</span>
+</footer>
+<script>
+// ---- CONFIG: edit in the LOCAL copy only -------------------------------
+// offsets: seconds ADDED to the master clock for that element. Master
+// follows the raw-local timeline (rawLocal = 0 reference). Seed the other
+// two from the take's develop.json: whichever host got the adelay
+// (who/delayMs) determines the shift between the timelines.
+const CONFIG = {
+  media: { rawLocal: "raw-local.mp4", rawRemote: "raw-remote.mp4", processed: "episode.mp4" },
+  offsets: { rawLocal: 0.0, rawRemote: 0.0, processed: 0.0 },
+};
+// ------------------------------------------------------------------------
+const els = {
+  rawLocal: document.getElementById("rawLocal"),
+  rawRemote: document.getElementById("rawRemote"),
+  processed: document.getElementById("ep"),
+};
+for (const [k, el] of Object.entries(els)) el.src = CONFIG.media[k];
+const all = Object.values(els);
+const sides = { raw: document.getElementById("raw"), processed: document.getElementById("processed") };
+
+let audible = "raw";   // which side is unmuted
+let master = 0;        // seconds on the raw-local timeline
+let playing = false;
+
+function applyMute() {
+  const rawOn = audible === "raw";
+  els.rawLocal.muted = !rawOn;
+  els.rawRemote.muted = !rawOn;
+  els.processed.muted = rawOn;
+  sides.raw.classList.toggle("audible", rawOn);
+  sides.processed.classList.toggle("audible", !rawOn);
+}
+function target(k) {
+  const el = els[k];
+  const t = master + CONFIG.offsets[k];
+  return Math.min(Math.max(t, 0), el.duration || t);
+}
+function seekAll() { for (const k of Object.keys(els)) els[k].currentTime = target(k); }
+function fmt(s) { return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; }
+
+document.getElementById("play").addEventListener("click", () => {
+  playing = !playing;
+  document.getElementById("play").textContent = playing ? "Pause" : "Play";
+  if (playing) { seekAll(); all.forEach((el) => el.play()); }
+  else all.forEach((el) => el.pause());
+});
+document.getElementById("flip").addEventListener("click", () => {
+  audible = audible === "raw" ? "processed" : "raw";
+  applyMute();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === " ") { e.preventDefault(); document.getElementById("play").click(); }
+  if (e.key.toLowerCase() === "f") document.getElementById("flip").click();
+});
+const seek = document.getElementById("seek");
+seek.addEventListener("input", () => {
+  master = (Number(seek.value) / 100) * (els.rawLocal.duration || 0);
+  seekAll();
+});
+
+// Master clock follows rawLocal; other elements are nudged back into
+// alignment whenever they stray more than 200 ms from their target.
+setInterval(() => {
+  if (playing) {
+    master = els.rawLocal.currentTime - CONFIG.offsets.rawLocal;
+    for (const k of ["rawRemote", "processed"]) {
+      if (Math.abs(els[k].currentTime - target(k)) > 0.2) els[k].currentTime = target(k);
+    }
+    seek.value = String((master / (els.rawLocal.duration || 1)) * 100);
+  }
+  document.getElementById("clock").textContent = fmt(master);
+}, 500);
+
+applyMute();
+</script>
+</body>
+</html>
