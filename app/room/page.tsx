@@ -424,6 +424,7 @@ export default function RoomPage() {
           mirrored
           isSelf
           camOff={!media.camOn}
+          micCut={!media.micOn}
           episodeFrame={podcastLocked}
         />
         {call.peers.map((p, i) => (

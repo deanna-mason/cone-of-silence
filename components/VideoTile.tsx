@@ -14,6 +14,12 @@ interface VideoTileProps {
   fill?: boolean; // Phase 4B: size from the parent grid cell instead of aspect-video
   signalLost?: boolean;
   speaking?: boolean;
+  /** The LOCAL host's own mic is cut (8/3 drill F2: a seat talked into a cut
+   *  mic and nobody noticed). Self tile only — draws a persistent vermilion
+   *  border + a loud badge so your own muted state can't go unread mid-call.
+   *  An overlay sibling, like signalLost/figcaption — the div>div>video tree
+   *  is untouched, preserving the episodeFrame remount invariant. */
+  micCut?: boolean;
   /** Episode framing (design 2026-08-03): while the tape rolls, show exactly
    *  the mp4's visible region — a centered viewport at the darkroom pane
    *  aspect with the video cover-cropped inside it, letterbox around it.
@@ -47,6 +53,7 @@ export default function VideoTile({
   fill = false,
   signalLost = false,
   speaking = false,
+  micCut = false,
   episodeFrame = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -110,7 +117,11 @@ export default function VideoTile({
     <figure
       className={`hairline relative overflow-hidden border bg-inset ${
         fill ? "h-full min-h-0 w-full" : "aspect-video"
-      } ${speaking ? "ring-2 ring-brass/70" : ""}`}
+      } ${
+        // A cut own-mic outranks the speaking ring (you can't be speaking into
+        // a cut mic anyway) — a loud, persistent vermilion border.
+        micCut ? "ring-2 ring-vermilion" : speaking ? "ring-2 ring-brass/70" : ""
+      }`}
     >
       {stream && (
         <div
@@ -154,6 +165,15 @@ export default function VideoTile({
       {signalLost && (
         <p className="kicker absolute left-2 top-2 border border-vermilion/60 bg-field/80 px-2 py-1 text-vermilion">
           ◈ Signal Lost
+        </p>
+      )}
+      {micCut && (
+        <p
+          role="status"
+          className="kicker absolute left-2 top-2 flex items-center gap-2 bg-vermilion px-2.5 py-1 text-cream"
+        >
+          <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-cream" />
+          Your Mic Is Cut
         </p>
       )}
       {!isSelf && stream && audio !== "blocked" && (
