@@ -631,7 +631,11 @@ describe("episode exchange loopback (real EpisodeSender <-> real EpisodeReceiver
     expect(receiverCb.phases.at(-1)?.detail).toContain("read:"); // the sender's own reason, reflected
 
     // The half-written part was abandoned, never committed, never renamed.
-    await flush();
+    // onPeerFault flips the phase to "parked" synchronously but enqueues the
+    // slot's abandon() on the async op chain — a fixed-tick flush() here
+    // raced that enqueued disk op (crypto/disk can spill past one macrotask).
+    // Wait on the abandon op itself, the very thing the next lines assert.
+    await waitFor(() => receiverStore.ops.some((o) => o.startsWith("abandon:audio.part001")));
     expect(receiverStore.committedNames.has("audio.part001")).toBe(false);
     expect(receiverStore.ops.filter((o) => o.startsWith("commit:"))).toEqual(["commit:audio.part000"]);
     expect(receiverStore.ops.filter((o) => o.startsWith("abandon:"))).toEqual(["abandon:audio.part001"]);
