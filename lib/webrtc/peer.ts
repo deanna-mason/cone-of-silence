@@ -151,6 +151,11 @@ export class PeerLink {
       };
 
       for (const track of opts.localStream.getTracks()) {
+        // An ended track (unplugged camera, 8/5 drill) can never carry
+        // media, but its sender still gets an m-line, an E2EE transform,
+        // and a codec pin — any throw on that dead path destroys the whole
+        // link, audio included (the one-way-audio defect). Skip it.
+        if (track.readyState === "ended") continue;
         const sender = pc.addTrack(track, opts.localStream);
         // Additivity (D15): when e2ee is absent, this loop body is IDENTICAL
         // to pre-5D — no getTransceivers() call, no transform, no pin — so a
@@ -173,8 +178,13 @@ export class PeerLink {
           }
           await pc.setLocalDescription();
           opts.sendSignal(JSON.stringify({ description: pc.localDescription }));
-        } catch {
-          // a failed negotiation is recovered by session teardown/rebuild
+        } catch (err) {
+          // A dead negotiation leaves connectionState wedged in "new"/
+          // "connecting" forever — states the mesh's restart/rebuild ladder
+          // deliberately ignores. Report "failed" so that ladder actually
+          // engages (8/5 drill: a swallowed failure here was permanent).
+          console.error("[peer] negotiation failed", err);
+          opts.onConnectionState?.("failed");
         } finally {
           this.makingOffer = false;
         }
