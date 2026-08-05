@@ -139,7 +139,11 @@ signaling server and droplet operator can observe:
 - **Connection timing** — when a room is created, when each participant joins
   and drops, call duration.
 - **IP addresses** of every participant (signaling connection, and TURN-relayed
-  traffic when TURN is used). Rate-limiting/lockout is IP-keyed.
+  traffic when TURN is used). Rate-limiting/lockout is IP-keyed. The IP the
+  limiter sees is trustworthy: Caddy (v2.11.4, no `trusted_proxies` configured)
+  overwrites any client-supplied `X-Forwarded-For` with the true remote address
+  — verified on the droplet 2026-08-05, alongside `TOKEN_STORE=supabase` in the
+  production env (single-use tokens live in Supabase, not process memory).
 - **Coarse traffic volume** for relayed streams passing through coturn.
 - **Account metadata** in Supabase — usernames (codenames, zero-PII by design),
   session and token records.
