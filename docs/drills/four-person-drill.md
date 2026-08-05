@@ -1,5 +1,10 @@
 # Four-person call drill
 
+> **Satisfied 2026-08-03:** the pre-demo re-run happened in class — wifi
+> drop + rejoin, force-quit + rejoin, and the podcast-mode mute checks all
+> PASSED (recorded in `2026-08-04-dress-rehearsal-report.md`). Kept as the
+> playbook for future drills.
+
 Re-run before the final demo. Needs 4 people / 4 devices / 4 networks, at
 least one phone on cellular. One person is the operator (has ssh to the
 droplet).

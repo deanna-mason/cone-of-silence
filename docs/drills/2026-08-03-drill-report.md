@@ -12,7 +12,7 @@ local per-person mute (4da1c97) and the 8/3 exchange/signaling fixes.
 | 1 | All four join | PASS with caveat — one link (operator ↔ seat 4) had no media one-way at first join while the other five links were fine; seat 4's rejoin rebuilt it and all four seats held live media both ways after. See F1 |
 | 2 | Speaking glow | Not recorded |
 | 3 | Per-person mute | Not recorded (feature shipped same day; no issues volunteered) |
-| 4 | Wifi-blip self-heal | Not recorded as a discrete step; disconnect/heal behavior exercised incidentally. See F2 |
+| 4 | Wifi-blip self-heal | Not recorded as a discrete step; disconnect/heal behavior exercised incidentally. See F2. **Closed 8/3:** the in-class four-person test ran it deliberately — wifi drop + rejoin PASS (recorded in `2026-08-04-dress-rehearsal-report.md`) |
 | 5 | Server restart, operator seated | PASS — call re-established quickly, no fresh invites. Closes the 7/30 stranding |
 | 6 | Force-quit | PASS — tile vanished for everyone |
 | 7 | Rejoin same invite | PASS — seat returned |

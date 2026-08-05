@@ -94,3 +94,7 @@ Two systemic findings from the retest, worth their own tickets:
 Drill NOT passed — full re-run required before the final demo: operator
 in-call for step 4, forceTurn pass, and a diagnosed retry of the Linux
 seat. Cellular + cross-network coverage already demonstrated.
+
+> **Superseded:** the 2026-08-03 re-run (`2026-08-03-drill-report.md`)
+> closed all three gaps and PASSED; the remaining unrecorded step-4 check
+> passed in class 8/3 (see `2026-08-04-dress-rehearsal-report.md`).
