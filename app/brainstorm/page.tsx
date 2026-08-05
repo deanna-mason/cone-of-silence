@@ -24,16 +24,16 @@ export default function BrainstormPage() {
   }
 
   return (
-    <div className="space-y-8">
-      <header className="hairline border-b pb-6">
+    <div className="space-y-6 sm:space-y-8">
+      <header className="hairline border-b pb-5 sm:pb-6">
         <div className="flex items-center justify-between">
           <p className="kicker text-sienna">File No. CS-001</p>
           <span className="stamp rotate-[3deg] text-vermilion">Classified</span>
         </div>
-        <h1 className="mt-3 font-display text-6xl leading-[0.9] tracking-[0.04em] text-ink">
+        <h1 className="mt-3 font-display text-5xl leading-[0.9] tracking-[0.04em] text-ink sm:text-6xl">
           Mission Dossier
         </h1>
-        <p className="mt-3 max-w-lg font-body text-lg italic text-ink-soft">
+        <p className="mt-3 max-w-lg font-body text-base italic text-ink-soft sm:text-lg">
           Every capability the Cone of Silence must deliver. Tap a file to declassify
           the details.
         </p>

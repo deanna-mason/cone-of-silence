@@ -138,7 +138,7 @@ export default function StudioPage() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className={`mt-2 w-full border-2 border-dashed px-4 py-6 text-center font-type text-sm transition ${
+              className={`mt-2 w-full break-words border-2 border-dashed px-4 py-6 text-center font-type text-sm transition ${
                 selectedName
                   ? "border-brass/60 text-ink"
                   : "border-ink-faint/40 text-ink-soft hover:border-brass hover:text-signal"

@@ -134,9 +134,9 @@ export default function AdminConsole() {
 
   if (secret === null) {
     return (
-      <section className="hairline mx-auto max-w-lg border bg-inset p-6">
+      <section className="hairline mx-auto max-w-lg border bg-inset p-4 sm:p-6">
         <p className="kicker text-sienna">Restricted — Operator Access</p>
-        <h1 className="mt-2 font-display text-4xl tracking-[0.04em] text-ink">
+        <h1 className="mt-2 font-display text-3xl tracking-[0.04em] text-ink sm:text-4xl">
           Credential Desk
         </h1>
         <label htmlFor="admin-secret" className="kicker mt-6 block text-ink-soft">
@@ -169,7 +169,7 @@ export default function AdminConsole() {
   }
 
   return (
-    <section className="hairline border bg-inset p-6">
+    <section className="hairline border bg-inset p-4 sm:p-6">
       <div className="flex items-center justify-between">
         <p className="kicker text-sienna">Issued Credentials</p>
         <button
@@ -197,7 +197,7 @@ export default function AdminConsole() {
       )}
 
       {/* Mint */}
-      <div className="mt-6 flex items-end gap-3">
+      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end">
         <div className="grow">
           <label htmlFor="mint-label" className="kicker block text-ink-soft">
             Issue new credential — codename
@@ -217,13 +217,13 @@ export default function AdminConsole() {
           type="button"
           disabled={busy || !mintLabel.trim()}
           onClick={handleMint}
-          className="kicker border border-ink-faint/30 px-6 py-3 text-ink-soft transition hover:border-brass hover:text-signal disabled:opacity-40"
+          className="kicker w-full border border-ink-faint/30 px-6 py-3 text-ink-soft transition hover:border-brass hover:text-signal disabled:opacity-40 sm:w-auto"
         >
           Mint
         </button>
       </div>
 
-      <div className="mt-3 flex gap-2" role="radiogroup" aria-label="Credential kind">
+      <div className="mt-3 flex flex-wrap gap-2" role="radiogroup" aria-label="Credential kind">
         <button
           type="button"
           role="radio"

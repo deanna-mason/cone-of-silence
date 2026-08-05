@@ -125,10 +125,12 @@ export default function AccountPage() {
   // the seal sets the new host's credentials and seats them in the studio.
   if (invite && !session) {
     return (
-      <section className="hairline mx-auto max-w-lg border bg-inset p-6">
+      <section className="hairline mx-auto max-w-lg border bg-inset p-4 sm:p-6">
         <p className="kicker text-sienna">◈ Sealed Transfer — Single Use</p>
-        <h1 className="mt-2 font-display text-4xl tracking-[0.04em] text-ink">Seal Broken</h1>
-        <p className="mt-4 font-display text-2xl tracking-[0.03em] text-ink">
+        <h1 className="mt-2 font-display text-3xl tracking-[0.04em] text-ink sm:text-4xl">
+          Seal Broken
+        </h1>
+        <p className="mt-4 font-display text-xl tracking-[0.03em] text-ink sm:text-2xl">
           You&rsquo;ve been issued a studio
         </p>
         <p className="mt-3 font-body text-ink-soft">
@@ -171,7 +173,7 @@ export default function AccountPage() {
           <button
             type="submit"
             disabled={claimBusy || !claimCodename.trim() || !claimPassphrase}
-            className="cta-glow group flex w-full items-center justify-between gap-3 bg-vermilion px-6 py-5 font-display text-3xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright disabled:cursor-not-allowed disabled:opacity-50"
+            className="cta-glow group flex w-full items-center justify-between gap-3 bg-vermilion px-4 py-4 font-display text-2xl tracking-[0.06em] text-cream transition hover:bg-vermilion-bright disabled:cursor-not-allowed disabled:opacity-50 sm:px-6 sm:py-5 sm:text-3xl"
           >
             <span>{claimBusy ? "CLEARING…" : "Claim your Studio"}</span>
             <span aria-hidden className="font-body text-2xl transition group-hover:translate-x-1">
@@ -186,9 +188,9 @@ export default function AccountPage() {
 
   if (session) {
     return (
-      <section className="hairline mx-auto max-w-lg border bg-inset p-6">
+      <section className="hairline mx-auto max-w-lg border bg-inset p-4 sm:p-6">
         <p className="kicker text-sienna">Identity Desk</p>
-        <h1 className="mt-2 font-display text-4xl tracking-[0.04em] text-ink">
+        <h1 className="mt-2 break-words font-display text-3xl tracking-[0.04em] text-ink sm:text-4xl">
           CLEARED: @{session.username}
         </h1>
         <p className="kicker mt-4 text-ink-soft">
@@ -212,10 +214,12 @@ export default function AccountPage() {
   }
 
   return (
-    <div className="mx-auto max-w-lg space-y-8">
-      <section className="hairline border bg-inset p-6">
+    <div className="mx-auto max-w-lg space-y-6 sm:space-y-8">
+      <section className="hairline border bg-inset p-4 sm:p-6">
         <p className="kicker text-sienna">Register — Invitation Required</p>
-        <h1 className="mt-2 font-display text-4xl tracking-[0.04em] text-ink">Credential Desk</h1>
+        <h1 className="mt-2 font-display text-3xl tracking-[0.04em] text-ink sm:text-4xl">
+          Credential Desk
+        </h1>
         <form className="mt-6 space-y-5" onSubmit={handleSignup}>
           <div>
             <label htmlFor="signup-token" className="kicker block text-ink-soft">
@@ -270,9 +274,11 @@ export default function AccountPage() {
         </form>
       </section>
 
-      <section className="hairline border bg-inset p-6">
+      <section className="hairline border bg-inset p-4 sm:p-6">
         <p className="kicker text-sienna">Log In</p>
-        <h2 className="mt-2 font-display text-3xl tracking-[0.04em] text-ink">Return Contact</h2>
+        <h2 className="mt-2 font-display text-2xl tracking-[0.04em] text-ink sm:text-3xl">
+          Return Contact
+        </h2>
         <form className="mt-6 space-y-5" onSubmit={handleLogin}>
           <div>
             <label htmlFor="login-username" className="kicker block text-ink-soft">
