@@ -193,7 +193,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // createReceiver read the CURRENT key at construction time, not whatever
   // was in scope when the wire-subscription effect closed over it.
   const xferKeyRef = useRef(xferKey);
-  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: startSender/createReceiver read the current key at call time, not construction time (see lines 192-194)
+  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: startSender/createReceiver must read the current key when they run, not the value the wire-subscription effect closed over when it was built (see lines 192-194)
   xferKeyRef.current = xferKey;
 
   // Same `latest` idiom as usePodcastTake.ts: the wire-subscription effect

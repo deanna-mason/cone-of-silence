@@ -115,8 +115,8 @@ export interface PodcastTake {
   /** This host's OWN codename — the same value announced via pod/hello.
    *  Task 11's episode exchange needs it to identify the SENDER on the
    *  wire (an offer's `from` must be the sender's own identity, not the
-   *  partner's — CONTROLLER RULING D8). Null until the auth session is
-   *  read (client-only effect). */
+   *  partner's — CONTROLLER RULING D8). Null until the auth session
+   *  store yields a value (a useSyncExternalStore read, ~195). */
   myCodename: string | null;
   /** This side's recorder byte counts, video and audio counted separately —
    *  an aggregate total can't tell "both streams growing" apart from "one
@@ -607,7 +607,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     coordinatorEpochRef.current += 1;
     // NOT announced here: at construction the data channel is usually still
     // closed and the bus drops rather than queues. The effect below does it.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate commit-time signal between two effects: the bump is what re-fires the hello effect below (its `${coordinatorGen}|${peerKey}` dep) now that a new coordinator exists, and nothing in render can derive that — the coordinator is constructed here, in this effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate commit-time signal between two effects: the bump is what re-fires the hello effect below via its `coordinatorGen` dep-array entry now that a new coordinator exists, and nothing in render can derive that — the coordinator is constructed here, in this effect
     setCoordinatorGen((n) => n + 1);
     return () => {
       coordinator.dispose();

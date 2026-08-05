@@ -54,7 +54,7 @@ export function useCallSession(
   const [xferKey, setXferKey] = useState<CryptoKey | null>(null);
   const sessionRef = useRef<CallSession | null>(null);
   const streamRef = useRef<MediaStream | null>(stream);
-  // eslint-disable-next-line react-hooks/refs -- latest-value mirror read only by the session effect's async closure (line ~101), which deliberately excludes `stream` from its deps; same idiom as usePodcastTake.ts:182-187
+  // eslint-disable-next-line react-hooks/refs -- latest-value mirror read synchronously at the top of the session effect (~106), whose deps deliberately exclude `stream`; same `latest` idiom as usePodcastTake's `latest` ref
   streamRef.current = stream;
 
   // Message listeners registered against the bus, independent of whether a
