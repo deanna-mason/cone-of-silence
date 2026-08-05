@@ -132,16 +132,25 @@ camera until F5.
 
 ## Results
 
-Fill this in live; it becomes the report.
+**Run 2026-08-05 evening — see `2026-08-05-four-fix-redrill-report.md`.**
+Fixes 1a, 1b, 2a and 4 proved out; 2b unreachable by design; **fix 3 failed**,
+plus two new findings (a reconnect roster desync, and a link that can never
+regain a video sender).
+
+> **Card bug, found by the run:** F1 says "Acknowledge" the camera alarm.
+> Acknowledging drops the panel out of `fault` back to `rolling`, which
+> re-locks the device bar — so the step defeats the very thing F5 tests. Once
+> fix 3 is repaired, F5 must be run **both** ways: alarm acknowledged and
+> alarm still on screen.
 
 | Fix | Block | Result |
 |---|---|---|
-| 1a — take-state re-sync (ghost-pin release) | B | |
-| 1b — orphan self-cut on hello | C | |
-| 2a — interrupted card reads in full | D | |
-| 2b — "Transmission Held" | E | |
-| 3 — camera re-attach path | F5–F7 | |
-| 4 — two-way audio after reconnect | F2–F3 | |
+| 1a — take-state re-sync (ghost-pin release) | B | PASS |
+| 1b — orphan self-cut on hello | C | PASS |
+| 2a — interrupted card reads in full | D | PASS |
+| 2b — "Transmission Held" | E | Not attempted — heals too fast; unreachable by design |
+| 3 — camera re-attach path | F5–F7 | **FAIL** (device bar stayed locked; video never reached the partner). Live device lists: PASS |
+| 4 — two-way audio after reconnect | F2–F3 | PASS |
 
 Anything that fails: capture the card verbatim (photo), note which side saw
 it, and grab a `chrome://webrtc-internals` dump on both machines before
