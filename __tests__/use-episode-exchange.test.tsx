@@ -1003,7 +1003,7 @@ describe("useEpisodeExchange", () => {
     const xchg = fakeExchange({ state: sendingState });
     const takeStates: PodcastPanelState[] = [
       { kind: "countdown", secondsLeft: 3 },
-      { kind: "rolling", elapsedS: 1, localBytes: 0, partnerBytes: 0, partnerCodename: null },
+      { kind: "rolling", elapsedS: 1, localBytes: 0, partnerBytes: 0, partnerCodename: null, phones: null, partnerPhones: null },
       { kind: "stopping" },
       { kind: "fault", faults: [], partnerCodename: null },
     ];
@@ -1016,7 +1016,7 @@ describe("useEpisodeExchange", () => {
     const doneState: ExchangePanelState = { kind: "xfer-done", direction: "receive", totalBytes: 5 };
     const xchg = fakeExchange({ state: doneState });
     const takeStates: PodcastPanelState[] = [
-      { kind: "armed", canSend: true },
+      { kind: "armed", canSend: true, phones: null, lastPhones: null, partnerPhones: null, partnerCodename: null },
       { kind: "not-two", count: 3 },
       { kind: "vault-needed", permission: "unset" },
       { kind: "link-down" },
@@ -1028,19 +1028,28 @@ describe("useEpisodeExchange", () => {
   });
 
   test("(f) mergePanel: armed gains canSend and delivered from the exchange when no exchange state is showing", () => {
-    expect(mergePanel({ kind: "armed", canSend: false }, fakeExchange({ canSend: true }))).toEqual({
+    // The declaration fields must survive the merge untouched — mergePanel
+    // spreads the take state rather than rebuilding it (echo-guard, 8/5).
+    const ARMED = {
       kind: "armed",
+      phones: "speakers",
+      lastPhones: "headphones",
+      partnerPhones: "headphones",
+      partnerCodename: "Falcon",
+    } as const;
+    expect(mergePanel({ ...ARMED, canSend: false }, fakeExchange({ canSend: true }))).toEqual({
+      ...ARMED,
       canSend: true,
       delivered: false,
     });
-    expect(mergePanel({ kind: "armed", canSend: true }, fakeExchange({ canSend: false }))).toEqual({
-      kind: "armed",
+    expect(mergePanel({ ...ARMED, canSend: true }, fakeExchange({ canSend: false }))).toEqual({
+      ...ARMED,
       canSend: false,
       delivered: false,
     });
     // A delivered exchange marks the armed card delivered (and Send stays off).
-    expect(mergePanel({ kind: "armed", canSend: false }, fakeExchange({ canSend: false, delivered: true }))).toEqual({
-      kind: "armed",
+    expect(mergePanel({ ...ARMED, canSend: false }, fakeExchange({ canSend: false, delivered: true }))).toEqual({
+      ...ARMED,
       canSend: false,
       delivered: true,
     });

@@ -17,8 +17,17 @@ function callbacks() {
     onSendEpisode: vi.fn(),
     onResendEpisode: vi.fn(),
     onDismissXfer: vi.fn(),
+    onDeclarePhones: vi.fn(),
   };
 }
+
+/** Armed-state phones fields, undeclared everywhere — spread then override. */
+const PHONES_NONE = {
+  phones: null,
+  lastPhones: null,
+  partnerPhones: null,
+  partnerCodename: null,
+} as const;
 
 function renderState(state: PodcastPanelState) {
   const cb = callbacks();
@@ -66,26 +75,70 @@ describe("PodcastPanel", () => {
     expect(screen.queryByRole("button", { name: "Roll Tape" })).toBeNull();
   });
 
-  test("armed — Roll Tape fires onRoll", () => {
-    const cb = renderState({ kind: "armed", canSend: false });
+  test("armed — Roll Tape fires onRoll once declared", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "headphones" });
     fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
     expect(cb.onRoll).toHaveBeenCalledTimes(1);
   });
 
+  test("armed — Roll Tape is disabled while undeclared", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    const roll = screen.getByRole("button", { name: "Roll Tape" }) as HTMLButtonElement;
+    expect(roll.disabled).toBe(true);
+    fireEvent.click(roll);
+    expect(cb.onRoll).not.toHaveBeenCalled();
+  });
+
+  test("armed — Headphones In / Open Speakers fire onDeclarePhones with the value", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    fireEvent.click(screen.getByRole("button", { name: "Headphones In" }));
+    expect(cb.onDeclarePhones).toHaveBeenCalledWith("headphones");
+    fireEvent.click(screen.getByRole("button", { name: "Open Speakers" }));
+    expect(cb.onDeclarePhones).toHaveBeenCalledWith("speakers");
+  });
+
+  test("armed — the remembered answer is marked before confirmation, and only then", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, lastPhones: "speakers" });
+    const speakers = screen.getByRole("button", { name: "Open Speakers" });
+    expect(speakers.hasAttribute("data-remembered")).toBe(true);
+    expect(screen.getByRole("button", { name: "Headphones In" }).hasAttribute("data-remembered")).toBe(false);
+    cleanup();
+    // Once declared, the memory marker disappears (aria-pressed carries state).
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers", lastPhones: "speakers" });
+    const pressed = screen.getByRole("button", { name: "Open Speakers" });
+    expect(pressed.hasAttribute("data-remembered")).toBe(false);
+    expect(pressed.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  test("armed — partner status line: not confirmed / headphones / OPEN SPEAKERS", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream" });
+    expect(screen.getByText("icecream: not confirmed")).toBeDefined();
+    cleanup();
+    renderState({
+      kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream", partnerPhones: "headphones",
+    });
+    expect(screen.getByText("icecream: headphones in")).toBeDefined();
+    cleanup();
+    renderState({
+      kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream", partnerPhones: "speakers",
+    });
+    expect(screen.getByText("icecream: OPEN SPEAKERS · echo-guard")).toBeDefined();
+  });
+
   test("armed — no Send Episode button when canSend is false", () => {
-    renderState({ kind: "armed", canSend: false });
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
     expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
   });
 
   test("armed — Send Episode shown and fires onSendEpisode when canSend", () => {
-    const cb = renderState({ kind: "armed", canSend: true });
+    const cb = renderState({ kind: "armed", canSend: true, ...PHONES_NONE });
     fireEvent.click(screen.getByRole("button", { name: "Send Episode" }));
     expect(cb.onSendEpisode).toHaveBeenCalledTimes(1);
     expect(cb.onRoll).not.toHaveBeenCalled();
   });
 
   test("armed — delivered shows a static Episode Delivered marker and no Send Episode", () => {
-    renderState({ kind: "armed", canSend: true, delivered: true });
+    renderState({ kind: "armed", canSend: true, delivered: true, ...PHONES_NONE });
     expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
     // Even with canSend true, a delivered take never re-offers Send.
     expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
@@ -105,6 +158,8 @@ describe("PodcastPanel", () => {
       localBytes: 2_400_000,
       partnerBytes: 2_100_000,
       partnerCodename: "Falcon",
+      phones: "headphones",
+      partnerPhones: "headphones",
     });
     expect(screen.getByText("◈ Reel Rolling")).toBeDefined();
     expect(screen.getByText("02:05")).toBeDefined();
@@ -120,8 +175,34 @@ describe("PodcastPanel", () => {
       localBytes: 0,
       partnerBytes: 0,
       partnerCodename: null,
+      phones: null,
+      partnerPhones: null,
     });
     expect(screen.getByText("You 0.0MB · Partner 0.0MB")).toBeDefined();
+  });
+
+  test("rolling — open-speakers declarations get a loud marker; both-headphones stays silent", () => {
+    renderState({
+      kind: "rolling",
+      elapsedS: 10,
+      localBytes: 0,
+      partnerBytes: 0,
+      partnerCodename: "Falcon",
+      phones: "speakers",
+      partnerPhones: "speakers",
+    });
+    expect(screen.getByText("YOU: OPEN SPEAKERS · Falcon: OPEN SPEAKERS · echo-guard on")).toBeDefined();
+    cleanup();
+    renderState({
+      kind: "rolling",
+      elapsedS: 10,
+      localBytes: 0,
+      partnerBytes: 0,
+      partnerCodename: "Falcon",
+      phones: "headphones",
+      partnerPhones: "headphones",
+    });
+    expect(screen.queryByText(/OPEN SPEAKERS/)).toBeNull();
   });
 
   test("fault — lists a local AND a remote fault, Acknowledge fires onDismissFault", () => {
@@ -159,6 +240,15 @@ describe("PodcastPanel", () => {
       faults: [{ side: "remote", cause: "partner-fault" }],
     });
     expect(screen.getByText("Falcon: REPORTS A FAULT")).toBeDefined();
+  });
+
+  test("fault — echo-guard failure names the remedy", () => {
+    renderState({
+      kind: "fault",
+      partnerCodename: null,
+      faults: [{ side: "local", cause: "echo-guard" }],
+    });
+    expect(screen.getByText("YOUR ECHO-GUARD FAILED — USE HEADPHONES")).toBeDefined();
   });
 
   test("fault — remote fault falls back to 'PARTNER' when no codename is known", () => {

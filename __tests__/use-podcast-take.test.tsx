@@ -355,7 +355,7 @@ describe("usePodcastTake", () => {
 
     view.rerender({ ...props, dcOpen: true });
     await tick(50);
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
   });
 
   it("(b5) a channel dropping mid-take never swaps the Cut button for a line-down notice", async () => {
@@ -379,7 +379,7 @@ describe("usePodcastTake", () => {
       await view.result.current.actions.chooseVault();
     });
     expect(H.log).toContain("vault:choose");
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
   });
 
   it("(c2) a stored-but-unauthorized vault offers the grant path", async () => {
@@ -391,12 +391,12 @@ describe("usePodcastTake", () => {
       await view.result.current.actions.grantVault();
     });
     expect(H.log).toContain("vault:grant");
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
   });
 
   it("(d) a full roll counts down, starts the recorders BEFORE the mark, and rolls", async () => {
     const { pair, view } = await setup();
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
     expect(view.result.current.partnerCodename).toBe("Falcon");
 
     act(() => view.result.current.actions.roll());
@@ -483,7 +483,7 @@ describe("usePodcastTake", () => {
     await tick(2_000); // mark + tail
     expect(H.log).toContain("recorder:stop");
     expect(H.log).toContain("graph:close");
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
   });
 
   it("closes the record graph when the hook is disabled mid-take", async () => {
@@ -620,7 +620,7 @@ describe("usePodcastTake", () => {
     expect(view.result.current.panel.kind).toBe("fault");
 
     act(() => view.result.current.actions.dismissFault());
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
 
     // The wire take was released too — the next roll gets a fresh slot.
     H.state.failBuild = null;
@@ -641,12 +641,12 @@ describe("usePodcastTake", () => {
     act(() => view.result.current.actions.stop());
     await tick(1_000);
     expect(H.log).not.toContain("recorder:start");
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
 
     // The abort must not have left the roll timers armed.
     await tick(5_000);
     expect(H.log).not.toContain("graph:build");
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
 
     // And the slot is free: a second roll runs to completion.
     await rollToRolling(view);
@@ -773,7 +773,7 @@ describe("usePodcastTake", () => {
     };
     act(() => view.result.current.actions.stop());
     await tick(3_500);
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
 
     // Second take, healthy…
     await rollToRolling(view);
@@ -877,7 +877,7 @@ describe("usePodcastTake", () => {
     act(() => view.result.current.actions.stop());
     await tick(1_100); // STOP_LEAD_MS
     await tick(2_000); // mark + tail
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
     expect(view.result.current.lastTakeId).toBe(rollMsg.takeId);
 
     const stored = JSON.parse(localStorage.getItem(LAST_TAKE_KEY)!) as { takeId: string };
@@ -915,7 +915,7 @@ describe("usePodcastTake", () => {
   // -------------------------------------------------------------------
   it("holdRolls blocks an inbound proposal from ever being acked, and makes roll() a no-op", async () => {
     const { pair, view, partner, partnerCb } = await setup({ holdRolls: true });
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
 
     // Partner proposes — our side must quiet-ignore it (no ack, no slot
     // claim), so the proposer's own abort-if-unacked fires at startAtMs.
@@ -931,7 +931,7 @@ describe("usePodcastTake", () => {
     act(() => view.result.current.actions.roll());
     await tick(1_000);
     expect(pair.countSent(0, "pod/roll")).toBe(0);
-    expect(view.result.current.panel).toEqual({ kind: "armed", canSend: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
   });
 });
 

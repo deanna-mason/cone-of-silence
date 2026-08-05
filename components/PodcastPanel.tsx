@@ -4,6 +4,7 @@
 // which may wrap. The no-scroll rule owns the viewport; this panel is chrome.
 "use client";
 
+import type { Phones } from "@/lib/podcast/takeProtocol";
 import type { Fault, FaultCause } from "@/lib/podcast/watchdog";
 
 export type PodcastPanelState =
@@ -13,7 +14,18 @@ export type PodcastPanelState =
   /** Two chairs and a vault, but the data channel to the other chair is down —
    *  a proposal sent now would be dropped, never acked, and never rolled. */
   | { kind: "link-down" }
-  | { kind: "armed"; canSend: boolean; delivered?: boolean }
+  | {
+      kind: "armed";
+      canSend: boolean;
+      delivered?: boolean;
+      /** This host's per-take headphones declaration — null until answered;
+       *  Roll Tape stays disabled while null. */
+      phones: Phones | null;
+      /** The remembered previous answer (preselect hint only — never rolls). */
+      lastPhones: Phones | null;
+      partnerPhones: Phones | null;
+      partnerCodename: string | null;
+    }
   | { kind: "countdown"; secondsLeft: number }
   | {
       kind: "rolling";
@@ -21,6 +33,8 @@ export type PodcastPanelState =
       localBytes: number;
       partnerBytes: number;
       partnerCodename: string | null;
+      phones: Phones | null;
+      partnerPhones: Phones | null;
     }
   | { kind: "fault"; faults: Fault[]; partnerCodename: string | null }
   | { kind: "stopping" }
@@ -48,6 +62,7 @@ export interface PodcastPanelProps {
   onGrantVault(): void;
   onRoll(): void;
   onStop(): void;
+  onDeclarePhones(phones: Phones): void;
   onDismissFault(): void;
   onSendEpisode(): void;
   onResendEpisode(): void;
@@ -60,6 +75,7 @@ const CAUSE_COPY: Record<FaultCause, string> = {
   "encoder-stalled": "RECORDER STALLED",
   "disk-error": "DISK WRITE FAILED",
   "encoder-error": "RECORDER FAILED",
+  "echo-guard": "ECHO-GUARD FAILED — USE HEADPHONES",
   "partner-fault": "REPORTS A FAULT",
   "partner-silent": "WENT SILENT",
 };
@@ -108,6 +124,7 @@ export default function PodcastPanel({
   onGrantVault,
   onRoll,
   onStop,
+  onDeclarePhones,
   onDismissFault,
   onSendEpisode,
   onResendEpisode,
@@ -164,10 +181,49 @@ export default function PodcastPanel({
         </div>
       );
 
-    case "armed":
+    case "armed": {
+      const declared = state.phones !== null;
+      const partnerName = state.partnerCodename ?? "Partner";
+      const phoneButton = (p: Phones, label: string) => {
+        const remembered = !declared && state.lastPhones === p;
+        return (
+          <button
+            type="button"
+            onClick={() => onDeclarePhones(p)}
+            aria-pressed={state.phones === p}
+            data-remembered={remembered ? "" : undefined}
+            className={
+              state.phones === p
+                ? "kicker border border-brass px-3 py-2 text-brass"
+                : `kicker border px-3 py-2 text-ink-soft transition hover:border-brass hover:text-signal ${
+                    remembered ? "border-dashed border-brass/60" : "border-ink-faint/30"
+                  }`
+            }
+          >
+            {label}
+          </button>
+        );
+      };
       return (
         <div className={ROW}>
-          <p className="kicker flex-1 text-sienna">◈ Ready to Roll</p>
+          <p className="kicker shrink-0 text-sienna">◈ Ready to Roll</p>
+          {/* The per-take headphones declaration (echo-guard, 2026-08-05):
+              Roll Tape stays disabled until this take's answer is given — the
+              8/4 rehearsal echo came from an undeclared open-speakers rig.
+              The remembered answer is only a dashed hint, never an answer. */}
+          <div className="flex shrink-0 items-center gap-2">
+            {phoneButton("headphones", "Headphones In")}
+            {phoneButton("speakers", "Open Speakers")}
+          </div>
+          <p className="hidden min-w-0 flex-1 truncate font-body text-sm sm:block">
+            {state.partnerPhones === null ? (
+              <span className="text-sienna">{partnerName}: not confirmed</span>
+            ) : state.partnerPhones === "speakers" ? (
+              <span className="text-vermilion">{partnerName}: OPEN SPEAKERS · echo-guard</span>
+            ) : (
+              <span className="text-ink-soft">{partnerName}: headphones in</span>
+            )}
+          </p>
           {/* Once this take has been delivered, a static in-theme marker
               (text-brass = static positive) replaces Send Episode — a second
               send of an all-committed episode is an instant "0.0 MB filed."
@@ -181,11 +237,17 @@ export default function PodcastPanel({
               </button>
             )
           )}
-          <button type="button" onClick={onRoll} className={CTA_BUTTON}>
+          <button
+            type="button"
+            onClick={onRoll}
+            disabled={!declared}
+            className={`${CTA_BUTTON} disabled:cursor-not-allowed disabled:opacity-40`}
+          >
             Roll Tape
           </button>
         </div>
       );
+    }
 
     case "countdown":
       return (
@@ -209,6 +271,22 @@ export default function PodcastPanel({
             You {formatMB(state.localBytes)} · {state.partnerCodename ?? "Partner"}{" "}
             {formatMB(state.partnerBytes)}
           </p>
+          {/* Loud marker ONLY for open-speakers rigs (echo-guard engaged) —
+              both-headphones takes say nothing here; silence is the calm
+              default, the marker is what the operator must not miss. */}
+          {(state.phones === "speakers" || state.partnerPhones === "speakers") && (
+            <p className="kicker hidden shrink-0 text-vermilion sm:block">
+              {[
+                state.phones === "speakers" ? "YOU: OPEN SPEAKERS" : null,
+                state.partnerPhones === "speakers"
+                  ? `${state.partnerCodename ?? "PARTNER"}: OPEN SPEAKERS`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+              {" · echo-guard on"}
+            </p>
+          )}
           <button
             type="button"
             onClick={onStop}

@@ -91,6 +91,7 @@ const FAULT_CAUSES: ReadonlySet<FaultCause> = new Set<FaultCause>([
   "encoder-stalled",
   "disk-error",
   "encoder-error",
+  "echo-guard",
   "partner-fault",
   "partner-silent",
 ]);

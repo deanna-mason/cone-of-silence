@@ -642,6 +642,8 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         localBytes: meter.localBytes,
         partnerBytes: meter.partnerBytes,
         partnerCodename,
+        phones: null, // wired for real in the echo-guard task
+        partnerPhones: null,
       };
     }
     if (!enabled || !username || peerCount !== 1) return { kind: "not-two", count: peerCount + 1 };
@@ -657,7 +659,14 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     // canSend is a placeholder here — this hook knows nothing about the
     // episode exchange. Task 11's mergePanel (hooks/useEpisodeExchange.ts)
     // always overwrites it with the real value before the panel renders.
-    return { kind: "armed", canSend: false };
+    return {
+      kind: "armed",
+      canSend: false,
+      phones: null, // wired for real in the echo-guard task
+      lastPhones: null,
+      partnerPhones: null,
+      partnerCodename,
+    };
   }
 
   const panel = derivePanel();

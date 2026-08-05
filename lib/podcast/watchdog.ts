@@ -8,6 +8,10 @@ export type FaultCause =
   | "encoder-stalled"
   | "disk-error"
   | "encoder-error"
+  // Echo-guard capture (EC-on for an open-speakers host) could not be built —
+  // the browser refused EC on this mic. Fail-closed at roll start, like any
+  // other start fault, but with copy that names the remedy (headphones).
+  | "echo-guard"
   | "partner-fault"
   | "partner-silent";
 
@@ -39,7 +43,7 @@ export interface WatchSnapshot {
   lastBytesChangeAt: number;
   videoTrack: { readyState: MediaStreamTrackState; muted: boolean };
   audioTrack: { readyState: MediaStreamTrackState; muted: boolean };
-  recorderFault: { cause: "disk-error" | "encoder-error"; detail: string } | null;
+  recorderFault: { cause: "disk-error" | "encoder-error" | "echo-guard"; detail: string } | null;
   remote: { lastBeaconAt: number; lastBeacon: Beacon | null };
 }
 
