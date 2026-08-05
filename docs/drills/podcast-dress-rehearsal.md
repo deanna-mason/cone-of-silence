@@ -28,6 +28,14 @@ cellular is ideal). Ordinary call, ~5 minutes.
 | E2 | Host B cuts their mic too (both room mics cut); A keeps talking | Machines go silent → echo loop proven, app cleared. Co-located seats wear headphones from here on (and for the take: open speakers would bleed call playback onto the raw tapes) |
 | E3 | Only if E2 still carries A's voice | STOP — real transmit leak. `chrome://webrtc-internals` on A's Mac → Create dump; do not proceed to the take; report |
 
+**Limit of this gate (learned 8/4):** it clears the *call*, not the *tape*.
+The call path runs browser echo cancellation, so speaker bleed can be
+inaudible during E1–E3 yet still land on the raw recordings — the recorder
+captures the unprocessed mic (DSP deliberately off). A passing gate does NOT
+make open speakers safe for a take. **Headphones on both hosts, always, while
+rolling.** (Proof: the 8/4 take's raw tape carried a second faint start tone
+~490 ms late — a speaker→mic copy the call never surfaced.)
+
 | # | Step | Expect |
 |---|------|--------|
 | 1 | Both hosts join one call, Tape Vault chosen on each | Roll Tape armed on both |
