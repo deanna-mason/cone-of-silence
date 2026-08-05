@@ -30,7 +30,7 @@ import {
   type SenderStore,
   type XferLink,
 } from "@/lib/podcast/transfer";
-import { parseXferFrame } from "@/lib/podcast/xferProtocol";
+import { encodeFrame, parseXferFrame } from "@/lib/podcast/xferProtocol";
 
 export type ExchangePanelState =
   | { kind: "xfer-sending"; file: string; sentBytes: number; totalBytes: number; mbps: number; etaS: number | null }
@@ -43,7 +43,9 @@ export type ExchangePanelState =
       etaS: number | null;
       fromCodename: string | null;
     } // canResend: sender side && xfer channel open again
-  | { kind: "xfer-interrupted"; direction: "send" | "receive"; canResend: boolean }
+  // partnerRolling: the last resume attempt was refused with xfr/busy —
+  // the partner's take is still rolling; resume again once they cut.
+  | { kind: "xfer-interrupted"; direction: "send" | "receive"; canResend: boolean; partnerRolling?: boolean }
   | { kind: "xfer-done"; direction: "send" | "receive"; totalBytes: number }
   | { kind: "xfer-fault"; reason: string };
 
@@ -238,6 +240,9 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // and its ONLY read is the `delivered` derivation during render, so it is
   // render data, not ref data.
   const [deliveredEpisodeId, setDeliveredEpisodeId] = useState<string | null>(null);
+  // The last send/resume was refused with xfr/busy (partner take-active) —
+  // surfaces on the interrupted card; cleared by the next attempt/dismiss.
+  const [partnerBusy, setPartnerBusy] = useState(false);
 
   const receiverRef = useRef<EpisodeReceiver | null>(null);
   const receiverPeerRef = useRef<string | null>(null);
@@ -396,7 +401,23 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
       // SEND again once the take is done. Only the OFFER is gated: an
       // exchange already in flight keeps its remaining frames, since a take
       // can't have started under it (busy feeds holdRolls).
-      if (frame && frame.t === "xfr/offer" && takeActiveRef.current) return;
+      if (frame && frame.t === "xfr/offer" && takeActiveRef.current) {
+        // Courtesy reply (8/5 drill): the old silent drop left the far
+        // sender's Resume no-oping with no explanation. Tell them why, so
+        // their interrupted card can say "partner still rolling".
+        xfer.send(peerId, encodeFrame({ t: "xfr/busy", v: 1, reason: "take-active" }));
+        return;
+      }
+      if (frame && frame.t === "xfr/busy") {
+        if (senderRef.current && senderPeerRef.current === peerId) {
+          // Park the sender through its own interruption path — the same
+          // state a dropped channel produces — and flag the cause for the
+          // interrupted card.
+          senderRef.current.handleChannelClosed();
+          setPartnerBusy(true);
+        }
+        return;
+      }
       if (frame && frame.t === "xfr/offer") {
         if (!receiverRef.current) {
           createReceiver(peerId);
@@ -508,6 +529,10 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         // see EpisodeExchangeArgs's doc — same sendable-but-refused window.
         // eslint-disable-next-line react-hooks/refs -- senderPeerRef cannot be promoted: the wire callbacks built once per (enabled, xfer) read it synchronously (lines 417/427/438) and state would leave them closed over a stale peer; read here so canResend matches resend()'s own guard (see lines 504-508)
         canResend: senderPeerRef.current === singlePeerId && xferOpen && dcOpen,
+        // Additive and omitted when false — same optional-field idiom as
+        // pod/hello's `phones`/`takeId`, so a plain interrupted card keeps
+        // its exact prior shape.
+        ...(partnerBusy ? { partnerRolling: true as const } : {}),
       };
       break;
     case "done":
@@ -584,6 +609,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     actions: {
       send: () => {
         if (!canSend || singlePeerId === null || lastTakeId === null) return;
+        setPartnerBusy(false);
         startSender(singlePeerId, lastTakeId);
       },
       resend: () => {
@@ -607,6 +633,9 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         ) {
           return;
         }
+        // A fresh attempt re-asks the question: clear the stale refusal so
+        // the card only claims "still rolling" if THIS attempt is refused.
+        setPartnerBusy(false);
         startSender(peerId, episodeId);
       },
       dismiss: () => {
@@ -615,6 +644,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         if (senderView.phase === "parked" || senderView.phase === "done" || senderView.phase === "fault") {
           disposeSender();
           setSenderView(IDLE_SENDER_VIEW);
+          setPartnerBusy(false);
           return;
         }
         if (receiverView.phase === "parked" || receiverView.phase === "done" || receiverView.phase === "fault") {

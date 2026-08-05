@@ -26,7 +26,11 @@ export type XferFrame =
   | { t: "xfr/part"; v: 1; episodeId: string; name: string; size: number; sha256: string; chunks: number }
   | { t: "xfr/part-committed"; v: 1; episodeId: string; name: string } // after hash-verify + atomic rename
   | { t: "xfr/done"; v: 1; episodeId: string } // after the manifest is on disk
-  | { t: "xfr/fault"; v: 1; episodeId: string; reason: string };
+  | { t: "xfr/fault"; v: 1; episodeId: string; reason: string }
+  // Receiver refused an offer because ITS take is active (8/5): the reply
+  // that replaces the old silent drop, so the sender's Resume can say WHY
+  // nothing happened instead of no-oping.
+  | { t: "xfr/busy"; v: 1; reason: string };
 
 /** "xfr/" t-prefix guard, mirrors takeProtocol's parseWireMsg. */
 export function parseXferFrame(text: string): XferFrame | null {

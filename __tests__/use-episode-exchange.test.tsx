@@ -802,12 +802,15 @@ describe("useEpisodeExchange", () => {
 
     act(() => port.deliver(PEER, offer));
 
-    // No receiver created, no state change, nothing acknowledged on the wire
-    // — the far sender's own OFFER_TIMEOUT_MS parks them, which is the
-    // spec's answer for an unanswered offer.
+    // No receiver created and no state change — the offer is still refused
+    // outright. What changed (8/5 drill): the refusal is now ANSWERED with
+    // xfr/busy instead of leaving the far sender to time out with no idea
+    // why, so their interrupted card can say "partner still rolling".
     expect(view.result.current.state).toBeNull();
     expect(view.result.current.busy).toBe(false);
-    expect(port.framesSentTo(PEER)).toEqual([]);
+    expect(port.framesSentTo(PEER)).toEqual([
+      { t: "xfr/busy", v: 1, reason: "take-active" },
+    ]);
 
     act(() => {
       view.rerender({
@@ -1053,6 +1056,56 @@ describe("useEpisodeExchange", () => {
       canSend: false,
       delivered: true,
     });
+  });
+
+  // 8/5 drill: Resume Transmission silently no-oped while the partner's take
+  // was still rolling. The refusal now comes back as xfr/busy and parks the
+  // sender with a cause the card can name.
+  test("an xfr/busy refusal parks the sender and flags partnerRolling on the interrupted card", async () => {
+    const takeId = "take-busy";
+    const audio = await makePart("audio.part000", 200, 3);
+    H.state.plans.set(takeId, [{ base: "audio", parts: [audio.entry] }]);
+    H.state.partBytes.set(`${takeId}:audio.part000`, audio.bytes);
+
+    const { port, view } = setup({ lastTakeId: takeId });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+
+    act(() => view.result.current.actions.send());
+    await waitFor(() => expect(view.result.current.state?.kind).toBe("xfer-sending"));
+
+    // The partner refuses: their take is rolling.
+    act(() => port.deliver(PEER, JSON.stringify({ t: "xfr/busy", v: 1, reason: "take-active" })));
+
+    await waitFor(() => {
+      expect(view.result.current.state).toMatchObject({
+        kind: "xfer-interrupted",
+        direction: "send",
+        partnerRolling: true,
+      });
+    });
+    // Not "busy" any more — the operator is free to act on the card.
+    expect(view.result.current.busy).toBe(false);
+  });
+
+  test("a fresh resume attempt clears the stale partnerRolling flag", async () => {
+    const takeId = "take-busy-2";
+    const audio = await makePart("audio.part000", 200, 4);
+    H.state.plans.set(takeId, [{ base: "audio", parts: [audio.entry] }]);
+    H.state.partBytes.set(`${takeId}:audio.part000`, audio.bytes);
+
+    const { port, view } = setup({ lastTakeId: takeId });
+    act(() => port.setChannelState(PEER, "xfer", "open"));
+    act(() => view.result.current.actions.send());
+    await waitFor(() => expect(view.result.current.state?.kind).toBe("xfer-sending"));
+    act(() => port.deliver(PEER, JSON.stringify({ t: "xfr/busy", v: 1, reason: "take-active" })));
+    await waitFor(() =>
+      expect(view.result.current.state).toMatchObject({ partnerRolling: true }),
+    );
+
+    // Pressing Resume re-asks the question — the card must not keep claiming
+    // "still rolling" from the previous attempt while this one is in flight.
+    act(() => view.result.current.actions.resend());
+    await waitFor(() => expect(view.result.current.state?.kind).toBe("xfer-sending"));
   });
 
   test("(f) mergePanel: every other take kind passes through unchanged when no exchange state is showing", () => {
