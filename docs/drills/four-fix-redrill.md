@@ -1,5 +1,15 @@
 # Four-fix re-drill (2026-08-05 findings)
 
+> **Superseded for the next run — use `next-drill-runsheet.md`.** That sheet
+> covers what is actually owed (block F, plus the finding-1 capture) and is
+> current with the retired headphones declaration. This card is kept for the
+> blocks it already proved and for the record of what each block tests.
+>
+> **Stale here:** ab051eb retired the per-take headphones declaration. Roll
+> Tape is ungated and now opens a pre-roll reminder (Confirm / Not Yet) that
+> only the pressing host sees. Any step below that waits on a declaration is
+> out of date. Headphones remain mandatory on both hosts regardless.
+
 The drill owed by `2026-08-05-throwaway-drill-report.md`. Four findings were
 diagnosed from source and fixed the same evening, each with unit tests; **none
 has been proven live.** This card proves them, in one sitting, on the real
@@ -29,7 +39,7 @@ a pass when the old symptom needed a specific trigger to appear.
 
 | # | Step | Expect |
 |---|---|---|
-| A1 | Both join one call, Tape Vault chosen, headphones declared on each | Roll Tape armed on both |
+| A1 | Both join one call, Tape Vault chosen on each | Roll Tape armed on both |
 | A2 | ROLL TAPE, let it run ~90 s | Reel Rolling on both, gauges climbing |
 
 Leave it rolling — Block B happens underneath this take.
