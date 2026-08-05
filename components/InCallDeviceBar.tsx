@@ -9,10 +9,31 @@
 // podcastLocked (countdown / rolling / fault / stopping).
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import DevicePicker from "@/components/DevicePicker";
 import { LensIcon } from "@/components/icons";
 import type { MediaDeviceChoice } from "@/lib/webrtc/media";
+
+const COARSE_POINTER_QUERY = "(pointer: coarse)";
+
+function subscribeCoarsePointer(cb: () => void) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const mq = window.matchMedia(COARSE_POINTER_QUERY);
+  mq.addEventListener?.("change", cb);
+  return () => mq.removeEventListener?.("change", cb);
+}
+
+function getCoarsePointerSnapshot(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(COARSE_POINTER_QUERY).matches
+    : false;
+}
+
+// SSR renders the desktop shape and never touches matchMedia; the
+// fine-pointer default means no hydration flip (see comment below).
+function getCoarsePointerServerSnapshot(): boolean {
+  return false;
+}
 
 interface InCallDeviceBarProps {
   mics: MediaDeviceInfo[];
@@ -38,13 +59,14 @@ export default function InCallDeviceBar({
 }: InCallDeviceBarProps) {
   const [open, setOpen] = useState(false);
   // facingMode is a phone concern — show the quick flip only on a coarse
-  // pointer. Read in an effect so SSR renders the desktop shape and never
-  // touches matchMedia; the fine-pointer default means no hydration flip.
-  const [isTouch, setIsTouch] = useState(false);
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    setIsTouch(window.matchMedia("(pointer: coarse)").matches);
-  }, []);
+  // pointer. Read via useSyncExternalStore so SSR renders the desktop shape
+  // and never touches matchMedia; the fine-pointer default means no
+  // hydration flip.
+  const isTouch = useSyncExternalStore(
+    subscribeCoarsePointer,
+    getCoarsePointerSnapshot,
+    getCoarsePointerServerSnapshot,
+  );
 
   const showFlip = isTouch && hasCamera;
 

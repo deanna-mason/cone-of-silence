@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import { spawn as defaultSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -196,7 +197,7 @@ describe("decode.mjs", () => {
 
 describe("runner.mjs", () => {
   function makeFakeChild() {
-    const child: any = new EventEmitter();
+    const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     return child;
@@ -204,7 +205,7 @@ describe("runner.mjs", () => {
 
   it("non-zero exit → DarkroomError ffmpeg-failed carrying stderr tail", async () => {
     const child = makeFakeChild();
-    const spawnFn = () => child;
+    const spawnFn = (() => child) as unknown as typeof defaultSpawn;
     const runner = makeRunner("ffmpeg", spawnFn);
 
     const runPromise = runner.run(["-i", "bogus.webm"]);
@@ -212,14 +213,14 @@ describe("runner.mjs", () => {
     child.emit("close", 1);
 
     await expect(runPromise).rejects.toBeInstanceOf(DarkroomError);
-    await expect(runPromise.catch((e: any) => e)).resolves.toMatchObject({ code: "ffmpeg-failed" });
-    const err = await runPromise.catch((e: any) => e);
+    await expect(runPromise.catch((e) => e as DarkroomError)).resolves.toMatchObject({ code: "ffmpeg-failed" });
+    const err = await runPromise.catch((e) => e as DarkroomError);
     expect(err.message).toContain("some ffmpeg error output");
   });
 
   it("zero exit resolves with collected stderr", async () => {
     const child = makeFakeChild();
-    const spawnFn = () => child;
+    const spawnFn = (() => child) as unknown as typeof defaultSpawn;
     const runner = makeRunner("ffmpeg", spawnFn);
 
     const runPromise = runner.run(["-i", "ok.webm"]);
@@ -231,7 +232,7 @@ describe("runner.mjs", () => {
 
   it("capture collects stdout as a Buffer alongside stderr", async () => {
     const child = makeFakeChild();
-    const spawnFn = () => child;
+    const spawnFn = (() => child) as unknown as typeof defaultSpawn;
     const runner = makeRunner("ffmpeg", spawnFn);
 
     const capturePromise = runner.capture(["-i", "ok.webm", "-f", "f32le", "pipe:1"]);
@@ -247,10 +248,10 @@ describe("runner.mjs", () => {
   it("run spawns with the given bin and args array, never a shell", async () => {
     const child = makeFakeChild();
     let capturedCall: unknown[] | null = null;
-    const spawnFn = (...args: unknown[]) => {
+    const spawnFn = ((...args: unknown[]) => {
       capturedCall = args;
       return child;
-    };
+    }) as unknown as typeof defaultSpawn;
     const runner = makeRunner("ffmpeg", spawnFn);
 
     const runPromise = runner.run(["-hide_banner", "-i", "in.webm"]);

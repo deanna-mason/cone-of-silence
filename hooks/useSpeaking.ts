@@ -4,7 +4,7 @@
 // AnalyserNode per stream; throttled polling per spec — no per-frame work.
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SPEAKING_POLL_MS, isSpeaking } from "@/lib/audioLevel";
 
 let sharedCtx: AudioContext | null = null;
@@ -32,11 +32,18 @@ export function useSpeaking(stream: MediaStream | null): boolean {
     };
   }, [stream]);
 
+  // Derived during render (not written from the effect below): whether the
+  // stream currently has an audio track. trackEpoch stays a dependency so
+  // this recomputes on the same add/removetrack cadence as the polling
+  // effect — stream identity is stable, tracks mutate (see comment above).
+  const hasAudioTrack = useMemo(
+    () => (stream ? stream.getAudioTracks().length > 0 : false),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- trackEpoch is intentionally unread in the body; it forces recompute when tracks mutate on the stable stream identity, per the line 22-23 comment.
+    [stream, trackEpoch],
+  );
+
   useEffect(() => {
-    if (!stream || stream.getAudioTracks().length === 0) {
-      setSpeaking(false);
-      return;
-    }
+    if (!stream || stream.getAudioTracks().length === 0) return;
     const ctx = audioContext();
     if (!ctx) return;
     void ctx.resume(); // autoplay-policy insurance; ignore rejection
@@ -58,5 +65,5 @@ export function useSpeaking(stream: MediaStream | null): boolean {
     };
   }, [stream, trackEpoch]);
 
-  return speaking;
+  return speaking && hasAudioTrack;
 }

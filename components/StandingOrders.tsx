@@ -14,12 +14,45 @@
 // This surface is the logged-in landing on /studio (above the recordings
 // library) — Deanna's confirmed home for it (the mockup's /home was not adopted).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { buildInviteLink, type RoomKeys } from "@/lib/roomLink";
 import { markConvened, readLastConvened, readStudioName, setStudioName } from "@/lib/studioRoom";
 
 const BURN_MS = 5 * 60 * 1000; // UI-only handoff-code lifetime
 const DEFAULT_NAME = "Standing Studio";
+
+// Studio name is a localStorage read with no native change event, so it gets
+// its own tiny pub-sub: commitName() below calls notifyStudioNameChange()
+// right after writing, which is the only thing that ever needs to push a
+// fresh read to the component (mirrors the old setName(...) call it replaces).
+const nameSubscribers = new Set<() => void>();
+function subscribeStudioName(cb: () => void) {
+  nameSubscribers.add(cb);
+  return () => nameSubscribers.delete(cb);
+}
+function notifyStudioNameChange() {
+  nameSubscribers.forEach((cb) => cb());
+}
+function getStudioNameSnapshot(): string {
+  return readStudioName() ?? DEFAULT_NAME;
+}
+// Matches the old useState(DEFAULT_NAME) initial value, so server render and
+// first paint are unchanged — no hydration mismatch.
+function getStudioNameServerSnapshot(): string {
+  return DEFAULT_NAME;
+}
+
+// Last-convened has no live-update requirement: the only writer,
+// markConvened(), fires immediately before a full-page navigation
+// (window.location.assign), so nothing ever needs to observe it change
+// in-place. A no-op subscribe preserves the original "read once on mount"
+// behavior.
+function noopSubscribe() {
+  return () => {};
+}
+function getLastConvenedServerSnapshot(): string | null {
+  return null;
+}
 
 function formatConvened(iso: string | null): string {
   if (!iso) return "never";
@@ -30,9 +63,13 @@ function formatConvened(iso: string | null): string {
 }
 
 export default function StandingOrders({ room }: { room: RoomKeys }) {
-  const [name, setName] = useState(DEFAULT_NAME);
+  const name = useSyncExternalStore(
+    subscribeStudioName,
+    getStudioNameSnapshot,
+    getStudioNameServerSnapshot,
+  );
   const [editingName, setEditingName] = useState(false);
-  const [convened, setConvened] = useState<string | null>(null);
+  const convened = useSyncExternalStore(noopSubscribe, readLastConvened, getLastConvenedServerSnapshot);
 
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [remainingMs, setRemainingMs] = useState(BURN_MS);
@@ -40,16 +77,12 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
   const [copyFailed, setCopyFailed] = useState(false);
   const deadlineRef = useRef<number>(0);
 
-  useEffect(() => {
-    setName(readStudioName() ?? DEFAULT_NAME);
-    setConvened(readLastConvened());
-  }, []);
-
   // Burn clock for the revealed handoff code — UI only (see file header).
+  // deadlineRef/remainingMs are armed in the "Hand off" click handler below,
+  // the event that causes the burn window to open; this effect only owns the
+  // 1 Hz tick while handoffOpen is true (duration/cadence unchanged).
   useEffect(() => {
     if (!handoffOpen) return;
-    deadlineRef.current = Date.now() + BURN_MS;
-    setRemainingMs(BURN_MS);
     const tick = window.setInterval(() => {
       const left = deadlineRef.current - Date.now();
       if (left <= 0) {
@@ -72,7 +105,7 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
 
   function commitName(next: string) {
     setStudioName(next);
-    setName(readStudioName() ?? DEFAULT_NAME);
+    notifyStudioNameChange();
     setEditingName(false);
   }
 
@@ -155,7 +188,15 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
             </p>
             <button
               type="button"
-              onClick={() => setHandoffOpen(true)}
+              onClick={() => {
+                // Arm the burn clock here, in the event that opens the
+                // handoff panel, rather than as a state write inside the
+                // tick effect — same duration/cadence, just triggered by the
+                // click instead of derived in the effect.
+                deadlineRef.current = Date.now() + BURN_MS;
+                setRemainingMs(BURN_MS);
+                setHandoffOpen(true);
+              }}
               className="kicker mt-3 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
             >
               Hand off to another device

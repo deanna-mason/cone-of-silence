@@ -20,6 +20,7 @@ export default function LobbyPage() {
       // Store first (server enforces on create anyway), then confirm live.
       storeCreateToken(incoming);
       history.replaceState(null, "", window.location.pathname + window.location.search);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- store-first-confirm-live sequencing over a destroyed input (comment above: "Store first ... then confirm live"), plus the hash burn just above — a one-time mount reaction to the incoming token, not a render-derivable value.
       setClearance({ state: "active" });
       void verifyCreateToken(incoming).then((status) => {
         if (status === "accepted") setClearance({ state: "accepted" });

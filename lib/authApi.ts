@@ -38,6 +38,30 @@ export function getSession(): StoredSession | null {
   }
 }
 
+// getSession() parses the stored JSON on every call, which would break the
+// referential stability useSyncExternalStore requires of getSnapshot (it must
+// return the same reference across calls until the underlying value actually
+// changes, or callers re-render every tick). This caches the parsed result
+// keyed on the raw localStorage string, only re-parsing when that string
+// changes. Shared by app/account/page.tsx and app/studio/page.tsx (Task 4),
+// and reused by usePodcastTake/room page (Task 7) — do not duplicate it.
+let cachedRawSession: string | null = null;
+let cachedSessionSnapshot: StoredSession | null = null;
+
+export function getSessionSnapshot(): StoredSession | null {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(SESSION_KEY);
+  } catch {
+    raw = null;
+  }
+  if (raw !== cachedRawSession) {
+    cachedRawSession = raw;
+    cachedSessionSnapshot = getSession();
+  }
+  return cachedSessionSnapshot;
+}
+
 export function clearSession(): void {
   try {
     localStorage.removeItem(SESSION_KEY);

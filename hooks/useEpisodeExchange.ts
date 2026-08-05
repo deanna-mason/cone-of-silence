@@ -162,7 +162,12 @@ interface ReceiverView {
   dismissed: boolean;
   file: string;
   committedBytes: number;
-  totalBytes: number;
+  totalBytes: number; // PER-PART, straight off ReceiveProgress
+  // Whole-episode total for the terminal "done" card, folded in at the
+  // moment the phase flips to "done" (see handleReceiverPhase) rather than
+  // summed out of the per-part ref during render. Meaningless — and reset to
+  // 0 — in every other phase, which is exactly when nothing reads it.
+  episodeTotalBytes: number;
   fromCodename: string | null;
   mbps: number;
   etaS: number | null;
@@ -174,6 +179,7 @@ const IDLE_RECEIVER_VIEW: ReceiverView = {
   file: "",
   committedBytes: 0,
   totalBytes: 0,
+  episodeTotalBytes: 0,
   fromCodename: null,
   mbps: 0,
   etaS: null,
@@ -187,6 +193,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // createReceiver read the CURRENT key at construction time, not whatever
   // was in scope when the wire-subscription effect closed over it.
   const xferKeyRef = useRef(xferKey);
+  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: startSender/createReceiver must read the current key when they run, not the value the wire-subscription effect closed over when it was built (see lines 192-194)
   xferKeyRef.current = xferKey;
 
   // Same `latest` idiom as usePodcastTake.ts: the wire-subscription effect
@@ -194,12 +201,16 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // myCodename/partnerCodename/lastTakeId at call time, not whatever was in
   // scope when it was constructed.
   const myCodenameRef = useRef(myCodename);
+  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: the wire-subscription effect is built once per (enabled, xfer) and must read the current value at call time, not construction time (see lines 199-202)
   myCodenameRef.current = myCodename;
   const partnerCodenameRef = useRef(partnerCodename);
+  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: the wire-subscription effect is built once per (enabled, xfer) and must read the current value at call time, not construction time (see lines 199-202)
   partnerCodenameRef.current = partnerCodename;
   const lastTakeIdRef = useRef(lastTakeId);
+  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: the wire-subscription effect is built once per (enabled, xfer) and must read the current value at call time, not construction time (see lines 199-202)
   lastTakeIdRef.current = lastTakeId;
   const takeActiveRef = useRef(takeActive);
+  // eslint-disable-next-line react-hooks/refs -- `latest` idiom: the wire-subscription effect is built once per (enabled, xfer) and must read the current value at call time, not construction time (see lines 199-202)
   takeActiveRef.current = takeActive;
 
   const [senderView, setSenderView] = useState<SenderView>(IDLE_SENDER_VIEW);
@@ -222,8 +233,11 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // kept across the operator dismissing the done card, so `delivered` below
   // stays true for that episode and the armed card never re-offers Send for
   // an already-delivered take. A fresh take (different lastTakeId) makes
-  // `delivered` false again on its own; no reset needed here.
-  const deliveredEpisodeIdRef = useRef<string | null>(null);
+  // `delivered` false again on its own; no reset needed here. State rather
+  // than a ref: its ONLY write is from the sender's onPhase callback below
+  // and its ONLY read is the `delivered` derivation during render, so it is
+  // render data, not ref data.
+  const [deliveredEpisodeId, setDeliveredEpisodeId] = useState<string | null>(null);
 
   const receiverRef = useRef<EpisodeReceiver | null>(null);
   const receiverPeerRef = useRef<string | null>(null);
@@ -259,7 +273,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
     if (phase === "offering") senderRateRef.current = RATE_IDLE;
     // Delivery reached "done": remember which episode, so the armed card
     // marks it delivered rather than re-offering Send after dismissal.
-    if (phase === "done") deliveredEpisodeIdRef.current = senderEpisodeIdRef.current;
+    if (phase === "done") setDeliveredEpisodeId(senderEpisodeIdRef.current);
     setSenderView((prev) => ({ ...prev, phase, faultReason: phase === "fault" ? (detail ?? "") : null }));
   }
 
@@ -283,10 +297,22 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
 
   function handleReceiverPhase(phase: ReceiverPhase, detail?: string): void {
     if (phase === "receiving") receiverRateRef.current = RATE_IDLE;
+    // The whole-episode total for the "done" card, summed HERE (a callback)
+    // instead of during render. Sound because transfer.ts only reaches
+    // onPhase("done") from finishEpisode(), i.e. strictly after every part
+    // has committed and therefore after every onProgress this session was
+    // ever going to deliver — the per-part map is complete at this instant.
+    // Every path that empties that map (a new episodeId on the wire, a
+    // peer-churn disposeReceiver) is immediately followed, in the same
+    // synchronous turn, by adopt()'s onPhase("receiving"), so no render can
+    // observe a "done" phase against an already-cleared map.
+    const episodeTotalBytes =
+      phase === "done" ? [...receiverPartTotalsRef.current.values()].reduce((a, b) => a + b, 0) : 0;
     setReceiverView((prev) => ({
       ...prev,
       phase,
       dismissed: false,
+      episodeTotalBytes,
       faultReason: phase === "fault" ? (detail ?? "") : null,
     }));
   }
@@ -438,6 +464,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
   // channel emits no further event, so resetting on every peerKey change
   // would forget it, wedging canSend false through a transient [P1] ->
   // [P1,P2] -> [P1]).
+  // eslint-disable-next-line react-hooks/refs -- deliberate ref-held per-peer map re-rendered by the setXferOpenTick pump; the reset-on-churn effect that would let this be state is exactly what must not exist, as it would wedge canSend (see lines 462-466 and 218-224)
   const xferOpen = singlePeerId !== null && (xferOpenMapRef.current.get(singlePeerId) ?? false);
 
   const sendingBusy = senderView.phase === "offering" || senderView.phase === "sending";
@@ -446,7 +473,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
 
   // This session already delivered the current take to the partner — hold
   // Send off so a second press can't fire the instant "0.0 MB filed." no-op.
-  const delivered = lastTakeId !== null && deliveredEpisodeIdRef.current === lastTakeId;
+  const delivered = lastTakeId !== null && deliveredEpisodeId === lastTakeId;
   // `dcOpen` (review fix round 2): see EpisodeExchangeArgs's doc — closes the
   // sub-second sendable-but-refused window during a 4C re-proof.
   const canSend = lastTakeId !== null && singlePeerId !== null && xferOpen && dcOpen && !takeActive && !delivered;
@@ -479,6 +506,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         // have some peer's channel open — otherwise this button would
         // render live while resend() silently no-ops behind it. `dcOpen`:
         // see EpisodeExchangeArgs's doc — same sendable-but-refused window.
+        // eslint-disable-next-line react-hooks/refs -- senderPeerRef cannot be promoted: the wire callbacks built once per (enabled, xfer) read it synchronously (lines 417/427/438) and state would leave them closed over a stale peer; read here so canResend matches resend()'s own guard (see lines 504-508)
         canResend: senderPeerRef.current === singlePeerId && xferOpen && dcOpen,
       };
       break;
@@ -518,7 +546,7 @@ export function useEpisodeExchange(args: EpisodeExchangeArgs): EpisodeExchange {
         state = {
           kind: "xfer-done",
           direction: "receive",
-          totalBytes: [...receiverPartTotalsRef.current.values()].reduce((a, b) => a + b, 0),
+          totalBytes: receiverView.episodeTotalBytes,
         };
         break;
       case "fault":

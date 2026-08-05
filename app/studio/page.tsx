@@ -1,23 +1,41 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
-import { getSession, type StoredSession } from "@/lib/authApi";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { getSessionSnapshot } from "@/lib/authApi";
 import { listRecordings, StudioApiError, uploadRecording, type RecordingDto } from "@/lib/studioApi";
-import { type RoomKeys } from "@/lib/roomLink";
-import { readStudioRoom } from "@/lib/studioRoom";
+import { readStudioRoomSnapshot } from "@/lib/studioRoom";
 import StandingOrders from "@/components/StandingOrders";
 import RecordingRow from "@/components/RecordingRow";
 
 const ACCEPT = ".mp3,.m4a,.wav,.aac,.flac,.ogg,.webm,.mp4,.mov,.mkv";
 
-export default function StudioPage() {
-  const [session, setSession] = useState<StoredSession | null>(null);
-  const [ready, setReady] = useState(false);
+// No native "changed" event for either store; the busy-flag/list setStates
+// elsewhere in this component re-render on their own schedule, and
+// getSnapshot is re-read every render regardless of subscription — same
+// "read once, re-check on every render" behavior as the old mount effect.
+function noopSubscribe() {
+  return () => {};
+}
 
-  // The pinned standing room (flow B). Read in an effect so the server render
-  // never touches localStorage; null until mount, and when nothing is pinned.
-  const [pinned, setPinned] = useState<RoomKeys | null>(null);
+// Server render never touches localStorage (documented SSR contract below);
+// `ready` mirrors that via the same hydration-resync mechanism as `session`
+// and `pinned` so all three flip from their placeholder values to real ones
+// in the same pass — same timing as the old mount effect's three setStates.
+function getReadySnapshot(): boolean {
+  return true;
+}
+function getReadyServerSnapshot(): boolean {
+  return false;
+}
+
+export default function StudioPage() {
+  const session = useSyncExternalStore(noopSubscribe, getSessionSnapshot, () => null);
+  const ready = useSyncExternalStore(noopSubscribe, getReadySnapshot, getReadyServerSnapshot);
+
+  // The pinned standing room (flow B). Server render never touches
+  // localStorage; null until the client resync, and when nothing is pinned.
+  const pinned = useSyncExternalStore(noopSubscribe, readStudioRoomSnapshot, () => null);
 
   const [recordings, setRecordings] = useState<RecordingDto[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -27,12 +45,6 @@ export default function StudioPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    setSession(getSession());
-    setPinned(readStudioRoom());
-    setReady(true);
-  }, []);
 
   // Initial fetch once a session is present.
   useEffect(() => {

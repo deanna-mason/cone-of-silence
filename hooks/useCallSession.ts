@@ -54,6 +54,7 @@ export function useCallSession(
   const [xferKey, setXferKey] = useState<CryptoKey | null>(null);
   const sessionRef = useRef<CallSession | null>(null);
   const streamRef = useRef<MediaStream | null>(stream);
+  // eslint-disable-next-line react-hooks/refs -- latest-value mirror read synchronously at the top of the session effect (~106), whose deps deliberately exclude `stream`; same `latest` idiom as usePodcastTake's `latest` ref
   streamRef.current = stream;
 
   // Message listeners registered against the bus, independent of whether a
@@ -68,8 +69,12 @@ export function useCallSession(
   const xferDrainListenersRef = useRef<Set<(peerId: string) => void>>(new Set());
   const xferChannelStateListenersRef =
     useRef<Set<(peerId: string, channel: ChannelName, state: ChannelLifecycle) => void>>(new Set());
-  const busRef = useRef<CallBus | undefined>(undefined);
-  if (!busRef.current) {
+  // Lazy useState initializer: runs exactly once, at mount, so `bus` keeps
+  // the same "construct once per mount" identity the old `if (!busRef.current)`
+  // guard gave it — every consumer effect keys off this identity. Nothing
+  // ever reassigns it after mount (no dispose/re-create path), so a plain
+  // ref isn't needed as backing storage.
+  const [bus] = useState<CallBus>(() => {
     const xfer: XferPort = {
       send: (peerId, data) => sessionRef.current?.sendXferTo(peerId, data) ?? false,
       bufferedAmount: (peerId) => sessionRef.current?.xferBufferedAmount(peerId) ?? -1,
@@ -86,7 +91,7 @@ export function useCallSession(
         return () => xferChannelStateListenersRef.current.delete(fn);
       },
     };
-    busRef.current = {
+    return {
       sendAll: (text) => sessionRef.current?.sendAll(text),
       sendTo: (peerId, text) => sessionRef.current?.sendTo(peerId, text) ?? false,
       onMessage: (fn) => {
@@ -95,7 +100,7 @@ export function useCallSession(
       },
       xfer,
     };
-  }
+  });
 
   useEffect(() => {
     const local = streamRef.current;
@@ -170,5 +175,5 @@ export function useCallSession(
     if (stream) sessionRef.current?.setLocalStream(stream).catch(() => {});
   }, [stream]);
 
-  return { status, peers, dcOpen, bus: busRef.current, xferKey };
+  return { status, peers, dcOpen, bus, xferKey };
 }

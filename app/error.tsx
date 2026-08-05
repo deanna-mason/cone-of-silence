@@ -48,6 +48,7 @@ export default function Error({
         >
           Retry Transmission
         </button>
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- deliberate full-document load: a blown error boundary should discard the client tree, not soft-navigate within it */}
         <a
           href="/"
           className="kicker inline-block border border-ink-faint/30 px-6 py-3 text-ink-soft transition hover:border-brass hover:text-signal"

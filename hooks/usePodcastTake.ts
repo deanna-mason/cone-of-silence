@@ -13,10 +13,10 @@
 // sequencing lives here and the panel stays a pure function of props.
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { PodcastPanelState } from "@/components/PodcastPanel";
 import type { CallBus } from "@/hooks/useCallSession";
-import { getSession } from "@/lib/authApi";
+import { getSessionSnapshot } from "@/lib/authApi";
 import { soundKlaxon } from "@/lib/podcast/klaxon";
 import { buildRecordGraph, EchoGuardUnavailableError, type RecordGraph } from "@/lib/podcast/recordGraph";
 import { TakeRecorder, type RecorderFault } from "@/lib/podcast/recorder";
@@ -79,6 +79,30 @@ function readLastPhones(): Phones | null {
   }
 }
 
+// ---------------------------------------------------------------------
+// Client-only mount reads (auth session + the stored last-take id), sourced
+// from useSyncExternalStore instead of a mount effect. Both are localStorage
+// reads, so the SERVER snapshot is null and React resyncs to the real value
+// right after hydration — the same "blank on the server, real on the client"
+// contract the old effect had. Neither store has a native change event: the
+// no-op subscribe preserves the old "read once, then follow React's own
+// render schedule" behavior (same idiom as app/account and app/studio).
+// Both snapshots are primitives (string | null), so they are referentially
+// stable by value; the session read goes through authApi's cached
+// getSessionSnapshot rather than getSession (which re-parses per call).
+// ---------------------------------------------------------------------
+function noopSubscribe(): () => void {
+  return () => {};
+}
+
+function getUsernameSnapshot(): string | null {
+  return getSessionSnapshot()?.username ?? null;
+}
+
+function getNullServerSnapshot(): null {
+  return null;
+}
+
 /**
  * How long after OUR recorders start a partner beacon of "not rolling yet" is
  * ignored.
@@ -106,8 +130,8 @@ export interface PodcastTake {
   /** This host's OWN codename — the same value announced via pod/hello.
    *  Task 11's episode exchange needs it to identify the SENDER on the
    *  wire (an offer's `from` must be the sender's own identity, not the
-   *  partner's — CONTROLLER RULING D8). Null until the auth session is
-   *  read (client-only effect). */
+   *  partner's — CONTROLLER RULING D8). Null until the auth session
+   *  store yields a value (a useSyncExternalStore read, ~195). */
   myCodename: string | null;
   /** This side's recorder byte counts, video and audio counted separately —
    *  an aggregate total can't tell "both streams growing" apart from "one
@@ -184,7 +208,15 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const peerKey = peerIds.join("|");
 
   const [supported] = useState(detectSupport);
-  const [username, setUsername] = useState<string | null>(null);
+  // Auth + last-take probes: SSR-safe client-only reads (see the snapshot
+  // helpers above). The vault probe is async and stays an effect below.
+  const username = useSyncExternalStore(noopSubscribe, getUsernameSnapshot, getNullServerSnapshot);
+  // readLastTakeId's own try/catch also covers a blocked or corrupt store.
+  const storedLastTakeId = useSyncExternalStore(
+    noopSubscribe,
+    readLastTakeId,
+    getNullServerSnapshot,
+  );
   const [vaultPerm, setVaultPerm] = useState<VaultPermission | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [countdownS, setCountdownS] = useState(0);
@@ -201,13 +233,19 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [meter, setMeter] = useState({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
   const [streamBytes, setStreamBytes] = useState({ video: 0, audio: 0 });
   const [coordinatorGen, setCoordinatorGen] = useState(0);
-  const [lastTakeId, setLastTakeId] = useState<string | null>(null);
+  // The take THIS mount stopped. It outranks the stored read because
+  // writeLastTakeId is best-effort: a blocked or full localStorage must cost
+  // only the reload-recovery convenience, never the id of a take whose tape
+  // this session actually committed.
+  const [recordedTakeId, setRecordedTakeId] = useState<string | null>(null);
+  const lastTakeId = recordedTakeId ?? storedLastTakeId;
 
   // Anything the coordinator callbacks or the 1 Hz tick need to read lives in
   // a ref: both run outside React's render pass and must never see a stale
   // closure. `phaseRef` is the authoritative phase; `setPhase` only mirrors it
   // for rendering (see goPhase).
   const latest = useRef({ videoTrack, audioDeviceId });
+  // eslint-disable-next-line react-hooks/refs -- the `latest` idiom documented directly above: its readers are the coordinator callbacks and the 1 Hz tick, which run OUTSIDE React's render pass, so this mirror has to be refreshed on every render or those readers see a stale closure
   latest.current = { videoTrack, audioDeviceId };
 
   // Same idiom as `latest`: the coordinator is built once per (enabled, bus,
@@ -215,9 +253,18 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // CURRENT holdRolls through a ref rather than close over the value from
   // whichever render constructed it.
   const holdRollsRef = useRef(holdRolls);
+  // eslint-disable-next-line react-hooks/refs -- same `latest` idiom, far end of the one-render-lag bridge documented in app/room/page.tsx (its exchangeBusyRef comment): the only reader is canAcceptRoll, which the coordinator calls from a wire callback outside React's render pass
   holdRollsRef.current = holdRolls;
 
   const coordinatorRef = useRef<TakeCoordinator | null>(null);
+  // Which coordinator instance is installed, as a number — bumped the moment
+  // one is constructed, and the hello effect's announce latch keys on it. The
+  // coordinatorGen STATE cannot be that key: the coordinator effect can run in
+  // the same commit as the hello effect (a first commit with the channel
+  // already open), and in that commit the gen bump has not landed yet — the
+  // hello effect would announce under the pre-bump number and then again when
+  // the bump re-fires it. 0 means "none built yet".
+  const coordinatorEpochRef = useRef(0);
   const graphRef = useRef<RecordGraph | null>(null);
   const recorderRef = useRef<TakeRecorder | null>(null);
   const recorderFaultRef = useRef<{ cause: RecorderFault | "echo-guard"; detail: string } | null>(null);
@@ -251,16 +298,8 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   }
 
   // ---------------------------------------------------------------------
-  // Auth + vault probes (both SSR-safe: effects only).
+  // Vault probe (SSR-safe: the support guard is false on the server).
   // ---------------------------------------------------------------------
-  useEffect(() => {
-    setUsername(getSession()?.username ?? null);
-    // localStorage only ever runs from inside an effect (client-only, never
-    // during SSR) — readLastTakeId's own try/catch covers a blocked or
-    // corrupt store on top of that.
-    setLastTakeId(readLastTakeId());
-  }, []);
-
   useEffect(() => {
     if (!supported) return;
     let cancelled = false;
@@ -439,7 +478,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     releaseTake(false);
     // Committed parts are real tape whether this stop itself errored or not
     // (decision 11) — recorded on both paths below.
-    setLastTakeId(takeId);
+    setRecordedTakeId(takeId);
     writeLastTakeId(takeId);
     if (stopError) {
       // The sidecar/final part didn't land — the operator needs to know the
@@ -612,8 +651,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       localPhones: () => phonesRef.current,
     });
     coordinatorRef.current = coordinator;
+    coordinatorEpochRef.current += 1;
     // NOT announced here: at construction the data channel is usually still
     // closed and the bus drops rather than queues. The effect below does it.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate commit-time signal between two effects: the bump is what re-fires the hello effect below via its `coordinatorGen` dep-array entry now that a new coordinator exists, and nothing in render can derive that — the coordinator is constructed here, in this effect
     setCoordinatorGen((n) => n + 1);
     return () => {
       coordinator.dispose();
@@ -653,7 +694,11 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       announcedKeyRef.current = null; // the next open re-announces
       return;
     }
-    const key = `${coordinatorGen}|${peerKey}`;
+    // Keyed on the INSTALLED coordinator (see coordinatorEpochRef), not on the
+    // coordinatorGen state that re-fires this effect — the two disagree for
+    // exactly one commit, and announcing under both numbers would put a second
+    // hello on the wire for one coordinator.
+    const key = `${coordinatorEpochRef.current}|${peerKey}`;
     if (announcedKeyRef.current === key) return;
     announcedKeyRef.current = key;
     coordinatorRef.current?.announce();
@@ -664,10 +709,16 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // departed agent's codename is worse than falling back to the positional
   // label. A channel blip is NOT churn — the same peer is still on the line,
   // so the claim stands.
-  useEffect(() => {
+  //
+  // Adjusted during render rather than in an effect: the retire lands in the
+  // SAME render as the roster change, so the departed agent's codename is
+  // never painted onto the new one for a frame.
+  const [prevPeerKey, setPrevPeerKey] = useState(peerKey);
+  if (prevPeerKey !== peerKey) {
+    setPrevPeerKey(peerKey);
     setPartnerCodename(null);
     setPartnerPhones(null); // a declaration belongs to the peer who made it
-  }, [peerKey]);
+  }
 
   // Re-announce whenever THIS side's declaration changes — the partner's
   // armed panel shows it live (echo-guard, 8/5). The mount run is skipped by

@@ -55,9 +55,19 @@ const H = vi.hoisted(() => {
   return { log, state };
 });
 
-vi.mock("@/lib/authApi", () => ({
-  getSession: vi.fn(() => ({ session: "s", username: "Nightingale", expiresAt: "2099-01-01" })),
-}));
+vi.mock("@/lib/authApi", () => {
+  // The hook reads the session through getSessionSnapshot in a
+  // useSyncExternalStore, so this return MUST be referentially stable — a
+  // fresh object literal per call re-renders forever. (The real
+  // getSessionSnapshot caches on the raw localStorage string for the same
+  // reason.) Held in the factory closure: vi.mock factories are hoisted above
+  // every top-level binding in this file.
+  const session = { session: "s", username: "Nightingale", expiresAt: "2099-01-01" };
+  return {
+    getSession: vi.fn(() => ({ session: "s", username: "Nightingale", expiresAt: "2099-01-01" })),
+    getSessionSnapshot: vi.fn(() => session),
+  };
+});
 
 vi.mock("@/lib/podcast/klaxon", () => ({ soundKlaxon: vi.fn() }));
 
