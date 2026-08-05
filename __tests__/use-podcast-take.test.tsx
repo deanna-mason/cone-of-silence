@@ -27,6 +27,8 @@ const H = vi.hoisted(() => {
   const state = {
     vaultPerm: "granted" as "granted" | "prompt" | "unset",
     buildArgs: [] as (string | undefined)[],
+    buildOpts: [] as { echoGuard: boolean }[],
+    partWriterExtras: [] as { base: string; extra: Record<string, unknown> | undefined }[],
     takeDirIds: [] as string[],
     graphs: [] as {
       recordedTrack: unknown;
@@ -85,7 +87,11 @@ vi.mock("@/lib/podcast/vault", () => ({
     constructor(
       readonly dir: unknown,
       readonly base: string,
-    ) {}
+      readonly timesliceMs?: number,
+      readonly sidecarExtra?: Record<string, unknown>,
+    ) {
+      H.state.partWriterExtras.push({ base, extra: sidecarExtra });
+    }
     async append() {}
     async finish() {
       return [];
@@ -95,8 +101,10 @@ vi.mock("@/lib/podcast/vault", () => ({
 
 vi.mock("@/lib/podcast/recordGraph", () => ({
   ProcessedAudioError: class ProcessedAudioError extends Error {},
-  buildRecordGraph: vi.fn(async (audioDeviceId: string | undefined) => {
+  EchoGuardUnavailableError: class EchoGuardUnavailableError extends Error {},
+  buildRecordGraph: vi.fn(async (audioDeviceId: string | undefined, opts: { echoGuard: boolean }) => {
     H.state.buildArgs.push(audioDeviceId);
+    H.state.buildOpts.push(opts);
     if (H.state.failBuild) throw H.state.failBuild;
     if (H.state.deferBuild) {
       await new Promise<void>((resolve) => {
@@ -235,6 +243,8 @@ describe("usePodcastTake", () => {
     H.log.length = 0;
     H.state.vaultPerm = "granted";
     H.state.buildArgs.length = 0;
+    H.state.buildOpts.length = 0;
+    H.state.partWriterExtras.length = 0;
     H.state.takeDirIds.length = 0;
     H.state.graphs.length = 0;
     H.state.recorders.length = 0;
@@ -271,7 +281,7 @@ describe("usePodcastTake", () => {
     });
   }
 
-  async function setup(overrides: Partial<Args> = {}) {
+  async function setup(overrides: Partial<Args> = {}, opts: { declare?: boolean } = {}) {
     const pair = new FakeBusPair();
     const bus = pair.bus(0);
     const videoTrack = fakeTrack();
@@ -291,6 +301,13 @@ describe("usePodcastTake", () => {
     const view = renderHook((p: Args) => usePodcastTake(p), { initialProps: props });
     // Let the mount effects (vault query, hello handshake) settle.
     await tick(1);
+    // Most tests exercise flows PAST the per-take headphones declaration —
+    // answer it up front so roll() isn't gated. Undeclared-state tests pass
+    // { declare: false }.
+    if (opts.declare !== false) {
+      act(() => view.result.current.actions.declarePhones("headphones"));
+      await tick(1);
+    }
     return { pair, partner, partnerCb, videoTrack, view, props };
   }
 
@@ -302,6 +319,13 @@ describe("usePodcastTake", () => {
    * grace window covers exactly the first of them.
    */
   async function rollToRolling(view: Awaited<ReturnType<typeof setup>>["view"]) {
+    // Every return to idle re-opens the declaration (per-take rule) — answer
+    // it again before a repeat roll, without clobbering a test's own choice.
+    const panel = view.result.current.panel;
+    if (panel.kind === "armed" && panel.phones === null) {
+      act(() => view.result.current.actions.declarePhones("headphones"));
+      await tick(1);
+    }
     act(() => view.result.current.actions.roll());
     await tick(3_600);
   }
@@ -559,7 +583,8 @@ describe("usePodcastTake", () => {
     view.rerender({ ...props, dcOpen: true });
     await tick(50);
     expect(view.result.current.partnerCodename).toBe("Falcon");
-    expect(pair.countSent(0, "pod/hello")).toBe(2);
+    // 3 = mount announce + declaration announce (setup's declarePhones) + this rebuild's.
+    expect(pair.countSent(0, "pod/hello")).toBe(3);
     // No second ping round: a re-announce must not disturb an offset already
     // in hand (this can land mid-take).
     expect(pair.countSent(0, "pod/ping")).toBe(pingsAfterFirstOpen);
@@ -575,7 +600,8 @@ describe("usePodcastTake", () => {
     expect(view.result.current.partnerCodename).toBeNull();
     // …and we speak first, so a late joiner learns who we are (their own
     // announcement will not be auto-replied to — our reply latch is spent).
-    expect(pair.countSent(0, "pod/hello")).toBe(2);
+    // 3 = mount announce + declaration announce (setup's declarePhones) + this one.
+    expect(pair.countSent(0, "pod/hello")).toBe(3);
   });
 
   // -------------------------------------------------------------------
@@ -932,6 +958,128 @@ describe("usePodcastTake", () => {
     await tick(1_000);
     expect(pair.countSent(0, "pod/roll")).toBe(0);
     expect(view.result.current.panel).toMatchObject({ kind: "armed", canSend: false });
+  });
+
+  // -------------------------------------------------------------------
+  // The per-take headphones declaration (echo-guard, 2026-08-05).
+  // -------------------------------------------------------------------
+  it("(p1) armed starts undeclared; declarePhones flips the panel and persists the memory", async () => {
+    const { view } = await setup({}, { declare: false });
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", phones: null, lastPhones: null });
+
+    act(() => view.result.current.actions.declarePhones("speakers"));
+    await tick(1);
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", phones: "speakers", lastPhones: "speakers" });
+    expect(localStorage.getItem("cos-phones-last")).toBe("speakers");
+  });
+
+  it("(p2) roll() is a no-op while undeclared — no pod/roll on the bus", async () => {
+    const { pair, view } = await setup({}, { declare: false });
+    act(() => view.result.current.actions.roll());
+    await tick(1_000);
+    expect(pair.countSent(0, "pod/roll")).toBe(0);
+    expect(view.result.current.panel.kind).toBe("armed");
+  });
+
+  it("(p3) an inbound proposal is quiet-ignored while undeclared — no ack, proposer aborts", async () => {
+    const { pair, view, partner, partnerCb } = await setup({}, { declare: false });
+    void view;
+    const takeId = partner.propose();
+    expect(takeId).not.toBeNull();
+    await tick(3_600);
+    expect(partnerCb.onAborted).toHaveBeenCalledWith(takeId);
+    expect(pair.countSent(0, "pod/roll-ack")).toBe(0);
+  });
+
+  it("(p4) the declaration resets on return to idle; the remembered answer survives", async () => {
+    const { view, partner } = await setup();
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+
+    act(() => view.result.current.actions.stop());
+    await tick(3_000); // through the stop drain
+    stopHeartbeat();
+    expect(view.result.current.panel).toMatchObject({
+      kind: "armed",
+      phones: null, // a NEW take needs a NEW answer…
+      lastPhones: "headphones", // …but the preselect hint remembers
+    });
+    expect(localStorage.getItem("cos-phones-last")).toBe("headphones");
+  });
+
+  it("(p5) declaring re-announces hello carrying the declaration", async () => {
+    const { pair } = await setup(); // setup declares "headphones"
+    const hellos = pair.sentLog
+      .filter((e) => e.from === 0 && (JSON.parse(e.text) as { t: string }).t === "pod/hello")
+      .map((e) => JSON.parse(e.text) as { phones?: unknown });
+    expect(hellos.length).toBe(2); // mount announce + declaration announce
+    expect("phones" in hellos[0]!).toBe(false);
+    expect(hellos[1]!.phones).toBe("headphones");
+  });
+
+  it("(p6) the partner's declaration surfaces on the panel and is retired with the roster", async () => {
+    const { pair, view, props, partner } = await setup();
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", partnerPhones: null });
+
+    // The partner declares: their side re-announces carrying phones (the hook
+    // does this automatically; the bare far-side coordinator is driven by hand).
+    partner.dispose();
+    const declaredPartner = new TakeCoordinator(pair.bus(1), "Falcon", partnerCallbacks(), {
+      localPhones: () => "speakers",
+    });
+    declaredPartner.announce();
+    await tick(10);
+    expect(view.result.current.panel).toMatchObject({ kind: "armed", partnerPhones: "speakers" });
+
+    // A roster change retires the declaration together with the codename.
+    view.rerender({ ...props, peerIds: ["peer-2"] });
+    await tick(1);
+    expect(view.result.current.panel).toMatchObject({
+      kind: "armed",
+      partnerPhones: null,
+      partnerCodename: null,
+    });
+    declaredPartner.dispose();
+  });
+
+  it("(p7) a speakers declaration reaches the record graph and the audio sidecar", async () => {
+    const { view, partner } = await setup({}, { declare: false });
+    act(() => view.result.current.actions.declarePhones("speakers"));
+    await tick(1);
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    stopHeartbeat();
+
+    expect(H.state.buildOpts).toEqual([{ echoGuard: true }]);
+    const audioWriter = H.state.partWriterExtras.find((w) => w.base === "audio");
+    expect(audioWriter?.extra).toEqual({ echoGuard: true });
+    const videoWriter = H.state.partWriterExtras.find((w) => w.base === "video");
+    expect(videoWriter?.extra).toBeUndefined();
+  });
+
+  it("(p8) a headphones declaration records raw — echoGuard false, no sidecar stamp", async () => {
+    const { view, partner } = await setup();
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+    stopHeartbeat();
+    expect(H.state.buildOpts).toEqual([{ echoGuard: false }]);
+    expect(H.state.partWriterExtras.find((w) => w.base === "audio")?.extra).toEqual({ echoGuard: false });
+  });
+
+  it("(p9) EchoGuardUnavailableError raises the echo-guard fault, not a generic encoder fault", async () => {
+    const { EchoGuardUnavailableError } = await import("@/lib/podcast/recordGraph");
+    H.state.failBuild = new EchoGuardUnavailableError();
+    const { view } = await setup({}, { declare: false });
+    act(() => view.result.current.actions.declarePhones("speakers"));
+    await tick(1);
+    await rollToRolling(view);
+
+    expect(view.result.current.panel.kind).toBe("fault");
+    const panel = view.result.current.panel as Extract<typeof view.result.current.panel, { kind: "fault" }>;
+    expect(panel.faults[0]).toMatchObject({ side: "local", cause: "echo-guard" });
+    expect(soundKlaxon).toHaveBeenCalledTimes(1);
   });
 });
 

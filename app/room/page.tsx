@@ -456,7 +456,7 @@ export default function RoomPage() {
           onGrantVault={() => void podcast.actions.grantVault()}
           onRoll={podcast.actions.roll}
           onStop={podcast.actions.stop}
-          onDeclarePhones={() => {}}
+          onDeclarePhones={podcast.actions.declarePhones}
           onDismissFault={podcast.actions.dismissFault}
           onSendEpisode={exchange.actions.send}
           onResendEpisode={exchange.actions.resend}

@@ -18,9 +18,9 @@ import type { PodcastPanelState } from "@/components/PodcastPanel";
 import type { CallBus } from "@/hooks/useCallSession";
 import { getSession } from "@/lib/authApi";
 import { soundKlaxon } from "@/lib/podcast/klaxon";
-import { buildRecordGraph, type RecordGraph } from "@/lib/podcast/recordGraph";
+import { buildRecordGraph, EchoGuardUnavailableError, type RecordGraph } from "@/lib/podcast/recordGraph";
 import { TakeRecorder, type RecorderFault } from "@/lib/podcast/recorder";
-import { COUNTDOWN_MS, TakeCoordinator } from "@/lib/podcast/takeProtocol";
+import { COUNTDOWN_MS, TakeCoordinator, type Phones } from "@/lib/podcast/takeProtocol";
 import {
   chooseVault as chooseVaultFolder,
   openTakeDir,
@@ -61,6 +61,21 @@ function writeLastTakeId(takeId: string): void {
     localStorage.setItem(LAST_TAKE_KEY, JSON.stringify({ takeId, at: Date.now() }));
   } catch {
     // best-effort — a failed write only costs the reload-recovery convenience
+  }
+}
+
+/** localStorage key for the REMEMBERED headphones answer — a preselect hint
+ *  only. The per-take declaration itself always resets to null (echo-guard,
+ *  2026-08-05): a remembered answer that silently rolls is exactly the
+ *  stale-state failure that put echo on the 8/4 rehearsal tape. */
+export const PHONES_KEY = "cos-phones-last";
+
+function readLastPhones(): Phones | null {
+  try {
+    const v = localStorage.getItem(PHONES_KEY);
+    return v === "headphones" || v === "speakers" ? v : null;
+  } catch {
+    return null;
   }
 }
 
@@ -106,6 +121,9 @@ export interface PodcastTake {
   actions: {
     chooseVault(): Promise<void>;
     grantVault(): Promise<void>;
+    /** The per-take headphones answer — armed-state only; resets on every
+     *  return to idle. "speakers" records with echo-guard (EC on). */
+    declarePhones(phones: Phones): void;
     roll(): void;
     stop(): void;
     dismissFault(): void;
@@ -171,6 +189,12 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [phase, setPhase] = useState<Phase>("idle");
   const [countdownS, setCountdownS] = useState(0);
   const [partnerCodename, setPartnerCodename] = useState<string | null>(null);
+  // The per-take headphones declaration: null until this take's answer is
+  // given, reset on every return to idle. lastPhones is only the preselect
+  // hint. (Client-only hook — the initializer never runs during SSR.)
+  const [phones, setPhones] = useState<Phones | null>(null);
+  const [lastPhones, setLastPhones] = useState<Phones | null>(readLastPhones);
+  const [partnerPhones, setPartnerPhones] = useState<Phones | null>(null);
   const [faults, setFaults] = useState<Fault[]>([]);
   const [startFault, setStartFault] = useState<Fault | null>(null);
   const [dismissedKey, setDismissedKey] = useState("");
@@ -196,7 +220,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const coordinatorRef = useRef<TakeCoordinator | null>(null);
   const graphRef = useRef<RecordGraph | null>(null);
   const recorderRef = useRef<TakeRecorder | null>(null);
-  const recorderFaultRef = useRef<{ cause: RecorderFault; detail: string } | null>(null);
+  const recorderFaultRef = useRef<{ cause: RecorderFault | "echo-guard"; detail: string } | null>(null);
   const phaseRef = useRef<Phase>("idle");
   const epochRef = useRef(0); // bumped on every teardown — cancels in-flight starts
   const rollingSinceRef = useRef(0);
@@ -209,8 +233,19 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // openTakeDir — hasn't finished yet). startRecorders plays it the instant
   // recorder.start() returns — see the comment there.
   const pendingMarkRef = useRef(false);
+  // The coordinator's localPhones dep and startRecorders read the declaration
+  // outside React's render pass — same ref idiom as `latest`/`holdRollsRef`.
+  const phonesRef = useRef<Phones | null>(null);
+
+  function clearPhones(): void {
+    phonesRef.current = null;
+    setPhones(null);
+  }
 
   function goPhase(next: Phase): void {
+    // Every return to idle re-opens the declaration: a NEW take needs a NEW
+    // answer (per-take rule — the remembered answer is only a preselect hint).
+    if (next === "idle" && phaseRef.current !== "idle") clearPhones();
     phaseRef.current = next;
     setPhase(next);
   }
@@ -292,7 +327,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
 
   /** The start chain blew up — the wire take lives on, but nothing local is
    *  recording. Hold the banner up until the operator stands it down. */
-  function failStart(cause: RecorderFault, err: unknown): void {
+  function failStart(cause: RecorderFault | "echo-guard", err: unknown): void {
     recorderFaultRef.current = { cause, detail: detailOf(err) };
     graphRef.current?.close();
     graphRef.current = null;
@@ -312,14 +347,17 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       return;
     }
 
+    const echoGuard = phonesRef.current === "speakers";
     let graph: RecordGraph;
     try {
-      graph = await buildRecordGraph(deviceId, { echoGuard: false });
+      graph = await buildRecordGraph(deviceId, { echoGuard });
     } catch (err) {
       // ProcessedAudioError (browser DSP still on) and an outright capture
-      // refusal both land here — neither is a disk problem.
+      // refusal both land here — neither is a disk problem. An echo-guard
+      // build that could not get EC gets its own cause: the banner must name
+      // the remedy (headphones), not a generic recorder failure.
       if (stale()) return;
-      failStart("encoder-error", err);
+      failStart(err instanceof EchoGuardUnavailableError ? "echo-guard" : "encoder-error", err);
       return;
     }
     if (stale()) {
@@ -342,7 +380,12 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       const recorder = new TakeRecorder({
         videoTrack: track,
         recordedAudioTrack: graph.recordedTrack,
-        writers: { video: new PartWriter(dir, "video"), audio: new PartWriter(dir, "audio") },
+        writers: {
+          video: new PartWriter(dir, "video"),
+          // The audio sidecar carries the declaration as provenance — a
+          // stamped tape says on disk whether EC shaped it (echo-guard, 8/5).
+          audio: new PartWriter(dir, "audio", 1000, { echoGuard }),
+        },
         onFault: (cause, detail) => {
           // A discarded recorder's writers keep running to completion, so a
           // late disk error can land after the next take has already begun.
@@ -504,7 +547,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     if (!enabled || !supported || !username) return;
     const coordinator = new TakeCoordinator(bus, username, {
       onPartnerCodename: (name) => setPartnerCodename(name),
-      onPartnerPhones: () => {}, // wired for real in the echo-guard task
+      onPartnerPhones: (p) => setPartnerPhones(p),
       onCountdown: (msLeft) => {
         setCountdownS(Math.round(msLeft / 1000));
         if (phaseRef.current === "idle") {
@@ -562,8 +605,11 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     {
       // Roll hold (decision 8): a transfer in flight quiet-ignores an
       // inbound proposal entirely — no ack, no slot claim, no fault. The
-      // proposer's own abort-if-unacked unwinds their countdown.
-      canAcceptRoll: () => !holdRollsRef.current,
+      // proposer's own abort-if-unacked unwinds their countdown. An
+      // undeclared side refuses the same quiet way (echo-guard, 8/5): its
+      // recorders must not run before ITS headphones answer exists.
+      canAcceptRoll: () => !holdRollsRef.current && phonesRef.current !== null,
+      localPhones: () => phonesRef.current,
     });
     coordinatorRef.current = coordinator;
     // NOT announced here: at construction the data channel is usually still
@@ -576,6 +622,8 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       phaseRef.current = "idle";
       setPhase("idle");
       setPartnerCodename(null);
+      setPartnerPhones(null);
+      clearPhones();
       setFaults([]);
       setStartFault(null);
     };
@@ -618,7 +666,20 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // so the claim stands.
   useEffect(() => {
     setPartnerCodename(null);
+    setPartnerPhones(null); // a declaration belongs to the peer who made it
   }, [peerKey]);
+
+  // Re-announce whenever THIS side's declaration changes — the partner's
+  // armed panel shows it live (echo-guard, 8/5). The mount run is skipped by
+  // the ref (null === null); the dcOpen rising edge is the effect above's
+  // job, and sendHello reads the current declaration at send time anyway.
+  const phonesAnnouncedRef = useRef<Phones | null>(null);
+  useEffect(() => {
+    if (phonesAnnouncedRef.current === phones) return;
+    phonesAnnouncedRef.current = phones;
+    if (!dcOpen) return;
+    coordinatorRef.current?.announce();
+  }, [phones, dcOpen]);
 
   // ---------------------------------------------------------------------
   // Panel derivation. Take-in-progress states outrank the readiness gates:
@@ -642,8 +703,8 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         localBytes: meter.localBytes,
         partnerBytes: meter.partnerBytes,
         partnerCodename,
-        phones: null, // wired for real in the echo-guard task
-        partnerPhones: null,
+        phones,
+        partnerPhones,
       };
     }
     if (!enabled || !username || peerCount !== 1) return { kind: "not-two", count: peerCount + 1 };
@@ -662,9 +723,9 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     return {
       kind: "armed",
       canSend: false,
-      phones: null, // wired for real in the echo-guard task
-      lastPhones: null,
-      partnerPhones: null,
+      phones,
+      lastPhones,
+      partnerPhones,
       partnerCodename,
     };
   }
@@ -693,6 +754,17 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     actions: {
       chooseVault: () => refreshVault(chooseVaultFolder),
       grantVault: () => refreshVault(requestVaultAccess),
+      declarePhones: (p: Phones) => {
+        if (phaseRef.current !== "idle") return; // armed-state control only
+        phonesRef.current = p;
+        setPhones(p);
+        setLastPhones(p);
+        try {
+          localStorage.setItem(PHONES_KEY, p);
+        } catch {
+          // best-effort — losing the write only costs the preselect hint
+        }
+      },
       // ROLL TAPE is only ever offered from "armed" — the guard makes that a
       // rule rather than a fact about which button the panel happens to show.
       roll: () => {
@@ -700,6 +772,9 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         // Belt + suspenders: the merged panel already hides the button while
         // a transfer holds the roll (decision 8), this is the backstop.
         if (holdRolls) return;
+        // Same backstop for the declaration gate — the panel disables Roll
+        // Tape while undeclared; recorders must never run without an answer.
+        if (phonesRef.current === null) return;
         if (panel.kind !== "armed" || !coordinator) return;
         // A take still draining its stop (the ~1.25 s tail after a Stand Down
         // from a failed start, say) holds the coordinator's slot: propose()
