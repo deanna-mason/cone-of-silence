@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getSessionSnapshot } from "@/lib/authApi";
 import { listRecordings, StudioApiError, uploadRecording, type RecordingDto } from "@/lib/studioApi";
-import { readStudioRoomSnapshot } from "@/lib/studioRoom";
+import { readStudioRoomSnapshot, subscribeStudioRoom } from "@/lib/studioRoom";
 import StandingOrders from "@/components/StandingOrders";
+import NoStandingStudio from "@/components/NoStandingStudio";
 import RecordingRow from "@/components/RecordingRow";
 
 const ACCEPT = ".mp3,.m4a,.wav,.aac,.flac,.ogg,.webm,.mp4,.mov,.mkv";
@@ -35,7 +36,11 @@ export default function StudioPage() {
 
   // The pinned standing room (flow B). Server render never touches
   // localStorage; null until the client resync, and when nothing is pinned.
-  const pinned = useSyncExternalStore(noopSubscribe, readStudioRoomSnapshot, () => null);
+  // A REAL subscription (not noopSubscribe): StandingOrders' "Release this
+  // studio" clears the store from inside this component's own child, and the
+  // read lives out here — without the subscription the release would not
+  // repaint until a reload.
+  const pinned = useSyncExternalStore(subscribeStudioRoom, readStudioRoomSnapshot, () => null);
 
   const [recordings, setRecordings] = useState<RecordingDto[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -129,7 +134,7 @@ export default function StudioPage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-8">
-      {pinned && <StandingOrders room={pinned} />}
+      {pinned ? <StandingOrders room={pinned} /> : <NoStandingStudio />}
 
       <section className="hairline border bg-inset p-6">
         <p className="kicker text-sienna">Development Desk</p>

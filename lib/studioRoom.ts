@@ -18,13 +18,47 @@ function validKeys(keys: Partial<RoomKeys>): keys is RoomKeys {
   );
 }
 
+// localStorage fires no native event for a same-tab write, and BOTH
+// app/studio/page.tsx and the green room read this store through
+// useSyncExternalStore — so a release performed inside StandingOrders would
+// never re-render the page that owns the read. Same tiny pub-sub idiom
+// components/StandingOrders.tsx already uses for the studio name.
+const roomSubscribers = new Set<() => void>();
+
+export function subscribeStudioRoom(cb: () => void): () => void {
+  roomSubscribers.add(cb);
+  return () => {
+    roomSubscribers.delete(cb);
+  };
+}
+
+function notifyStudioRoomChange(): void {
+  roomSubscribers.forEach((cb) => cb());
+}
+
 export function pinStudioRoom(keys: RoomKeys): void {
   if (!validKeys(keys)) return; // never pin garbage
   try {
+    // The name and the last-convened stamp describe the room they were set
+    // on. Replacing the studio with a DIFFERENT room must not leave the old
+    // studio's name and timestamp attached to a room the host has never
+    // entered (2026-08-05 defect 5 — "Night Desk · Last convened 03 Aug"
+    // about a brand-new room). Re-pinning the SAME room keeps both, including
+    // across a re-key, where roomId is stable and only the secret moves.
+    // Done here rather than in any caller so it holds for the account page's
+    // first-run invite path too.
+    const previous = readStudioRoom();
+    if (previous && previous.roomId !== keys.roomId) {
+      localStorage.removeItem(NAME_KEY);
+      localStorage.removeItem(CONVENED_KEY);
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ roomId: keys.roomId, secret: keys.secret }));
   } catch {
     // storage unavailable — the pin just won't persist on this browser
   }
+  // Fires even when the write above threw: subscribers then re-read and
+  // honestly show "nothing pinned" instead of a phantom success.
+  notifyStudioRoomChange();
 }
 
 export function readStudioRoom(): RoomKeys | null {
@@ -67,6 +101,7 @@ export function clearStudioRoom(): void {
   } catch {
     // ignore
   }
+  notifyStudioRoomChange();
 }
 
 const NAME_KEY = "cos-studio-name";

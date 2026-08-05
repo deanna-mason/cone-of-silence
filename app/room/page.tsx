@@ -43,7 +43,12 @@ import {
   type RoomKeys,
 } from "@/lib/roomLink";
 import { type MediaFailure } from "@/lib/webrtc/media";
-import { pinStudioRoom } from "@/lib/studioRoom";
+import {
+  pinStudioRoom,
+  readStudioName,
+  readStudioRoomSnapshot,
+  subscribeStudioRoom,
+} from "@/lib/studioRoom";
 
 type Stage = "parsing" | "no-channel" | "green-room" | "in-room";
 
@@ -150,7 +155,13 @@ export default function RoomPage() {
   const [keys, setKeys] = useState<RoomKeys | null>(null);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
-  const [studioPinned, setStudioPinned] = useState(false);
+  // Derived from the store, NOT latched. The old `useState(false)` tracked
+  // "have I clicked this during this page load" rather than "is this room my
+  // studio", so walking into your own standing studio still offered to pin it
+  // (found live 2026-08-05). Server snapshot is null — the SSR contract this
+  // file already keeps for `authed`.
+  const pinnedStudio = useSyncExternalStore(subscribeStudioRoom, readStudioRoomSnapshot, () => null);
+  const [replaceArmed, setReplaceArmed] = useState(false);
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys, media.stream, stage === "in-room", forceRelay);
@@ -302,8 +313,14 @@ export default function RoomPage() {
   function pinStudio() {
     if (!keys) return;
     pinStudioRoom(keys);
-    setStudioPinned(true);
+    setReplaceArmed(false);
   }
+
+  // Which of the three honest states the pin control is in. Compared on
+  // roomId: the secret can be re-keyed for the same room without that making
+  // it a different studio.
+  const isThisRoomPinned = Boolean(keys && pinnedStudio?.roomId === keys.roomId);
+  const replacesAnotherStudio = Boolean(pinnedStudio) && !isThisRoomPinned;
 
   if (stage === "parsing") {
     return <p className="kicker text-ink-soft">Decrypting channel…</p>;
@@ -424,13 +441,60 @@ export default function RoomPage() {
           </button>
         </div>
         {authed && (
-          <button
-            type="button"
-            onClick={pinStudio}
-            className="kicker w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
-          >
-            {studioPinned ? "PINNED TO YOUR STUDIO" : "Pin as my Studio"}
-          </button>
+          <div>
+            {isThisRoomPinned ? (
+              // Already yours — a statement with somewhere to go, not a dead
+              // button. This is also what a fresh pin resolves to.
+              <p className="kicker flex flex-wrap items-center justify-between gap-2 border border-brass/40 px-4 py-3 text-ink-soft">
+                <span className="text-signal">✓ This is your standing studio</span>
+                <Link href="/studio" className="transition hover:text-signal">
+                  Studio ➔
+                </Link>
+              </p>
+            ) : replaceArmed ? (
+              // Two-step, because the stored secret is the only way back into
+              // the studio being replaced.
+              <div className="border border-vermilion/60 p-4">
+                <p className="font-body text-sm text-ink">
+                  ✕ This replaces{" "}
+                  <span className="italic">{readStudioName() ?? "Standing Studio"}</span>. Its link
+                  is the only way back in — keep it before you continue.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={pinStudio}
+                    className="kicker border border-vermilion/60 px-4 py-2 text-vermilion transition hover:bg-vermilion hover:text-cream"
+                  >
+                    Replace it
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReplaceArmed(false)}
+                    className="kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal"
+                  >
+                    Keep {readStudioName() ?? "Standing Studio"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={replacesAnotherStudio ? () => setReplaceArmed(true) : pinStudio}
+                  className="kicker w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-brass hover:text-signal"
+                >
+                  {replacesAnotherStudio
+                    ? "Make this my standing studio instead"
+                    : "Make this my standing studio"}
+                </button>
+                <p className="mt-2 font-body text-xs italic text-ink-soft">
+                  It waits for you under Studio — walk back in any time, with no invite link to dig
+                  up.
+                </p>
+              </>
+            )}
+          </div>
         )}
         <button
           type="button"

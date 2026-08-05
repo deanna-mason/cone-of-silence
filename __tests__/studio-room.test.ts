@@ -11,13 +11,19 @@ import {
   readLastConvened,
   readStudioName,
   readStudioRoom,
+  readStudioRoomSnapshot,
   setStudioName,
+  subscribeStudioRoom,
 } from "@/lib/studioRoom";
 import type { RoomKeys } from "@/lib/roomLink";
 
 const ID = "A".repeat(22); // 22 base64url chars
 const SECRET = "B".repeat(22);
 const KEYS: RoomKeys = { roomId: ID, secret: SECRET };
+
+// A genuinely different room — used for the replace/reset semantics below.
+const OTHER_ID = "C".repeat(22);
+const OTHER_KEYS: RoomKeys = { roomId: OTHER_ID, secret: "D".repeat(22) };
 
 beforeEach(() => localStorage.clear());
 afterEach(() => localStorage.clear());
@@ -104,6 +110,109 @@ describe("last convened", () => {
   it("tolerates garbage", () => {
     localStorage.setItem("cos-studio-last-convened", "not-a-date");
     expect(readLastConvened()).toBeNull();
+  });
+});
+
+// Defect 5 (2026-08-05 review): clearStudioRoom() has always cleared the name
+// and last-convened stamp alongside the room, but pinStudioRoom() did not — so
+// replacing your standing studio left the OLD studio's name and "Last convened"
+// stamp attached to the NEW room. Fixed at the store so it holds for every
+// caller (green room AND the account page's first-run invite path), not just
+// whichever surface remembered to clean up.
+describe("name and stamp follow the room", () => {
+  it("pinning a DIFFERENT room clears the previous studio's name and stamp", () => {
+    pinStudioRoom(KEYS);
+    setStudioName("Night Desk");
+    markConvened();
+
+    pinStudioRoom(OTHER_KEYS);
+
+    expect(readStudioRoom()).toEqual(OTHER_KEYS);
+    expect(readStudioName()).toBeNull();
+    expect(readLastConvened()).toBeNull();
+  });
+
+  it("re-pinning the SAME room preserves its name and stamp", () => {
+    pinStudioRoom(KEYS);
+    setStudioName("Night Desk");
+    markConvened();
+
+    pinStudioRoom(KEYS);
+
+    expect(readStudioName()).toBe("Night Desk");
+    expect(readLastConvened()).not.toBeNull();
+  });
+
+  it("re-pinning the same roomId with a re-keyed secret is the same studio, not a new one", () => {
+    pinStudioRoom(KEYS);
+    setStudioName("Night Desk");
+
+    pinStudioRoom({ roomId: ID, secret: "E".repeat(22) });
+
+    expect(readStudioName()).toBe("Night Desk");
+  });
+
+  it("a refused (malformed) pin never disturbs the existing studio", () => {
+    pinStudioRoom(KEYS);
+    setStudioName("Night Desk");
+
+    pinStudioRoom({ roomId: "too-short", secret: SECRET });
+
+    expect(readStudioRoom()).toEqual(KEYS);
+    expect(readStudioName()).toBe("Night Desk");
+  });
+});
+
+// The pin is read through useSyncExternalStore in both app/studio/page.tsx and
+// the green room. Without a real subscription, a release performed in a child
+// component never re-renders the parent that owns the read.
+describe("room subscription", () => {
+  it("notifies subscribers when a room is pinned", () => {
+    let calls = 0;
+    const unsubscribe = subscribeStudioRoom(() => calls++);
+
+    pinStudioRoom(KEYS);
+
+    expect(calls).toBe(1);
+    unsubscribe();
+  });
+
+  it("notifies subscribers when the room is released", () => {
+    pinStudioRoom(KEYS);
+    let calls = 0;
+    const unsubscribe = subscribeStudioRoom(() => calls++);
+
+    clearStudioRoom();
+
+    expect(calls).toBe(1);
+    unsubscribe();
+  });
+
+  it("stops delivering after unsubscribe", () => {
+    let calls = 0;
+    const unsubscribe = subscribeStudioRoom(() => calls++);
+    unsubscribe();
+
+    pinStudioRoom(KEYS);
+
+    expect(calls).toBe(0);
+  });
+
+  it("snapshot returns the new value after a change and the SAME reference when nothing changed", () => {
+    pinStudioRoom(KEYS);
+    const first = readStudioRoomSnapshot();
+    expect(first).toEqual(KEYS);
+    // Referential stability is what useSyncExternalStore requires of
+    // getSnapshot — a fresh parse every call would loop the render.
+    expect(readStudioRoomSnapshot()).toBe(first);
+
+    pinStudioRoom(OTHER_KEYS);
+    const second = readStudioRoomSnapshot();
+    expect(second).toEqual(OTHER_KEYS);
+    expect(second).not.toBe(first);
+
+    clearStudioRoom();
+    expect(readStudioRoomSnapshot()).toBeNull();
   });
 });
 

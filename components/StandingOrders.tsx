@@ -16,7 +16,13 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { buildInviteLink, type RoomKeys } from "@/lib/roomLink";
-import { markConvened, readLastConvened, readStudioName, setStudioName } from "@/lib/studioRoom";
+import {
+  clearStudioRoom,
+  markConvened,
+  readLastConvened,
+  readStudioName,
+  setStudioName,
+} from "@/lib/studioRoom";
 
 const BURN_MS = 5 * 60 * 1000; // UI-only handoff-code lifetime
 const DEFAULT_NAME = "Standing Studio";
@@ -76,6 +82,10 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const deadlineRef = useRef<number>(0);
+  // Release is two-step for the same reason Transfer of Custody is: the stored
+  // secret is the ONLY way back into a standing room. Releasing it without the
+  // link in hand loses the room outright, so the first click arms and warns.
+  const [releaseArmed, setReleaseArmed] = useState(false);
 
   // Burn clock for the revealed handoff code — UI only (see file header).
   // deadlineRef/remainingMs are armed in the "Hand off" click handler below,
@@ -221,6 +231,43 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
               Open this link at the other device&rsquo;s Identity Desk to pin the same studio. The
               countdown only hides the link here — it is a convenience, not a revocation.
             </p>
+          </div>
+        )}
+      </div>
+
+      {/* Release — the exit clearStudioRoom() shipped without. */}
+      <div className="mt-8">
+        <p className="kicker text-ink-soft">Stand Down</p>
+        {!releaseArmed ? (
+          <button
+            type="button"
+            onClick={() => setReleaseArmed(true)}
+            className="kicker mt-3 w-full border border-ink-faint/30 py-3 text-ink-soft transition hover:border-vermilion hover:text-vermilion"
+          >
+            Release this studio
+          </button>
+        ) : (
+          <div className="mt-3 border border-vermilion/60 p-4">
+            <p className="font-body text-sm text-ink">
+              ✕ This releases <span className="italic">{name}</span>. Its link is the only way back
+              in — keep it before you continue.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => clearStudioRoom()}
+                className="kicker border border-vermilion/60 px-4 py-2 text-vermilion transition hover:bg-vermilion hover:text-cream"
+              >
+                Release it
+              </button>
+              <button
+                type="button"
+                onClick={() => setReleaseArmed(false)}
+                className="kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal"
+              >
+                Keep {name}
+              </button>
+            </div>
           </div>
         )}
       </div>

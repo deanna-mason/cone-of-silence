@@ -56,6 +56,68 @@ test("session but no pinned room → no Enter the Studio card", async () => {
   expect(screen.queryByRole("button", { name: /enter the studio/i })).toBeNull();
 });
 
+// Discoverability (2026-08-05 defect 2): the standing-studio feature used to be
+// reachable ONLY from a green room, and the page that HOSTS the result said
+// nothing about it — a closed loop with no entrance. An unpinned host now gets
+// a dormant card explaining what a standing studio is and how to pin one.
+test("no pinned room → the dormant No Standing Studio card explains the feature", async () => {
+  seedSession();
+  render(<StudioPage />);
+  expect(await screen.findByText(/no standing studio/i)).toBeDefined();
+  expect(screen.getByText(/green room/i)).toBeDefined();
+});
+
+test("pinned room → the live card renders and the dormant one does not", async () => {
+  seedSession();
+  localStorage.setItem("cos-studio-room", JSON.stringify(KEYS));
+  render(<StudioPage />);
+  expect(await screen.findByRole("button", { name: /enter the studio/i })).toBeDefined();
+  expect(screen.queryByText(/no standing studio/i)).toBeNull();
+});
+
+// Release: clearStudioRoom() shipped with no UI at all, so the one secret
+// docs/security-model.md calls out as persisted had no user-facing exit.
+// Two-step, because releasing loses the room unless the host still holds the link.
+test("Release this studio arms rather than releasing on the first click", async () => {
+  seedSession();
+  localStorage.setItem("cos-studio-room", JSON.stringify(KEYS));
+  render(<StudioPage />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /release this studio/i }));
+
+  // Armed: warns, and offers a way back out. Nothing written yet.
+  expect(screen.getByRole("button", { name: /^release it$/i })).toBeDefined();
+  expect(screen.getByRole("button", { name: /^keep /i })).toBeDefined();
+  expect(localStorage.getItem("cos-studio-room")).not.toBeNull();
+});
+
+test("backing out of the release leaves the studio pinned", async () => {
+  seedSession();
+  localStorage.setItem("cos-studio-room", JSON.stringify(KEYS));
+  render(<StudioPage />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /release this studio/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^keep /i }));
+
+  expect(localStorage.getItem("cos-studio-room")).not.toBeNull();
+  expect(screen.getByRole("button", { name: /enter the studio/i })).toBeDefined();
+});
+
+// The subscription is what makes this work without a reload — app/studio/page.tsx
+// owns the read, StandingOrders performs the release.
+test("confirming the release clears the studio and falls back to the dormant card in place", async () => {
+  seedSession();
+  localStorage.setItem("cos-studio-room", JSON.stringify(KEYS));
+  render(<StudioPage />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /release this studio/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^release it$/i }));
+
+  expect(localStorage.getItem("cos-studio-room")).toBeNull();
+  expect(screen.queryByRole("button", { name: /enter the studio/i })).toBeNull();
+  expect(screen.getByText(/no standing studio/i)).toBeDefined();
+});
+
 test("Enter the Studio does a full-page load to the pinned room link", async () => {
   seedSession();
   localStorage.setItem("cos-studio-room", JSON.stringify(KEYS));
