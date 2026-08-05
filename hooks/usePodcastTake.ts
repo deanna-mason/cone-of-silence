@@ -504,6 +504,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     if (!enabled || !supported || !username) return;
     const coordinator = new TakeCoordinator(bus, username, {
       onPartnerCodename: (name) => setPartnerCodename(name),
+      onPartnerPhones: () => {}, // wired for real in the echo-guard task
       onCountdown: (msLeft) => {
         setCountdownS(Math.round(msLeft / 1000));
         if (phaseRef.current === "idle") {

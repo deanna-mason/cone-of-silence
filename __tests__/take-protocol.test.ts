@@ -132,6 +132,9 @@ function makeCb() {
     onPartnerCodename: vi.fn<(name: string) => void>((name) =>
       log.push({ name: "onPartnerCodename", at: Date.now(), arg: name }),
     ),
+    onPartnerPhones: vi.fn<(phones: "headphones" | "speakers" | null) => void>((p) =>
+      log.push({ name: "onPartnerPhones", at: Date.now(), arg: p }),
+    ),
     onCountdown: vi.fn<(msLeft: number) => void>((msLeft) =>
       log.push({ name: "onCountdown", at: Date.now(), arg: msLeft }),
     ),
@@ -202,6 +205,46 @@ describe("hello handshake", () => {
 
     a.dispose();
     b.dispose();
+  });
+
+  it("hello carries the local phones declaration; the field is omitted while undeclared", () => {
+    const pair = new FakeBusPair();
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    let phonesA: "headphones" | "speakers" | null = null;
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA, { localPhones: () => phonesA });
+    const b = new TakeCoordinator(pair.bus(1), "Bravo", cbB);
+
+    a.hello();
+    vi.runAllTimers();
+    const hellosOf = (from: 0 | 1) =>
+      pair.sentLog
+        .filter((e) => e.from === from && (JSON.parse(e.text) as { t: string }).t === "pod/hello")
+        .map((e) => JSON.parse(e.text) as { phones?: unknown });
+    expect("phones" in hellosOf(0)[0]!).toBe(false);
+    expect(cbB.onPartnerPhones).toHaveBeenCalledWith(null);
+
+    phonesA = "speakers";
+    a.announce(); // the consumer re-announces on every declaration change
+    vi.runAllTimers();
+    const hellos = hellosOf(0);
+    expect(hellos[hellos.length - 1]!.phones).toBe("speakers");
+    expect(cbB.onPartnerPhones).toHaveBeenLastCalledWith("speakers");
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("a hello with an invalid phones value is rejected wholesale — no codename update either", () => {
+    const pair = new FakeBusPair();
+    const { cb } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cb);
+
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "Evil", phones: "loudspeaker" }));
+
+    expect(cb.onPartnerCodename).not.toHaveBeenCalled();
+    expect(cb.onPartnerPhones).not.toHaveBeenCalled();
+    a.dispose();
   });
 });
 
@@ -999,15 +1042,16 @@ describe("peerId scoping fix round (Task 9 review)", () => {
     // p2 force-quits and relaunches under a new peerId ("p3") mid-take — the
     // drill's rejoin path. The mid-take guard ignores it (no codename change
     // yet)...
-    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL", phones: "speakers" }), "p3");
     expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(1); // still just MONGOOSE
 
     // ...but the take ending (Cut) applies the stash: re-pinned to p3, and
-    // onPartnerCodename fires with p3's codename.
+    // onPartnerCodename fires with p3's codename — phones ride the stash too.
     a.requestStop();
     vi.advanceTimersByTime(1_000 + MARK_TOTAL_MS + 250 + 100); // through the stop
     expect(cbA.onPartnerCodename).toHaveBeenCalledTimes(2);
     expect(cbA.onPartnerCodename).toHaveBeenLastCalledWith("JACKAL");
+    expect(cbA.onPartnerPhones).toHaveBeenLastCalledWith("speakers");
 
     // A subsequent roll targets p3 — not the ghost p2 — proving the re-pin
     // actually took, not just the callback. Scoped to sends AFTER the heal:

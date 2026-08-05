@@ -209,6 +209,7 @@ class FakeBusPair {
 function partnerCallbacks(): TakeCallbacks {
   return {
     onPartnerCodename: vi.fn(),
+    onPartnerPhones: vi.fn(),
     onCountdown: vi.fn(),
     onStartRecorders: vi.fn(),
     onMark: vi.fn(),

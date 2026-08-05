@@ -16,8 +16,16 @@ export const ROLL_LEAD_MS = 500; // recorders start this far BEFORE the mark
 const STOP_LEAD_MS = 1_000; // stop mark lands this far after requestStop()
 const PING_ROUNDS = 3; // best-of-3 RTT samples for the clock-offset estimate
 
+/** The per-take headphones declaration. "speakers" = open speakers, the
+ *  recording graph engages echo-guard (EC-on capture). Rides pod/hello as an
+ *  additive field; the consumer re-announces on every change. */
+export type Phones = "headphones" | "speakers";
+
 export interface TakeCallbacks {
   onPartnerCodename(name: string): void;
+  /** The partner's current headphones declaration — state, not an event;
+   *  fires with every accepted hello (null = undeclared or pre-field peer). */
+  onPartnerPhones(phones: Phones | null): void;
   onCountdown(msLeft: number): void; // 1 Hz during the countdown
   onStartRecorders(takeId: string): void; // fire recorders NOW (T-500 ms)
   onMark(): void; // schedule the tone NOW (T)
@@ -53,13 +61,16 @@ export interface TakeProtocolDeps {
   /** Defaults to Date.now; injectable so tests can simulate a skewed clock. */
   now?: () => number;
   /** Gates acceptance of an inbound pod/roll — default () => true. The hook
-   *  wires this to "no transfer in flight" (decision 8): a false return is a
-   *  deliberate quiet ignore (no ack, no slot claim, no fault); the
-   *  proposer's own abort-if-unacked (5A FIX-2) unwinds their countdown. */
+   *  wires this to "no transfer in flight AND headphones declared": a false
+   *  return is a deliberate quiet ignore (no ack, no slot claim, no fault);
+   *  the proposer's own abort-if-unacked (5A FIX-2) unwinds their countdown. */
   canAcceptRoll?: () => boolean;
+  /** This side's current headphones declaration, read at every hello send —
+   *  default () => null (field omitted from the wire). */
+  localPhones?: () => Phones | null;
 }
 
-type HelloMsg = { t: "pod/hello"; codename: string };
+type HelloMsg = { t: "pod/hello"; codename: string; phones?: Phones };
 type PingMsg = { t: "pod/ping"; sentAt: number };
 type PongMsg = { t: "pod/pong"; sentAt: number };
 type RollMsg = { t: "pod/roll"; takeId: string; startAtMs: number };
@@ -121,7 +132,11 @@ function parseWireMsg(text: string): WireMsg | null {
   switch (t) {
     case "pod/hello": {
       if (typeof m.codename !== "string") return null;
-      return { t: "pod/hello", codename: m.codename };
+      // `phones` is additive and OPTIONAL (absent = pre-field peer or
+      // undeclared) — but present-and-invalid rejects the whole message,
+      // same enum-membership stance as `fault` below.
+      if (m.phones !== undefined && m.phones !== "headphones" && m.phones !== "speakers") return null;
+      return { t: "pod/hello", codename: m.codename, ...(m.phones !== undefined ? { phones: m.phones } : {}) };
     }
     case "pod/ping": {
       if (typeof m.sentAt !== "number" || !Number.isFinite(m.sentAt)) return null;
@@ -196,6 +211,7 @@ export class TakeCoordinator {
   private readonly cb: TakeCallbacks;
   private readonly nowFn: () => number;
   private readonly canAcceptRollFn: () => boolean;
+  private readonly localPhonesFn: () => Phones | null;
   private readonly unsubscribe: () => void;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -207,7 +223,7 @@ export class TakeCoordinator {
   // activeTakeId !== null) — latest one wins. Applied by applyPendingHello()
   // the instant the take ends, healing a partner who rejoined under a new
   // peerId mid-take instead of leaving partnerId pinned to a ghost forever.
-  private pendingHello: { peerId: string; codename: string } | null = null;
+  private pendingHello: { peerId: string; codename: string; phones: Phones | null } | null = null;
 
   // Hello handshake.
   private helloSent = false;
@@ -239,6 +255,7 @@ export class TakeCoordinator {
     this.cb = cb;
     this.nowFn = deps.now ?? Date.now;
     this.canAcceptRollFn = deps.canAcceptRoll ?? (() => true);
+    this.localPhonesFn = deps.localPhones ?? (() => null);
     this.unsubscribe = bus.onMessage((peerId, text) => this.onMessage(peerId, text));
   }
 
@@ -286,7 +303,8 @@ export class TakeCoordinator {
 
   private sendHello(): void {
     this.helloSent = true;
-    this.send({ t: "pod/hello", codename: this.codename });
+    const phones = this.localPhonesFn();
+    this.send({ t: "pod/hello", codename: this.codename, ...(phones !== null ? { phones } : {}) });
   }
 
   /** The auto-reply to an incoming hello — latched, so a hello can never
@@ -386,13 +404,14 @@ export class TakeCoordinator {
       // Pinned mid-take/proposal — a foreign hello cannot clobber
       // partnerCodename, but it isn't discarded either: stash it (latest
       // wins) so applyPendingHello() can heal the moment the take ends.
-      this.pendingHello = { peerId, codename: msg.codename };
+      this.pendingHello = { peerId, codename: msg.codename, phones: msg.phones ?? null };
       return;
     }
     this.partnerId = peerId;
     this.pendingHello = null; // a live re-announce supersedes any earlier stashed hello — latest wins for real
     this.helloReceived = true;
     this.cb.onPartnerCodename(msg.codename);
+    this.cb.onPartnerPhones(msg.phones ?? null);
     this.ensureHelloSent();
     this.maybeStartPinging();
   }
@@ -408,11 +427,12 @@ export class TakeCoordinator {
    */
   private applyPendingHello(): void {
     if (!this.pendingHello) return;
-    const { peerId, codename } = this.pendingHello;
+    const { peerId, codename, phones } = this.pendingHello;
     this.pendingHello = null;
     this.partnerId = peerId;
     this.helloReceived = true;
     this.cb.onPartnerCodename(codename);
+    this.cb.onPartnerPhones(phones);
     this.ensureHelloSent();
     this.maybeStartPinging();
   }
