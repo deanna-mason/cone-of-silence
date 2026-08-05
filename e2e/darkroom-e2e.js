@@ -77,11 +77,15 @@
 // side-swap. That is caught separately: check 3 now asserts `develop.who`/
 // `develop.delayMs` against `truth.json`'s `expectedWho`/`expectedDelayMs`
 // (computed independently, from the fixture's generation parameters, never
-// from this or any other pipeline output), and the check 4b duration
-// assertion below cross-checks the ARCHIVAL `episode.m4a`'s real measured
-// duration against an expectation built from the fixture's own raw/
-// durations + `develop.ratio`/`delayMs`/`who` — a side-swap would also
-// throw that off, independently of this verification-mix machinery.
+// from this or any other pipeline output), and the receipt's `trim` block
+// is cross-checked the same way below — its `startS`/`endS` sit on the
+// post-delay timeline, so a side-swap moves them and a truth-derived
+// expectation catches it, independently of this verification-mix machinery.
+// (Before the episode chime trim landed, that second cross-check was check
+// 4b's duration assertion, built from raw/ durations + `develop.ratio`/
+// `delayMs`/`who`. The trim cuts both products to a mark-to-mark window
+// whose LENGTH is delay-invariant, so duration no longer sees a side-swap —
+// see check 4b's own rewritten comment.)
 "use strict";
 
 const path = require("path");
@@ -398,25 +402,41 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
     `[${label}] end marks fuse to within 1ms in the corrected raw mix (found sample ${alignment.end}, expected ${alignment.expectedEnd.toFixed(1)} [local truth ${truth.local.endSample} + local delay], delta ${alignment.endDeltaSamples.toFixed(3)} samples = ${(alignment.endDeltaSamples / ONE_MS_SAMPLES).toFixed(3)}ms)`,
   );
 
-  // ---- Check 4b (IMPORTANT 2b): the ARCHIVAL episode.m4a's real measured
-  // duration vs. an expectation built from the fixture's own raw/ audio
-  // durations + develop.json's ratio/delayMs/who. episode.m4a carries no
-  // duration cap (mixApplyArgs's amix defaults to duration=longest, and
-  // unlike the mp4 there's no output -shortest on this product — D21), so
-  // its true duration is exactly max(local's delayed length, remote's
-  // rate-corrected + delayed length) modulo encoder priming. A side-swap
-  // bug (who computed backwards) would apply the delay to the wrong side
-  // and throw this off independently of check 4's verification mix. ----
-  const localAudioDurationS = await ffprobeDuration(path.join(rawDir, "local-audio.mkv"));
-  const remoteAudioDurationS = await ffprobeDuration(path.join(rawDir, "remote-audio.mkv"));
-  const localDelayS = develop.who === "local" ? develop.delayMs / 1000 : 0;
-  const remoteDelayS = develop.who === "remote" ? develop.delayMs / 1000 : 0;
-  const expectedM4aDuration = Math.max(localAudioDurationS + localDelayS, remoteAudioDurationS * develop.ratio + remoteDelayS);
+  // ---- Check 4b (IMPORTANT 2b) — REWRITTEN for the episode chime trim
+  // (design 2026-08-05, docs/superpowers/specs/): the ARCHIVAL
+  // episode.m4a's real measured duration vs. the TRIMMED window's own
+  // length.
+  //
+  // This check used to assert `max(local + localDelay, corrected remote +
+  // remoteDelay)` — the untrimmed mix's natural duration=longest length.
+  // The trim invalidates that expectation outright: episode.m4a is now cut
+  // to the mark-to-mark window minus the mark bodies and the pad on each
+  // side, so it no longer has anything to do with either raw's full length.
+  //
+  // The replacement is STRONGER, because the trimmed duration falls out of
+  // each fixture's OWN committed ground truth instead of out of pipeline
+  // output (develop.json's ratio/delayMs/who) — nothing the pipeline says
+  // about itself is trusted here:
+  //
+  //     expected = (truth mark-to-mark span) - MARK_TOTAL_MS - 2*PAD_MS
+  //
+  // Both constants are live-imported from the modules under test
+  // (tone.mjs / drift.mjs), never re-typed as literals.
+  //
+  // What it no longer does, deliberately: the alignment delay cancels out
+  // of a mark-to-mark length (both edges of the window shift by the same
+  // localDelayMs), so unlike its predecessor this check cannot cross-check
+  // the delay-to-SIDE mapping. That job is check 3's, which asserts
+  // `develop.who`/`develop.delayMs` directly against truth.json's
+  // independently-computed expectedWho/expectedDelayMs — a stronger pin on
+  // `who` than a duration ever was. ----
+  const truthMarkSpanS = (truth.local.endSample - truth.local.startSample) / SAMPLE_RATE;
+  const trimmedDurationS = truthMarkSpanS - (darkroom.MARK_TOTAL_MS + 2 * darkroom.PAD_MS) / 1000;
   const actualM4aDuration = await ffprobeDuration(m4aPath);
-  const m4aDurationDelta = Math.abs(actualM4aDuration - expectedM4aDuration);
+  const m4aDurationDelta = Math.abs(actualM4aDuration - trimmedDurationS);
   check(
     m4aDurationDelta <= M4A_DURATION_TOLERANCE_S,
-    `[${label}] episode.m4a duration ${actualM4aDuration.toFixed(3)}s matches max(local+delay, corrected remote+delay) = ${expectedM4aDuration.toFixed(3)}s (delta ${m4aDurationDelta.toFixed(3)}s, tolerance ${M4A_DURATION_TOLERANCE_S}s)`,
+    `[${label}] episode.m4a duration ${actualM4aDuration.toFixed(3)}s matches the trimmed window ${trimmedDurationS.toFixed(3)}s = truth mark span ${truthMarkSpanS.toFixed(3)}s - mark ${darkroom.MARK_TOTAL_MS}ms - 2x pad ${darkroom.PAD_MS}ms (delta ${m4aDurationDelta.toFixed(3)}s, tolerance ${M4A_DURATION_TOLERANCE_S}s)`,
   );
 
   // ---- Check 5: ffprobe products. ----
@@ -438,17 +458,50 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
   );
   check(!!mp4Audio && mp4Audio.codec_name === "aac", `[${label}] episode.mp4 audio codec is aac (got ${mp4Audio && mp4Audio.codec_name})`);
 
-  // Minor (Task 7 review round 2): the duration reference gains the LOCAL
-  // delay term — needed now that episode-fix02 exercises who==="local",
-  // where local's own chain (raw + its own tpad delay) is what the mp4's
-  // video is actually pinned to, not local's raw length alone.
-  const localVideoDurationS = await ffprobeDuration(path.join(rawDir, "local-video.mkv"));
-  const localReferenceDuration = localVideoDurationS + localDelayS;
+  // The mp4's duration reference follows episode.m4a's onto the trimmed
+  // window (episode chime trim, 2026-08-05). `[outv]` is still bound to
+  // LOCAL's chain by the overlay graph's single `shortest=1` — that has not
+  // changed — but local's chain is now cut to the same window the mix is,
+  // so the expectation is the trimmed length, not raw + delay. (Previously:
+  // local's raw video length plus local's own tpad delay.)
+  //
+  // HONEST LIMIT, new with the trim: both panes take the IDENTICAL window,
+  // so after trimming both chains are the same length by construction and
+  // this number can no longer tell "pinned to local" apart from "pinned to
+  // remote" or "pinned to whichever is shorter" — the exact class of bug
+  // that shipped once here (see composite.mjs's doc comment). What still
+  // guards it is the graph-SHAPE pin in __tests__/darkroom-pipeline.test.ts
+  // ("exactly one :shortest=1, on the [lpad] stage"), plus the two fixtures
+  // continuing to exercise both offset signs everywhere else in this file.
   const mp4Duration = Number(mp4Probe.format.duration);
-  const durationDeltaS = Math.abs(mp4Duration - localReferenceDuration);
+  const durationDeltaS = Math.abs(mp4Duration - trimmedDurationS);
   check(
     durationDeltaS <= 0.2,
-    `[${label}] episode.mp4 duration ${mp4Duration.toFixed(3)}s within 0.2s of local reference ${localReferenceDuration.toFixed(3)}s = raw ${localVideoDurationS.toFixed(3)}s + delay ${localDelayS.toFixed(3)}s (delta ${durationDeltaS.toFixed(3)}s)`,
+    `[${label}] episode.mp4 duration ${mp4Duration.toFixed(3)}s within 0.2s of the trimmed window ${trimmedDurationS.toFixed(3)}s (delta ${durationDeltaS.toFixed(3)}s)`,
+  );
+
+  // The trim is provenance-visible in the receipt, and it must be the same
+  // cut the products actually carry: startS/endS are on the post-delay
+  // timeline, so unlike the durations above they DO move with `who` —
+  // which makes this an independent cross-check of the side mapping,
+  // derived from truth.json rather than from develop.json's own say-so.
+  // truth.json's OWN delay/side (never develop.json's) — that is what makes
+  // this independent of the pipeline's self-report.
+  const truthLocalDelayMs = truth.expectedWho === "local" ? truth.expectedDelayMs : 0;
+  const expectedTrimStartS =
+    ((truth.local.startSample / SAMPLE_RATE) * 1000 + truthLocalDelayMs + darkroom.MARK_TOTAL_MS + darkroom.PAD_MS) / 1000;
+  const expectedTrimEndS = ((truth.local.endSample / SAMPLE_RATE) * 1000 + truthLocalDelayMs - darkroom.PAD_MS) / 1000;
+  check(
+    !!develop.trim && develop.trim.padMs === darkroom.PAD_MS,
+    `[${label}] develop.json.trim.padMs = ${develop.trim && develop.trim.padMs} (expected ${darkroom.PAD_MS})`,
+  );
+  check(
+    !!develop.trim && Math.abs(develop.trim.startS - expectedTrimStartS) <= 0.002,
+    `[${label}] develop.json.trim.startS = ${develop.trim && develop.trim.startS}s matches ground truth ${expectedTrimStartS.toFixed(3)}s`,
+  );
+  check(
+    !!develop.trim && Math.abs(develop.trim.endS - expectedTrimEndS) <= 0.002,
+    `[${label}] develop.json.trim.endS = ${develop.trim && develop.trim.endS}s matches ground truth ${expectedTrimEndS.toFixed(3)}s`,
   );
 
   // ---- Check 6: sources untouched — byte-hash the fixture copy before/

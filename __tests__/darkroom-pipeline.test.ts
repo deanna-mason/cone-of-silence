@@ -16,7 +16,7 @@ import crypto from "node:crypto";
 import { compositeArgs } from "../scripts/darkroom/composite.mjs";
 import { DarkroomError } from "../scripts/darkroom/errors.mjs";
 import { SAMPLE_RATE, synthesizeMark, findMarks } from "../scripts/darkroom/tone.mjs";
-import { driftRatio, alignment } from "../scripts/darkroom/drift.mjs";
+import { driftRatio, alignment, episodeWindow, PAD_MS } from "../scripts/darkroom/drift.mjs";
 import { developEpisode } from "../scripts/darkroom/pipeline.mjs";
 import {
   pollOnce,
@@ -32,6 +32,12 @@ const LAYOUT = {
   left: { x: 86, y: 180, w: 820, h: 615 },
   right: { x: 1014, y: 180, w: 800, h: 600 }, // deliberately different from left, to prove per-pane geometry isn't hardcoded
 };
+
+// The episode chime trim's one window (design 2026-08-05), on the common
+// post-delay timeline. compositeArgs takes it as an option and applies the
+// SAME window to both panes — pipeline.mjs derives it once, from local's
+// marks, via drift.mjs's episodeWindow().
+const TRIM = { startS: 1.67, endS: 4.95 };
 
 function inputIndexOf(args: string[], file: string): number {
   const flagIdx = args.indexOf(file);
@@ -67,7 +73,7 @@ describe("composite.mjs — compositeArgs", () => {
       "/tmp/local.webm",
       "/tmp/remote.webm",
       LAYOUT,
-      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 0 } },
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 0 }, trim: TRIM },
       "/tmp/episode.m4a",
       "/tmp/out.mp4",
     );
@@ -94,7 +100,7 @@ describe("composite.mjs — compositeArgs", () => {
       "/tmp/local.webm",
       "/tmp/remote.webm",
       LAYOUT,
-      { remoteSetpts: "setpts=PTS*0.999800000", delays: { local: 0, remote: 10 } },
+      { remoteSetpts: "setpts=PTS*0.999800000", delays: { local: 0, remote: 10 }, trim: TRIM },
       "/tmp/episode.m4a",
       "/tmp/out.mp4",
     );
@@ -105,8 +111,11 @@ describe("composite.mjs — compositeArgs", () => {
     const localSeg = segmentFor(fc, `[${localIdx}:v]`);
     const remoteSeg = segmentFor(fc, `[${remoteIdx}:v]`);
 
-    // Local is the reference timeline — it is never rate-corrected.
-    expect(localSeg).not.toContain("setpts");
+    // Local is the reference timeline — it is never RATE-corrected. (It
+    // does carry the trim's own `setpts=PTS-<startS>/TB` re-zero, like both
+    // panes do — hence `setpts=PTS*`, the rate-correction form, rather than
+    // a bare "setpts": episode chime trim, 2026-08-05.)
+    expect(localSeg).not.toContain("setpts=PTS*");
 
     // Remote gets setpts, THEN its delay (tpad), both strictly before the
     // cover scale/crop that feeds the overlay.
@@ -127,7 +136,7 @@ describe("composite.mjs — compositeArgs", () => {
       "/tmp/local.webm",
       "/tmp/remote.webm",
       LAYOUT,
-      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 25, remote: 0 } },
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 25, remote: 0 }, trim: TRIM },
       "/tmp/episode.m4a",
       "/tmp/out.mp4",
     );
@@ -135,7 +144,9 @@ describe("composite.mjs — compositeArgs", () => {
     const localIdx = inputIndexOf(args, "/tmp/local.webm");
     const localSeg = segmentFor(fc, `[${localIdx}:v]`);
 
-    expect(localSeg).not.toContain("setpts");
+    // Never rate-corrected — the trim's own re-zeroing setpts is a
+    // different filter (see the previous test's note).
+    expect(localSeg).not.toContain("setpts=PTS*");
     expect(localSeg).toContain("tpad=start_duration=0.025");
     expect(localSeg.indexOf("tpad=")).toBeLessThan(localSeg.indexOf("scale="));
   });
@@ -146,7 +157,7 @@ describe("composite.mjs — compositeArgs", () => {
       "/tmp/local.webm",
       "/tmp/remote.webm",
       LAYOUT,
-      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 0 } },
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 0 }, trim: TRIM },
       "/tmp/episode.m4a",
       "/tmp/out.mp4",
     );
@@ -237,7 +248,7 @@ describe("composite.mjs — compositeArgs", () => {
       "/tmp/local.webm",
       "/tmp/remote.webm",
       LAYOUT,
-      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 250, remote: 0 } },
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 250, remote: 0 }, trim: TRIM },
       "/tmp/episode.m4a",
       "/tmp/out.mp4",
     );
@@ -254,6 +265,83 @@ describe("composite.mjs — compositeArgs", () => {
     const secondOverlaySeg = fc.split(";").find((seg) => seg.includes("[bg1][lpad]overlay="));
     expect(secondOverlaySeg).toBeDefined();
     expect(secondOverlaySeg).toContain(":shortest=1");
+  });
+
+  // -------------------------------------------------------------------
+  // Episode chime trim (design 2026-08-05) — the video side.
+  // -------------------------------------------------------------------
+  it("both panes take the IDENTICAL window, after tpad and before scale — the window is on the common post-delay timeline, and trimming first means fewer frames to scale", () => {
+    const args = compositeArgs(
+      "/tmp/backdrop.png",
+      "/tmp/local.webm",
+      "/tmp/remote.webm",
+      LAYOUT,
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 10 }, trim: TRIM },
+      "/tmp/episode.m4a",
+      "/tmp/out.mp4",
+    );
+    const fc = filterComplexOf(args);
+    const localSeg = segmentFor(fc, `[${inputIndexOf(args, "/tmp/local.webm")}:v]`);
+    const remoteSeg = segmentFor(fc, `[${inputIndexOf(args, "/tmp/remote.webm")}:v]`);
+
+    // Same cut on both sides, or the alignment the whole pipeline just
+    // computed does not survive it.
+    for (const seg of [localSeg, remoteSeg]) {
+      expect(seg).toContain("trim=start=1.670:end=4.950");
+    }
+
+    // Remote: setpts (rate) -> tpad (delay) -> trim -> scale -> crop. The
+    // trim must come AFTER tpad because the window is expressed on the
+    // post-delay timeline, and BEFORE scale so the scaler never touches
+    // frames that are about to be thrown away.
+    const rTpad = remoteSeg.indexOf("tpad=");
+    const rTrim = remoteSeg.indexOf("trim=start=");
+    const rScale = remoteSeg.indexOf("scale=");
+    expect(rTpad).toBeGreaterThan(-1);
+    expect(rTpad).toBeLessThan(rTrim);
+    expect(rTrim).toBeLessThan(rScale);
+
+    // Local has no tpad here (remote is the delayed side), but the trim
+    // still precedes its scale.
+    const lTrim = localSeg.indexOf("trim=start=");
+    expect(lTrim).toBeGreaterThan(-1);
+    expect(lTrim).toBeLessThan(localSeg.indexOf("scale="));
+  });
+
+  it("video re-zeroes with setpts=PTS-<startS>/TB, NOT STARTPTS — `trim` is frame-quantized and STARTPTS would cost up to a frame of lip-sync", () => {
+    const args = compositeArgs(
+      "/tmp/backdrop.png",
+      "/tmp/local.webm",
+      "/tmp/remote.webm",
+      LAYOUT,
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 250, remote: 0 }, trim: TRIM },
+      "/tmp/episode.m4a",
+      "/tmp/out.mp4",
+    );
+    const fc = filterComplexOf(args);
+    const localSeg = segmentFor(fc, `[${inputIndexOf(args, "/tmp/local.webm")}:v]`);
+    const remoteSeg = segmentFor(fc, `[${inputIndexOf(args, "/tmp/remote.webm")}:v]`);
+
+    // `atrim` (audio, chain.mjs) is sample-accurate, so its first surviving
+    // sample IS startS and `asetpts=PTS-STARTPTS` re-zeroes it exactly. The
+    // video `trim` filter is FRAME-quantized: at 30fps the first surviving
+    // frame can sit up to 33ms after startS, so re-zeroing THAT frame to 0
+    // would advance the picture relative to the audio by up to a frame —
+    // a permanent lip-sync shift. Subtracting the exact startS instead
+    // preserves each frame's true offset from the cut; the cost is at most
+    // one sub-frame of bare backdrop at the very start.
+    for (const seg of [localSeg, remoteSeg]) {
+      expect(seg).toContain("setpts=PTS-1.670/TB");
+      expect(seg).not.toContain("STARTPTS");
+    }
+
+    // The re-zero follows its own trim, and both stay ahead of the scaler.
+    const order = (seg: string) => [seg.indexOf("trim=start="), seg.indexOf("setpts=PTS-1.670/TB"), seg.indexOf("scale=")];
+    for (const seg of [localSeg, remoteSeg]) {
+      const [t, z, s] = order(seg);
+      expect(t).toBeLessThan(z);
+      expect(z).toBeLessThan(s);
+    }
   });
 });
 
@@ -739,6 +827,125 @@ describe("pipeline.mjs — developEpisode", () => {
     // But the real, already-completed upstream work survives, re-runnable:
     expect(fs.existsSync(path.join(episodesRoot, "raw", "local-audio.mkv"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
+  }, 20000);
+
+  // -------------------------------------------------------------------
+  // Episode chime trim (design 2026-08-05): ONE window, built once from
+  // local's marks, spent in three places — both mix passes, the composite,
+  // and the receipt.
+  // -------------------------------------------------------------------
+  it("the trim window is built ONCE and reaches both mix passes, both video panes, and the receipt — identical values everywhere", async () => {
+    const takeId = "take-20260101-0000-7111";
+    const { manifestPath } = await buildValidTake(takeId, { video: true, receivedFrom: "NIGHTINGALE" });
+
+    // Identical mark positions on both sides: ratio 1, delay 0, who
+    // "remote" — so localDelayMs is 0 and the window is local's marks
+    // straight, which keeps this test about the TRIM and not about drift.
+    const localPcm = buildAudioTrack(6, [1.0, 4.0]);
+    const remotePcm = buildAudioTrack(6, [1.0, 4.0]);
+
+    // Ground truth from the REAL detector + the REAL window math the
+    // pipeline itself calls (this file's standing convention — see the
+    // describe-block header).
+    const expectedWindow = episodeWindow(findMarks(localPcm), 0);
+    const startS = expectedWindow.startS.toFixed(3);
+    const endS = expectedWindow.endS.toFixed(3);
+    expect(startS).toBe("1.670"); // (1000 + MARK_TOTAL_MS 420 + PAD_MS 250)/1000
+    expect(endS).toBe("3.750"); // (4000 - PAD_MS 250)/1000
+
+    const fakeRunner = makeFakeRunner();
+    const { renderBackdrop } = makeFakeRenderBackdrop();
+    const receipt = await developEpisode(
+      {
+        runner: fakeRunner,
+        renderBackdrop,
+        decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
+        now: () => "2026-08-05T00:00:00.000Z",
+      },
+      manifestPath,
+      { ownCodename: "CARDINAL", chromePath: "/fake/chrome", templatePath: "/fake/template.html" },
+    );
+
+    // --- receipt: the cut is provenance-visible without re-deriving it ---
+    expect(receipt.trim).toEqual({
+      startS: Number(startS),
+      endS: Number(endS),
+      padMs: PAD_MS,
+    });
+
+    // --- both mix passes carry the SAME trim segment ---------------------
+    const fcOf = (call: string[]) => call[call.indexOf("-filter_complex") + 1];
+    const mixMeasureFc = fcOf(fakeRunner.calls[9]);
+    const mixApplyFc = fcOf(fakeRunner.calls[10]);
+    const expectedTrimSegment = `atrim=start=${startS}:end=${endS},asetpts=PTS-STARTPTS`;
+    expect(mixMeasureFc).toContain(expectedTrimSegment);
+    expect(mixApplyFc).toContain(expectedTrimSegment);
+    // Not merely "both contain a trim" — the measure pass must describe
+    // byte-for-byte the audio the apply pass encodes, which is only
+    // guaranteed by ONE construction site upstream of both.
+    expect(mixMeasureFc.slice(0, mixMeasureFc.indexOf("loudnorm"))).toBe(
+      mixApplyFc.slice(0, mixApplyFc.indexOf("loudnorm")),
+    );
+
+    // --- the composite takes the same window on both panes ---------------
+    const compositeFc = fcOf(fakeRunner.calls[11]);
+    expect((compositeFc.match(new RegExp(`trim=start=${startS}:end=${endS}`, "g")) || []).length).toBe(2);
+    // Video re-zeroes on the exact cut point; audio re-zeroes on STARTPTS
+    // (sample-accurate) — the asymmetry is deliberate, see composite.mjs.
+    expect((compositeFc.match(new RegExp(`setpts=PTS-${startS}/TB`, "g")) || []).length).toBe(2);
+    expect(compositeFc).not.toContain("STARTPTS");
+    expect(mixApplyFc).toContain("asetpts=PTS-STARTPTS");
+
+    // --- stems are NOT trimmed (decision 2: they stay sync-marked masters)
+    const stemCalls = [fakeRunner.calls[6], fakeRunner.calls[8]]; // applyStemArgs local/remote
+    for (const call of stemCalls) {
+      expect(call.join(" ")).not.toContain("atrim");
+    }
+  }, 20000);
+
+  it("marks closer together than 920ms → trim-window-empty refusal, raised before ANY stem/mix/composite encode work", async () => {
+    const takeId = "take-20260101-0000-7222";
+    const { manifestPath } = await buildValidTake(takeId, { video: false, receivedFrom: "NIGHTINGALE" });
+
+    // 500ms apart — under MARK_TOTAL_MS (420) + 2*PAD_MS (500) = 920ms, so
+    // the window collapses. Only sub-1.5s junk takes can do this; a real
+    // take is minutes long.
+    const localPcm = buildAudioTrack(3, [1.0, 1.5]);
+    const remotePcm = buildAudioTrack(3, [1.0, 1.5]);
+
+    const fakeRunner = makeFakeRunner();
+    await expect(
+      developEpisode(
+        {
+          runner: fakeRunner,
+          renderBackdrop: NEVER_CALLED,
+          decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
+          now: () => "2026-08-05T00:00:00.000Z",
+        },
+        manifestPath,
+        { ownCodename: "CARDINAL" },
+      ),
+    ).rejects.toMatchObject({ code: "trim-window-empty" });
+
+    // The refusal fires straight after mark detection: the only runner
+    // calls that happened are the -version probe and the two raw remuxes
+    // (copy-only, no filtering). No stem was measured or encoded, no mix
+    // ran, no composite ran — a refusal costs no encode work, matching the
+    // pipeline's existing refuse-loudly posture.
+    expect(fakeRunner.calls.length).toBe(3);
+    expect(fakeRunner.calls[0]).toEqual(["-version"]);
+    for (const call of fakeRunner.calls.slice(1)) {
+      expect(call).toContain("copy");
+      expect(call).not.toContain("-af");
+      expect(call).not.toContain("-filter_complex");
+    }
+
+    // And nothing beyond raw/ was written — no stems, no products, no marker.
+    const episodesRoot = path.join(tmpRoot, "episodes", takeId);
+    expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(false);
+    expect(fs.existsSync(path.join(episodesRoot, "develop.json"))).toBe(false);
+    expect(fs.existsSync(path.join(episodesRoot, "work"))).toBe(false);
+    expect(await fsp.readdir(path.join(episodesRoot, "stems"))).toEqual([]);
   }, 20000);
 });
 

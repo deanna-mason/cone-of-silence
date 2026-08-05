@@ -183,6 +183,21 @@ describe("chain.mjs — applyStemArgs", () => {
     );
   });
 
+  // Decision 2 of the episode chime trim design (2026-08-05): STEMS KEEP
+  // THEIR CHIMES. Only episode.m4a/episode.mp4 are trimmed — stems/*.m4a
+  // stay sync-marked masters so the two tracks can still be lined up by ear
+  // or by filter in a DAW, and raw/ remains sacred. This test exists to
+  // fail loudly if the trim ever leaks down into the per-stem chain.
+  it("applyStemArgs argv is UNCHANGED by the episode trim — no atrim anywhere in a stem's chain (decision 2: stems keep their chimes)", () => {
+    const plain = applyStemArgs("/tmp/in.webm", "m.rnnn", measurement, "/tmp/out.m4a");
+    const drifted = applyStemArgs("/tmp/remote.webm", "m.rnnn", measurement, "/tmp/out.m4a", "asetrate=47990.402,aresample=48000");
+
+    expect(plain.join(" ")).not.toContain("atrim");
+    expect(plain.join(" ")).not.toContain("asetpts");
+    expect(drifted.join(" ")).not.toContain("atrim");
+    expect(drifted.join(" ")).not.toContain("asetpts");
+  });
+
   it("applyStemArgs prepends the drift filter when given, and matches the full argv shape", () => {
     const extraFilter = "asetrate=48009.600,aresample=48000";
     const args = applyStemArgs("/tmp/remote.webm", "m.rnnn", measurement, "/tmp/out.m4a", extraFilter);
@@ -218,12 +233,17 @@ describe("chain.mjs — mix builders", () => {
     target_offset: "0.02",
   };
 
+  // The episode chime trim (design 2026-08-05) rides in as one opaque
+  // segment built ONCE by pipeline.mjs and handed to both builders — see
+  // the parity test below for why that single construction site matters.
+  const TRIM = "atrim=start=1.670:end=4.950,asetpts=PTS-STARTPTS";
+
   it("mix args: adelay per input, amix normalize=0, final measured loudnorm, aac 192k 48k", () => {
     const delayA = "adelay=10:all=1";
     const delayB = "adelay=0:all=1";
 
-    const measureArgs = mixMeasureArgs("/tmp/a.m4a", "/tmp/b.m4a", delayA, delayB);
-    const applyArgsOut = mixApplyArgs("/tmp/a.m4a", "/tmp/b.m4a", delayA, delayB, measurement, "/tmp/episode.m4a");
+    const measureArgs = mixMeasureArgs("/tmp/a.m4a", "/tmp/b.m4a", delayA, delayB, TRIM);
+    const applyArgsOut = mixApplyArgs("/tmp/a.m4a", "/tmp/b.m4a", delayA, delayB, TRIM, measurement, "/tmp/episode.m4a");
 
     const measureFilter = measureArgs[measureArgs.indexOf("-filter_complex") + 1];
     expect(measureFilter).toContain(`[0:a]${delayA}`);
@@ -277,5 +297,64 @@ describe("chain.mjs — mix builders", () => {
       "192k",
       "/tmp/episode.m4a",
     ]);
+  });
+
+  // -------------------------------------------------------------------
+  // Episode chime trim (design 2026-08-05) — the mix graph's trim segment.
+  // -------------------------------------------------------------------
+  it("MEASURE/APPLY PARITY: both builders, given the same trim segment, emit the IDENTICAL atrim= substring — the measure pass must describe exactly the audio the apply pass encodes", () => {
+    const delayA = "adelay=250:all=1";
+    const delayB = "adelay=0:all=1";
+
+    const measureArgs = mixMeasureArgs("/tmp/a.m4a", "/tmp/b.m4a", delayA, delayB, TRIM);
+    const applyArgsOut = mixApplyArgs("/tmp/a.m4a", "/tmp/b.m4a", delayA, delayB, TRIM, measurement, "/tmp/episode.m4a");
+
+    const measureFilter = measureArgs[measureArgs.indexOf("-filter_complex") + 1];
+    const applyFilter = applyArgsOut[applyArgsOut.indexOf("-filter_complex") + 1];
+
+    const atrimOf = (fc: string) => {
+      const m = fc.match(/atrim=[^,]+/);
+      expect(m, `expected an atrim= segment in: ${fc}`).toBeTruthy();
+      return m![0];
+    };
+    expect(atrimOf(measureFilter)).toBe("atrim=start=1.670:end=4.950");
+    expect(atrimOf(measureFilter)).toBe(atrimOf(applyFilter));
+
+    // Everything up to and including the trim is byte-identical across the
+    // two passes; only the loudnorm tail differs (print_format=json vs the
+    // measured_* values). A measurement taken over a DIFFERENT span than
+    // the one encoded is a measurement of audio that was never delivered.
+    const head = (fc: string) => fc.slice(0, fc.indexOf("loudnorm"));
+    expect(head(measureFilter)).toBe(head(applyFilter));
+  });
+
+  it("the trim sits BETWEEN amix and loudnorm — mastering must measure the episode as delivered, not as recorded (decision 3)", () => {
+    const args = mixApplyArgs(
+      "/tmp/a.m4a",
+      "/tmp/b.m4a",
+      "adelay=0:all=1",
+      "adelay=10:all=1",
+      TRIM,
+      measurement,
+      "/tmp/episode.m4a",
+    );
+    const applyFilter = args[args.indexOf("-filter_complex") + 1];
+
+    const amixPos = applyFilter.indexOf("amix=inputs=2:normalize=0");
+    const atrimPos = applyFilter.indexOf("atrim=");
+    const asetptsPos = applyFilter.indexOf("asetpts=PTS-STARTPTS");
+    const loudnormPos = applyFilter.indexOf("loudnorm");
+
+    expect(amixPos).toBeGreaterThan(-1);
+    expect(amixPos).toBeLessThan(atrimPos);
+    expect(atrimPos).toBeLessThan(asetptsPos);
+    expect(asetptsPos).toBeLessThan(loudnormPos);
+    // Both beeps sit at 0.5 amplitude inside the old measurement window,
+    // dragging measured true-peak (and so the limiting applied to the whole
+    // episode) — the trim has to happen before loudnorm sees the audio.
+    expect(applyFilter).toBe(
+      `[0:a]adelay=0:all=1[da];[1:a]adelay=10:all=1[db];[da][db]amix=inputs=2:normalize=0,${TRIM},` +
+        `${LOUDNORM_TARGET}:measured_I=-14.02:measured_TP=-1.80:measured_LRA=4.00:measured_thresh=-24.02:offset=0.02:linear=true`,
+    );
   });
 });

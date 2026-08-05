@@ -24,7 +24,7 @@ import { DarkroomError } from "./errors.mjs";
 import { readEpisode, verifyEpisode } from "./vault.mjs";
 import { reassemble, remuxArgs } from "./concat.mjs";
 import { findMarksWindowed, SEARCH_WINDOW_S, SAMPLE_RATE as TONE_SAMPLE_RATE } from "./tone.mjs";
-import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment } from "./drift.mjs";
+import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment, episodeWindow, PAD_MS } from "./drift.mjs";
 import { measureStem, applyStemArgs, mixMeasureArgs, mixApplyArgs } from "./chain.mjs";
 import { compositeArgs } from "./composite.mjs";
 
@@ -184,6 +184,32 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
     const localDelayMs = who === "local" ? delayMs : 0;
     const remoteDelayMs = who === "remote" ? delayMs : 0;
 
+    // Step 3b: the episode chime trim's window (design 2026-08-05) — the
+    // marks bracket the real content exactly, so cutting on them drops the
+    // "are we rolling?" shuffle at the head, the Cut click at the tail, and
+    // the marks themselves out of episode.m4a/episode.mp4. Built ONCE here,
+    // from local (the reference side) on the common post-delay timeline,
+    // and spent three times below: both mix passes, the composite, and the
+    // receipt. One construction site is the point — a measure pass and an
+    // apply pass that trim differently would master audio that was never
+    // encoded.
+    //
+    // Placed here, immediately after mark detection, so a `trim-window-empty`
+    // refusal (marks under 920ms apart — a junk take) costs no encode work
+    // at all: no stems, no mix, no composite, and the take dir untouched
+    // like every other refusal.
+    const trim = episodeWindow(localMarks, localDelayMs);
+    // Three decimals = 1ms of cut precision against a 250ms pad, and the
+    // number the receipt publishes is exactly the number the filters use.
+    // composite.mjs re-formats the same way (idempotent on these already-
+    // rounded values), so audio and video cut at the same instant.
+    const trimStartS = Number(trim.startS.toFixed(3));
+    const trimEndS = Number(trim.endS.toFixed(3));
+    // `asetpts=PTS-STARTPTS` (not the video side's `PTS-<startS>/TB`):
+    // `atrim` is sample-accurate, so STARTPTS IS startS here. See
+    // composite.mjs's videoChain for why the video cannot use this form.
+    const trimFilter = `atrim=start=${trimStartS.toFixed(3)}:end=${trimEndS.toFixed(3)},asetpts=PTS-STARTPTS`;
+
     // Step 4: per-host Studio-parity stems. Remote's drift filter is
     // prepended to its chain (both for measurement and for the apply pass).
     const remoteDrift = remoteAudioFilter(ratio);
@@ -204,12 +230,24 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
     const remoteDelayFilter = `adelay=${Math.round(remoteDelayMs)}:all=1`;
     const episodeM4a = path.join(episodesRoot, "episode.m4a");
 
+    // The SAME `trimFilter` value into both passes (decision 3: the trim is
+    // inside the mix graph, before loudnorm, so the measurement describes
+    // the episode as delivered rather than as recorded — including the two
+    // 0.5-amplitude beeps that used to drag the measured true-peak).
     const { stderr: mixStderr } = await deps.runner.run(
-      mixMeasureArgs(localStemOut, remoteStemOut, localDelayFilter, remoteDelayFilter),
+      mixMeasureArgs(localStemOut, remoteStemOut, localDelayFilter, remoteDelayFilter, trimFilter),
     );
     const mixMeasurement = parseMixLoudnorm(mixStderr);
     await deps.runner.run(
-      mixApplyArgs(localStemOut, remoteStemOut, localDelayFilter, remoteDelayFilter, mixMeasurement, episodeM4a),
+      mixApplyArgs(
+        localStemOut,
+        remoteStemOut,
+        localDelayFilter,
+        remoteDelayFilter,
+        trimFilter,
+        mixMeasurement,
+        episodeM4a,
+      ),
     );
 
     // Step 6: backdrop render + composite -> work/episode.mp4 -> rename
@@ -236,6 +274,10 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
         {
           remoteSetpts: remoteVideoSetpts(ratio),
           delays: { local: localDelayMs, remote: remoteDelayMs },
+          // Same window as the audio above — both panes, so the alignment
+          // survives the cut and the picture stops showing what the mix no
+          // longer contains.
+          trim: { startS: trimStartS, endS: trimEndS },
         },
         episodeM4a,
         workMp4,
@@ -264,6 +306,10 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
       ratio,
       delayMs,
       who,
+      // The cut, provenance-visible without re-deriving it from marks +
+      // delay + pad (design 2026-08-05). These are the exact values the
+      // atrim/trim filters were given.
+      trim: { startS: trimStartS, endS: trimEndS, padMs: PAD_MS },
       products: mp4Written ? ["m4a", "mp4"] : ["m4a"],
       toolVersions: { node: process.version, ffmpeg: ffmpegVersion },
     };

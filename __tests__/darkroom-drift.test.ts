@@ -11,8 +11,8 @@ import { DarkroomError } from "../scripts/darkroom/errors.mjs";
 import { makeRunner } from "../scripts/darkroom/runner.mjs";
 import { decodePcm, decodeArgs } from "../scripts/darkroom/decode.mjs";
 import { reassemble, remuxArgs } from "../scripts/darkroom/concat.mjs";
-import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment } from "../scripts/darkroom/drift.mjs";
-import { SAMPLE_RATE } from "../scripts/darkroom/tone.mjs";
+import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment, episodeWindow, PAD_MS } from "../scripts/darkroom/drift.mjs";
+import { SAMPLE_RATE, MARK_TOTAL_MS } from "../scripts/darkroom/tone.mjs";
 
 let tmpRoot: string;
 
@@ -95,6 +95,80 @@ describe("drift.mjs", () => {
       delayMs: 20,
       who: "local",
     });
+  });
+
+  // -------------------------------------------------------------------
+  // episodeWindow — the episode chime trim (design 2026-08-05).
+  //
+  // The marks bracket the real content exactly; the window is what
+  // survives the cut. Derived from LOCAL only (the reference side — remote
+  // is the one that gets rate-corrected, and after correction + alignment
+  // both hosts' marks land on the same instant of the mixed timeline), so
+  // there is exactly ONE window for both audio panes and both video panes.
+  // -------------------------------------------------------------------
+  it("episodeWindow: cuts PAD_MS after the start mark ENDS and PAD_MS before the end mark BEGINS, on the delayed timeline", () => {
+    // 1.000s / 5.200s marks — the committed e2e fixtures' own local
+    // positions — with local as the delayed side (the `who === "local"`
+    // half of the offset space).
+    const localMarks = { start: 1.0 * SAMPLE_RATE, end: 5.2 * SAMPLE_RATE };
+
+    const window = episodeWindow(localMarks, 250);
+
+    // startS = (markStartMs + MARK_TOTAL_MS + PAD_MS)/1000, all on the
+    // post-adelay timeline: (1000 + 250 + 420 + 250)/1000 = 1.920.
+    expect(window.startS).toBeCloseTo(1.92, 9);
+    // endS = (markEndMs - PAD_MS)/1000 = (5200 + 250 - 250)/1000 = 5.200.
+    // `localMarks.end` is the end mark's ONSET (locateMark returns
+    // refineOnset), so subtracting the pad from it keeps the whole end
+    // mark outside the window — see the next test.
+    expect(window.endS).toBeCloseTo(5.2, 9);
+  });
+
+  it("episodeWindow: the pad is applied on BOTH sides — the start mark's tail and the end mark's onset are each exactly PAD_MS outside the window", () => {
+    const localMarks = { start: 48000, end: 249600 };
+
+    const window = episodeWindow(localMarks, 0);
+
+    // Head: the window opens PAD_MS after the start mark has finished
+    // sounding (onset + MARK_TOTAL_MS), not PAD_MS after its onset.
+    const startMarkEndsS = 48000 / SAMPLE_RATE + MARK_TOTAL_MS / 1000;
+    expect(window.startS - startMarkEndsS).toBeCloseTo(PAD_MS / 1000, 9);
+
+    // Tail: the end mark's own ONSET is PAD_MS past the close of the
+    // window, so no part of the end mark can be inside it.
+    const endMarkOnsetS = 249600 / SAMPLE_RATE;
+    expect(endMarkOnsetS - window.endS).toBeCloseTo(PAD_MS / 1000, 9);
+    expect(window.endS).toBeLessThan(endMarkOnsetS);
+  });
+
+  it("PAD_MS is 250 — decision 1 (2026-08-05): wide enough to clear a ~465ms open-speakers chime re-capture's worst case being audible at the cut, tight enough not to clip a first word", () => {
+    expect(PAD_MS).toBe(250);
+  });
+
+  it("episodeWindow: marks closer together than MARK_TOTAL_MS + 2*PAD_MS → trim-window-empty refusal", () => {
+    // Exactly 920ms apart: the window collapses to zero length (endS ===
+    // startS), which is a refusal, not a silently-empty episode.
+    const collapseSamples = Math.round(((MARK_TOTAL_MS + 2 * PAD_MS) / 1000) * SAMPLE_RATE); // 44160
+    const localMarks = { start: 48000, end: 48000 + collapseSamples };
+
+    expect(() => episodeWindow(localMarks, 0)).toThrowError(DarkroomError);
+    let code: string | undefined;
+    try {
+      episodeWindow(localMarks, 0);
+    } catch (e) {
+      code = (e as DarkroomError).code;
+    }
+    expect(code).toBe("trim-window-empty");
+  });
+
+  it("episodeWindow: 920ms + ONE sample survives — the refusal is strictly `endS <= startS`, not a rounded-to-ms comparison", () => {
+    const collapseSamples = Math.round(((MARK_TOTAL_MS + 2 * PAD_MS) / 1000) * SAMPLE_RATE);
+    const localMarks = { start: 48000, end: 48000 + collapseSamples + 1 };
+
+    const window = episodeWindow(localMarks, 0);
+
+    expect(window.endS).toBeGreaterThan(window.startS);
+    expect(window.endS - window.startS).toBeCloseTo(1 / SAMPLE_RATE, 9);
   });
 });
 

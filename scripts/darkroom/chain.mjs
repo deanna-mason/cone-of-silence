@@ -109,18 +109,35 @@ export function applyStemArgs(input, model, m, out, extraFilter) {
   ];
 }
 
-function mixFilterComplex(delayFilterA, delayFilterB, tail) {
-  return `[0:a]${delayFilterA}[da];[1:a]${delayFilterB}[db];[da][db]amix=inputs=2:normalize=0,${tail}`;
+/**
+ * `trimFilter` is the episode chime trim segment (design 2026-08-05) —
+ * `atrim=start=<startS>:end=<endS>,asetpts=PTS-STARTPTS`, built ONCE by
+ * pipeline.mjs from `episodeWindow()` and handed to both mix builders
+ * verbatim. It is spliced between `amix` and the loudnorm tail (decision 3):
+ * mastering must measure the episode as DELIVERED, not as recorded — both
+ * sync beeps sit at 0.5 amplitude inside the untrimmed measurement window
+ * and drag the measured true-peak, and so the limiting applied to the whole
+ * episode, if loudnorm is allowed to see them.
+ *
+ * This does not touch the pinned parity surface: that invariant is scoped to
+ * `chainFilter` and `LOUDNORM_TARGET` (see this file's header), and the
+ * Studio path has no two-input mix and no `mixFilterComplex` at all.
+ */
+function mixFilterComplex(delayFilterA, delayFilterB, trimFilter, tail) {
+  return `[0:a]${delayFilterA}[da];[1:a]${delayFilterB}[db];[da][db]amix=inputs=2:normalize=0,${trimFilter},${tail}`;
 }
 
 /**
- * mixMeasureArgs(a, b, delayFilterA, delayFilterB) → string[]
+ * mixMeasureArgs(a, b, delayFilterA, delayFilterB, trimFilter) → string[]
  *
  * Per-input `adelay` (Task 3's alignment) into `amix=inputs=2:normalize=0`,
- * then the measure pass of the mix's own two-pass loudnorm (D13).
+ * the episode chime trim, then the measure pass of the mix's own two-pass
+ * loudnorm (D13). `trimFilter` is passed straight through — this builder and
+ * `mixApplyArgs` must receive the SAME string from the same construction
+ * site, or the measurement describes audio that was never encoded.
  */
-export function mixMeasureArgs(a, b, delayFilterA, delayFilterB) {
-  const filterComplex = mixFilterComplex(delayFilterA, delayFilterB, `${LOUDNORM_TARGET}:print_format=json`);
+export function mixMeasureArgs(a, b, delayFilterA, delayFilterB, trimFilter) {
+  const filterComplex = mixFilterComplex(delayFilterA, delayFilterB, trimFilter, `${LOUDNORM_TARGET}:print_format=json`);
   return [
     "-hide_banner", "-nostdin", ...INPUT_PROTOCOLS, "-i", a, ...INPUT_PROTOCOLS, "-i", b,
     "-filter_complex", filterComplex,
@@ -129,16 +146,17 @@ export function mixMeasureArgs(a, b, delayFilterA, delayFilterB) {
 }
 
 /**
- * mixApplyArgs(a, b, delayFilterA, delayFilterB, m, out) → string[]
+ * mixApplyArgs(a, b, delayFilterA, delayFilterB, trimFilter, m, out) → string[]
  *
- * Same mix graph as mixMeasureArgs, applying the measured loudnorm and
- * encoding the final episode.m4a (aac 192k, 48kHz).
+ * Same mix graph as mixMeasureArgs — same `trimFilter`, which is the whole
+ * point (see mixFilterComplex) — applying the measured loudnorm and encoding
+ * the final episode.m4a (aac 192k, 48kHz).
  */
-export function mixApplyArgs(a, b, delayFilterA, delayFilterB, m, out) {
+export function mixApplyArgs(a, b, delayFilterA, delayFilterB, trimFilter, m, out) {
   const tail =
     `${LOUDNORM_TARGET}:measured_I=${m.input_i}:measured_TP=${m.input_tp}` +
     `:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`;
-  const filterComplex = mixFilterComplex(delayFilterA, delayFilterB, tail);
+  const filterComplex = mixFilterComplex(delayFilterA, delayFilterB, trimFilter, tail);
   return [
     "-hide_banner", "-nostdin", "-y", ...INPUT_PROTOCOLS, "-i", a, ...INPUT_PROTOCOLS, "-i", b,
     "-filter_complex", filterComplex,

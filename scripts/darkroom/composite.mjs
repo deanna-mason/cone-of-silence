@@ -78,31 +78,68 @@ export async function renderBackdrop(chromePath, templatePath, { left, right }, 
  *  correction (setpts, remote only), optional start delay (tpad — the
  *  earlier side is pushed later so both marks land on the same output
  *  timestamp; alignment() always hands back a non-negative delay, so this
- *  is always a pad, never a trim), then the object-fit: COVER pair —
- *  scale-to-cover + center crop into the pane's own w/h (design 2026-08-03:
- *  the mp4 product crops so faces fill the full-frame tiles; §5A's
- *  never-crop rule now applies to the RAW vault recordings, which remain
- *  the complete, uncropped archival record). Returns `[label]`. */
-function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
+ *  is always a pad, never a trim), the episode chime trim, then the
+ *  object-fit: COVER pair — scale-to-cover + center crop into the pane's
+ *  own w/h (design 2026-08-03: the mp4 product crops so faces fill the
+ *  full-frame tiles; §5A's never-crop rule now applies to the RAW vault
+ *  recordings, which remain the complete, uncropped archival record).
+ *  Returns `[label]`.
+ *
+ *  TRIM PLACEMENT (design 2026-08-05). The window goes AFTER tpad because
+ *  it is expressed on the common post-delay timeline (the same timeline the
+ *  audio's `adelay`ed mix is trimmed on), and BEFORE the scale/crop because
+ *  trimming first means the scaler never touches frames that are about to
+ *  be thrown away. Both panes get the IDENTICAL window, so the alignment
+ *  computed upstream survives the cut.
+ *
+ *  WHY THE RE-ZERO IS `setpts=PTS-<startS>/TB` AND NOT `PTS-STARTPTS`
+ *  (which is what the audio side uses — chain.mjs's `asetpts`). `atrim` is
+ *  sample-accurate, so audio's first surviving sample IS `startS` and
+ *  `STARTPTS` equals it exactly. The video `trim` filter is FRAME-quantized:
+ *  at 30fps the first surviving frame can sit up to 33ms after `startS`.
+ *  Re-zeroing THAT frame to PTS 0 with `STARTPTS` would advance the picture
+ *  by up to a frame relative to the audio — a permanent lip-sync shift.
+ *  Subtracting the exact `startS` instead preserves each frame's true offset
+ *  from the cut. The cost is that a pane may show bare backdrop for under
+ *  one frame at the very start, which is imperceptible and strictly
+ *  preferable to a sync error. */
+function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs, trim }) {
   const filters = [];
   if (setpts) filters.push(setpts);
   if (delayMs) filters.push(`tpad=start_duration=${(delayMs / 1000).toFixed(3)}`);
+  // Same 3-decimal formatting as the audio trim segment pipeline.mjs builds
+  // for chain.mjs — the two must name the same instant or the cut lands in
+  // different places in the two tracks.
+  const startS = trim.startS.toFixed(3);
+  filters.push(`trim=start=${startS}:end=${trim.endS.toFixed(3)}`);
+  filters.push(`setpts=PTS-${startS}/TB`);
   filters.push(`scale=${pane.w}:${pane.h}:force_original_aspect_ratio=increase`);
   filters.push(`crop=${pane.w}:${pane.h}`);
   return `[${inputIdx}:v]${filters.join(",")}[${sinkLabel}]`;
 }
 
 /**
- * compositeArgs(backdropPng, localWebm, remoteWebm, layout, {remoteSetpts, delays}, audioM4a, outMp4) → string[]
+ * compositeArgs(backdropPng, localWebm, remoteWebm, layout, {remoteSetpts, delays, trim}, audioM4a, outMp4) → string[]
  *
  * Argv for the final side-by-side composite:
  * - backdrop: `-loop 1` still-image input (the Humanym paper field + seal
  *   and wordmark plaque + wells + invisible labels, already rendered by
  *   renderBackdrop).
  * - local (LEFT pane, D14): cover scale+crop, optional tpad delay if IT is
- *   the earlier side. Never setpts — local is the reference timeline.
+ *   the earlier side. Never RATE-corrected (no `setpts=PTS*`) — local is the
+ *   reference timeline; it does carry the trim's own re-zeroing setpts,
+ *   which both panes get.
  * - remote (RIGHT pane, D14): remoteSetpts (drift-ratio rate correction)
  *   THEN its own tpad delay, both strictly before the cover scale/crop.
+ * - trim (design 2026-08-05): `{startS, endS}` from drift.mjs's
+ *   `episodeWindow()`, REQUIRED — the same window pipeline.mjs trims the
+ *   mix's audio on, applied identically to both panes between tpad and
+ *   scale. See videoChain's own comment for the placement and for why the
+ *   video re-zero deliberately differs from the audio's. The duration-pin
+ *   reasoning below is unaffected by it: the backdrop is still `-loop 1`
+ *   and the remote overlay still carries no `shortest`, so `bg1` stays
+ *   effectively infinite and `[outv]` still binds to local's length — now
+ *   local's TRIMMED length.
  * - Two-stage overlay, REMOTE FIRST then LOCAL LAST (Task 7 review, round 2
  *   — the round-1 fix below was itself wrong; both are logged in
  *   task-7-report.md's fix-report addendum for the full derivation):
@@ -158,13 +195,27 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs }) {
  *   is re-encoded (`-c:a aac -b:a 192k`) rather than copied — the
  *   archival `episode.m4a` product itself is untouched; only the
  *   composite mp4's muxed-in audio track loses the copy fast-path.
+ *
+ * The options bag is spelled out for the type-checker below because `trim`
+ * carries no default (it is required — an untrimmed composite would show
+ * what the mix no longer contains), and TS infers a destructured JS
+ * parameter's shape from its defaults alone.
+ *
+ * @param {string} backdropPng
+ * @param {string} localWebm
+ * @param {string} remoteWebm
+ * @param {{left: {x: number, y: number, w: number, h: number}, right: {x: number, y: number, w: number, h: number}}} layout
+ * @param {{remoteSetpts?: string, delays?: {local?: number, remote?: number}, trim: {startS: number, endS: number}}} opts
+ * @param {string} audioM4a
+ * @param {string} outMp4
+ * @returns {string[]}
  */
 export function compositeArgs(
   backdropPng,
   localWebm,
   remoteWebm,
   layout,
-  { remoteSetpts = "", delays = {} } = {},
+  { remoteSetpts = "", delays = {}, trim } = {},
   audioM4a,
   outMp4,
 ) {
@@ -176,8 +227,8 @@ export function compositeArgs(
   const remoteIdx = 2;
   const audioIdx = 3;
 
-  const localChain = videoChain(localIdx, "lpad", layout.left, { setpts: null, delayMs: localDelay });
-  const remoteChain = videoChain(remoteIdx, "rpad", layout.right, { setpts: remoteSetpts, delayMs: remoteDelay });
+  const localChain = videoChain(localIdx, "lpad", layout.left, { setpts: null, delayMs: localDelay, trim });
+  const remoteChain = videoChain(remoteIdx, "rpad", layout.right, { setpts: remoteSetpts, delayMs: remoteDelay, trim });
 
   const filterComplex = [
     localChain,
