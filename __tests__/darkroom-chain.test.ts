@@ -151,7 +151,7 @@ describe("chain.mjs — measureStem", () => {
     const runner = fakeRunner(cannedStderr(badJson));
 
     await expect(measureStem(runner, "/tmp/in.webm", "m.rnnn")).rejects.toBeInstanceOf(DarkroomError);
-    await expect(measureStem(runner, "/tmp/in.webm", "m.rnnn").catch((e: any) => e)).resolves.toMatchObject({
+    await expect(measureStem(runner, "/tmp/in.webm", "m.rnnn").catch((e) => e)).resolves.toMatchObject({
       code: "ffmpeg-failed",
     });
   });
@@ -159,7 +159,7 @@ describe("chain.mjs — measureStem", () => {
   it("no loudnorm JSON in stderr at all → ffmpeg-failed", async () => {
     const runner = fakeRunner("no json here, just plain ffmpeg chatter\n");
 
-    await expect(measureStem(runner, "/tmp/in.webm", "m.rnnn").catch((e: any) => e)).resolves.toMatchObject({
+    await expect(measureStem(runner, "/tmp/in.webm", "m.rnnn").catch((e) => e)).resolves.toMatchObject({
       code: "ffmpeg-failed",
     });
   });

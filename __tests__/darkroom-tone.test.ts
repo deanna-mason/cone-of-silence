@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from "vitest";
 
+import { DarkroomError } from "../scripts/darkroom/errors.mjs";
 import {
   TONE_FREQS,
   BEEP_MS,
@@ -135,8 +136,8 @@ describe("darkroom tone: findMarks", () => {
     expect.assertions(1);
     try {
       findMarks(track);
-    } catch (err: any) {
-      expect(err.code).toBe("tone-one-beep");
+    } catch (err) {
+      expect((err as DarkroomError).code).toBe("tone-one-beep");
     }
   });
 
@@ -148,8 +149,8 @@ describe("darkroom tone: findMarks", () => {
     expect.assertions(1);
     try {
       findMarks(track);
-    } catch (err: any) {
-      expect(err.code).toBe("tone-end-missing");
+    } catch (err) {
+      expect((err as DarkroomError).code).toBe("tone-end-missing");
     }
   });
 
@@ -169,8 +170,8 @@ describe("darkroom tone: findMarks", () => {
     expect.assertions(1);
     try {
       findMarks(track);
-    } catch (err: any) {
-      expect(err.code).toBe("tone-start-missing");
+    } catch (err) {
+      expect((err as DarkroomError).code).toBe("tone-start-missing");
     }
   });
 
@@ -185,8 +186,8 @@ describe("darkroom tone: findMarks", () => {
     expect.assertions(1);
     try {
       findMarks(track);
-    } catch (err: any) {
-      expect(err.code).toBe("tone-start-missing");
+    } catch (err) {
+      expect((err as DarkroomError).code).toBe("tone-start-missing");
     }
   });
 });
