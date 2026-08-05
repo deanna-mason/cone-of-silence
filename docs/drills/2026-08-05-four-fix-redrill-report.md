@@ -128,10 +128,44 @@ before in one respect: it now fails quietly.
 The 8/5 note that "fixing 3 makes this trigger unreachable at source" does not
 hold, because fix 3 did not work (finding 2).
 
+## Fixes shipped for findings 2 and 3 (same evening)
+
+Both were confirmed in source, so both were fixed the same night, each with
+unit tests and a red-green check. **Neither has been proven live** — the
+re-drill that proves them is now owed, exactly as the four before them were.
+
+- **Finding 2** (`dc509d0`) — `usePodcastTake` latches `faultedThisTake` for
+  the whole take, keyed on the faults themselves rather than on the banner
+  being visible; the device bar keys on that latch. Acknowledging the alarm
+  no longer re-locks the bar. `CallControls` keeps the broad lock.
+- **Finding 3** (`d73d06a`) — `replaceStream` now adds a sender for any live
+  track whose kind the link has none of, through a single `addLocalTrack`
+  funnel shared with construction so the E2EE transform and VP9 pin cannot
+  diverge between the two paths. 85ebec6's ended-track guard now holds on the
+  swap path too, and a nulled sender remembers what it was for so it can be
+  re-populated rather than stranded.
+
+Finding 3's fix also covers a second route to the same defect that the drill
+did not hit: `getLocalStream`'s audio-only fallback produces the same
+missing-video-sender shape with no unplug involved.
+
+**Finding 1 is deliberately untouched** — still un-root-caused, pending the
+capture in `reconnect-desync-evidence.md`.
+
 ## Owed
 
-1. Root-cause finding 1 with server-side evidence before touching code.
-2. Fix findings 2 and 3, with unit tests — they are both confirmed in source.
+1. Capture and root-cause finding 1 (`reconnect-desync-evidence.md`). No code
+   until the evidence is in.
+2. **Live re-drill of block F**, which now proves findings 2 and 3 together.
+   They are entangled in the other direction: finding 2 is what lets the
+   operator *reach* the camera picker, and finding 3 is what makes the pick
+   actually reach the partner. Neither can be demonstrated without the other.
+   Run F5 **both ways** — alarm acknowledged and alarm still on screen — since
+   acknowledging is what defeated it last time. The pass condition for F7 is
+   that the partner sees a **real picture**, not a frozen or garbled tile: a
+   sender added without its E2EE transform would look correct locally and fail
+   only on the far side.
 3. Re-verify Block C's vault parts: concatenate Deanna's and Lily's parts in
-   sidecar order and confirm both play clean with both tone marks.
+   sidecar order and confirm both play clean with both tone marks. Needs the
+   parts exported out of the OPFS vault to disk first.
 4. Re-run D4 (resume → deliver) once finding 1 is resolved.
