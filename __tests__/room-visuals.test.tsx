@@ -1,19 +1,26 @@
-// CS-DR-04 room visual decisions (Deanna-approved 2026-08-03):
-//   1A "Lamplight Bloom" — partner (remote) speaking glow: 3px full-opacity
-//      brass ring + a breathing outer glow. Brass only; vermilion stays
-//      reserved for danger.
-//   3C "Needle Tick" — self speaking: a subdued 1px INNER brass line + a
-//      pulsing brass dot in the "You" caption. Two-tier grammar: tick = you,
-//      full bloom = them. The self tile NEVER gets the full bloom.
+// Room visual decisions:
+//   Speaking outline (8/4 dress-rehearsal rework, supersedes CS-DR-04's
+//      two-tier 1A/3C grammar): ONE slim 1px inner brass line for every
+//      speaking tile, self and remote alike. No bloom, no breathing pulse,
+//      no caption dot. The outline is LATCHED by the room page
+//      (useSpeakerLatch): tiles draw the latched prop, never the raw
+//      detector — RemoteTile only reports its detector's rising edge up.
+//      Brass only; vermilion stays reserved for danger.
 //   2B "Iris Pan" — roll-tape framing: while a take rolls, BOTH tiles crop to
 //      the 930:1008 episode pane, the viewport width AND height eased as plain
 //      lengths (never aspect-ratio); a slate-stamp flashes on the roller's own
-//      tile. prefers-reduced-motion → hard cut (no ease, no pulse, no flash).
+//      tile. prefers-reduced-motion → hard cut (no ease, no flash).
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { cleanup, render, within } from "@testing-library/react";
 import VideoTile, { episodeViewportStyle } from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
 import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
+
+// The live per-tile detector, controllable per test. RemoteTile must treat
+// it as report-only — the drawn outline comes from the latched `speaking`
+// prop alone.
+let mockLive = false;
+vi.mock("@/hooks/useSpeaking", () => ({ useSpeaking: () => mockLive }));
 
 beforeEach(() => {
   window.HTMLMediaElement.prototype.play = () => Promise.resolve();
@@ -49,35 +56,25 @@ function stubReducedMotion(matches: boolean) {
   );
 }
 
-// ── 1A Lamplight Bloom (remote) ──────────────────────────────────────────
-test("1A: a speaking remote tile shows the lamplight bloom (brass), not the self tick", () => {
-  const { container } = render(<VideoTile stream={fakeStream()} label="Agent 2" speaking />);
-  const figure = container.querySelector("figure")!;
-  expect(figure.className).toContain("speaking-bloom");
-  expect(figure.className).not.toContain("speaking-tick");
-  // Brass only — the bloom must never borrow the danger colour.
-  expect(figure.className).not.toContain("vermilion");
+// ── Speaking outline (one slim grammar, latched) ─────────────────────────
+test("a speaking tile — remote or self — shows the slim brass outline, never a bloom or a dot", () => {
+  const remote = render(<VideoTile stream={fakeStream()} label="Agent 2" speaking />);
+  const remoteFig = remote.container.querySelector("figure")!;
+  expect(remoteFig.className).toContain("speaking-tick");
+  expect(remoteFig.className).not.toContain("speaking-bloom");
+  // Brass only — the outline must never borrow the danger colour.
+  expect(remoteFig.className).not.toContain("vermilion");
+  cleanup();
+
+  const self = render(<VideoTile stream={fakeStream()} label="You" isSelf speaking />);
+  const selfFig = self.container.querySelector("figure")!;
+  expect(selfFig.className).toContain("speaking-tick");
+  expect(selfFig.className).not.toContain("speaking-bloom");
+  // The old pulsing caption dot is retired everywhere.
+  expect(self.queryByTestId("speaking-dot")).toBeNull();
 });
 
-test("1A: the bloom breathes under normal motion", () => {
-  stubReducedMotion(false);
-  const { container } = render(<VideoTile stream={fakeStream()} label="Agent 2" speaking />);
-  expect(container.querySelector("figure")!.className).toContain("is-breathing");
-});
-
-// ── 3C Needle Tick (self) ────────────────────────────────────────────────
-test("3C: a speaking self tile shows the needle tick, never the full bloom", () => {
-  const { container, getByTestId } = render(
-    <VideoTile stream={fakeStream()} label="You" isSelf speaking />,
-  );
-  const figure = container.querySelector("figure")!;
-  expect(figure.className).toContain("speaking-tick");
-  expect(figure.className).not.toContain("speaking-bloom");
-  // The pulsing brass dot lives in the caption.
-  expect(getByTestId("speaking-dot")).toBeDefined();
-});
-
-test("3C: a quiet self tile shows neither tick nor dot", () => {
+test("a quiet tile shows no outline", () => {
   const { container, queryByTestId } = render(
     <VideoTile stream={fakeStream()} label="You" isSelf />,
   );
@@ -85,15 +82,36 @@ test("3C: a quiet self tile shows neither tick nor dot", () => {
   expect(queryByTestId("speaking-dot")).toBeNull();
 });
 
-test("3C: a cut mic outranks the speaking tick on the self tile", () => {
-  const { container, queryByTestId } = render(
+test("a cut mic outranks the speaking outline on the self tile", () => {
+  const { container } = render(
     <VideoTile stream={fakeStream()} label="You" isSelf speaking micCut />,
   );
   const figure = container.querySelector("figure")!;
   expect(figure.className).toContain("ring-vermilion");
   expect(figure.className).not.toContain("speaking-tick");
-  expect(figure.className).not.toContain("speaking-bloom");
-  expect(queryByTestId("speaking-dot")).toBeNull();
+});
+
+test("RemoteTile reports its detector's rising edge up but draws only the latched prop", () => {
+  const onSpeakingStart = vi.fn();
+  const peer = {
+    peerId: "p1",
+    stream: fakeStream(),
+    connectionState: "connected",
+  } as unknown as import("@/lib/webrtc/session").RemotePeer;
+
+  // Detector live, latch prop absent: the room hears about it, the tile
+  // stays dark — drawing the raw detector is the per-word flashing the
+  // rework removed.
+  mockLive = true;
+  const raw = render(<RemoteTile peer={peer} label="Agent 2" onSpeakingStart={onSpeakingStart} />);
+  expect(onSpeakingStart).toHaveBeenCalledWith("p1");
+  expect(raw.container.querySelector("figure")!.className).not.toContain("speaking-tick");
+  cleanup();
+
+  // Latch prop set, detector quiet: the outline holds.
+  mockLive = false;
+  const latched = render(<RemoteTile peer={peer} label="Agent 2" speaking />);
+  expect(latched.container.querySelector("figure")!.className).toContain("speaking-tick");
 });
 
 // ── 2B Iris Pan (roll-tape framing) ──────────────────────────────────────
@@ -141,13 +159,12 @@ test("2B: the roller's own tile flashes a slate stamp; the partner tile does not
 });
 
 // ── Reduced motion → hard cut ────────────────────────────────────────────
-test("reduced motion: no bloom breathing, no eased iris transition, no slate flash, no pulsing dot", () => {
+test("reduced motion: no eased iris transition, no slate flash; the static outline stays", () => {
   stubReducedMotion(true);
 
   const remote = render(<VideoTile stream={fakeStream()} label="Agent 2" speaking />);
-  const remoteFig = remote.container.querySelector("figure")!;
-  expect(remoteFig.className).toContain("speaking-bloom"); // the ring stays — it's the indicator
-  expect(remoteFig.className).not.toContain("is-breathing"); // but it does not breathe
+  // The slim outline is static by design — it survives reduced motion.
+  expect(remote.container.querySelector("figure")!.className).toContain("speaking-tick");
   cleanup();
 
   const self = render(
@@ -155,7 +172,6 @@ test("reduced motion: no bloom breathing, no eased iris transition, no slate fla
   );
   expect(self.getByTestId("episode-viewport").className).not.toContain("iris-viewport");
   expect(self.queryByTestId("slate-stamp")).toBeNull();
-  expect(self.getByTestId("speaking-dot").className).not.toContain("animate-pulse");
 });
 
 test("normal motion: the iris viewport eases (transition class present)", () => {

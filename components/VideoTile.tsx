@@ -125,21 +125,14 @@ export default function VideoTile({
   const covered = !hasVideoTrack || camOff;
   const reducedMotion = usePrefersReducedMotion();
 
-  // Two-tier speaking grammar (CS-DR-04). A cut own-mic outranks both — you
-  // can't be speaking into a cut mic — so it wins the border outright.
-  //   • self  → "Needle Tick" (3C): a subdued 1px INNER brass line, plus a
-  //     pulsing brass dot in the caption. Never the full bloom.
-  //   • remote → "Lamplight Bloom" (1A): a 3px full-opacity brass ring + a
-  //     breathing outer glow (breathes only when motion is allowed).
-  const showTick = speaking && isSelf && !micCut;
-  const showBloom = speaking && !isSelf && !micCut;
-  const speakingClass = micCut
-    ? "ring-2 ring-vermilion"
-    : showTick
-      ? "speaking-tick"
-      : showBloom
-        ? `speaking-bloom${reducedMotion ? "" : " is-breathing"}`
-        : "";
+  // One speaking grammar for every tile (8/4 dress-rehearsal rework): the
+  // slim 1px inner brass line — the old self-only "Needle Tick" — now marks
+  // any speaking tile. The 3px lamplight bloom, its breathing pulse, and the
+  // caption dot are gone (distracting), and the per-word flash is gone with
+  // them: the room page latches `speaking` on the most recent speaker and
+  // holds it until a DIFFERENT person speaks. A cut own-mic still outranks
+  // the outline — you can't be speaking into a cut mic.
+  const speakingClass = micCut ? "ring-2 ring-vermilion" : speaking ? "speaking-tick" : "";
 
   return (
     <figure
@@ -244,14 +237,7 @@ export default function VideoTile({
           Rolling — Take 01
         </p>
       )}
-      <figcaption className="kicker absolute bottom-2 left-2 flex items-center gap-2 bg-field/80 px-2 py-1 text-ink-soft">
-        {showTick && (
-          <span
-            data-testid="speaking-dot"
-            aria-hidden
-            className={`h-1.5 w-1.5 rounded-full bg-brass${reducedMotion ? "" : " animate-pulse"}`}
-          />
-        )}
+      <figcaption className="kicker absolute bottom-2 left-2 bg-field/80 px-2 py-1 text-ink-soft">
         {label}
       </figcaption>
     </figure>
