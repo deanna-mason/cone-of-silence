@@ -207,6 +207,13 @@ export default function RoomPage() {
     podcast.panel.kind === "rolling" ||
     podcast.panel.kind === "stopping";
   const podcastLocked = takeInProgress || podcast.panel.kind === "fault";
+  // …and the device bar keys on the take having been compromised, not on the
+  // banner being on screen. `panel.kind === "fault"` only lasts until the
+  // operator acknowledges the alarm — which is what the drill card told
+  // Deanna to do at F1, dropping the panel back to "rolling" and re-locking
+  // her out with the camera still unplugged (8/5 re-drill finding 2).
+  // usePodcastTake latches faultedThisTake for the rest of the take instead.
+  const deviceBarLocked = takeInProgress && !podcast.faultedThisTake;
   // Take provenance for the armed card's send affordance: until a reel has
   // actually rolled in THIS session, any sendable take is the restored
   // previous-session one (usePodcastTake re-reads it from localStorage on
@@ -613,7 +620,7 @@ export default function RoomPage() {
         cameras={media.devices.cameras}
         choice={media.choice}
         hasCamera={media.hasCamera}
-        locked={takeInProgress}
+        locked={deviceBarLocked}
         onSelectMic={(id) => void media.switchDevice("audio", id)}
         onSelectCamera={(id) => void media.switchDevice("video", id)}
         onFlip={() => void media.flipCamera()}

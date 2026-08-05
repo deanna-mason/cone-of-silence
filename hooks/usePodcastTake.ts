@@ -127,6 +127,14 @@ export interface PodcastTake {
    *  LAST_TAKE_KEY). Null until the first take on this browser completes a
    *  stop. */
   lastTakeId: string | null;
+  /** A fault has been raised at some point during the take now in progress —
+   *  latched, NOT a mirror of `panel.kind === "fault"`. The banner only
+   *  stands until the operator acknowledges it; the compromise lasts the whole
+   *  take, and so does the room page's need to let them swap a device to fix
+   *  it (8/5 re-drill finding 2: acknowledging the unplugged-camera alarm
+   *  re-locked the device bar). Cleared when the NEXT take begins; only
+   *  meaningful while one is in progress. */
+  faultedThisTake: boolean;
   actions: {
     chooseVault(): Promise<void>;
     grantVault(): Promise<void>;
@@ -206,6 +214,11 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [faults, setFaults] = useState<Fault[]>([]);
   const [startFault, setStartFault] = useState<Fault | null>(null);
   const [dismissedKey, setDismissedKey] = useState("");
+  // Latched by the render-time adjustment below, next to visibleFaults — see
+  // the PodcastTake field's doc. Reset only where a take BEGINS (beginTake)
+  // and where one is torn down with the coordinator, so a Stand Down, a
+  // recovered camera, or a clean tick can never take it back down mid-take.
+  const [faultedThisTake, setFaultedThisTake] = useState(false);
   const [meter, setMeter] = useState({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
   const [streamBytes, setStreamBytes] = useState({ video: 0, audio: 0 });
   const [coordinatorGen, setCoordinatorGen] = useState(0);
@@ -324,6 +337,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     setFaults([]);
     setStartFault(null);
     setDismissedKey("");
+    setFaultedThisTake(false);
     setMeter({ elapsedS: 0, localBytes: 0, partnerBytes: 0 });
     setStreamBytes({ video: 0, audio: 0 });
   }
@@ -643,6 +657,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       setPartnerCodename(null);
       setFaults([]);
       setStartFault(null);
+      setFaultedThisTake(false);
     };
     // The callbacks above read every changing value through refs, so the
     // coordinator survives re-renders — rebuilding it mid-take would drop
@@ -702,6 +717,16 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const visibleFaults = startFault ? [startFault, ...faults] : faults;
   const faultShown = visibleFaults.length > 0 && faultKey(visibleFaults) !== dismissedKey;
 
+  // The take-compromised latch (see the PodcastTake field). Adjusted during
+  // render, like the codename retire above, so it lands in the SAME render as
+  // the fault that set it — a device bar that unlocks one frame late is a bar
+  // the operator can still be locked out of at the moment they reach for it.
+  // Keyed on visibleFaults, not on faultShown: dismissing is an
+  // acknowledgement of the alarm, never a repair of the take.
+  if (!faultedThisTake && visibleFaults.length > 0) {
+    setFaultedThisTake(true);
+  }
+
   function derivePanel(): PodcastPanelState {
     if (!supported) return { kind: "unsupported" };
     if (phase !== "idle") {
@@ -760,6 +785,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     myCodename: username,
     bytes: streamBytes,
     lastTakeId,
+    faultedThisTake,
     actions: {
       chooseVault: () => refreshVault(chooseVaultFolder),
       grantVault: () => refreshVault(requestVaultAccess),

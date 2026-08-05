@@ -721,6 +721,67 @@ describe("usePodcastTake", () => {
   });
 
   // -------------------------------------------------------------------
+  // faultedThisTake — the device-bar lock's key (8/5 re-drill finding 2).
+  //
+  // The bar was unlocked off panel.kind === "fault", which lasts only while
+  // the banner is UNDISMISSED. Deanna acknowledged the unplugged-camera alarm
+  // exactly as the drill card told her to, the panel fell back to "rolling",
+  // and the picker re-locked with the camera still unplugged — the one moment
+  // a device swap was the remedy. The flag latches on the fault instead, and
+  // only a NEW take clears it.
+  // -------------------------------------------------------------------
+  it("(k2) a fault latches faultedThisTake, and Stand Down does NOT clear it", async () => {
+    const { view, videoTrack, partner } = await setup();
+    await rollToRolling(view);
+    const stopHeartbeat = partnerHeartbeat(partner);
+    expect(view.result.current.faultedThisTake).toBe(false);
+
+    (videoTrack as unknown as { muted: boolean }).muted = true;
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("fault");
+    expect(view.result.current.faultedThisTake).toBe(true);
+
+    // Acknowledging drops the banner — the tape rolls on, and the flag stands.
+    act(() => view.result.current.actions.dismissFault());
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(view.result.current.faultedThisTake).toBe(true);
+
+    // Even once the camera is healthy again and the ticks are clean: this take
+    // was compromised, and the operator keeps the tools to fix it.
+    (videoTrack as unknown as { muted: boolean }).muted = false;
+    await tick(2_200);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(view.result.current.faultedThisTake).toBe(true);
+    stopHeartbeat();
+  });
+
+  it("(k3) a failed start latches it too, and the NEXT take starts clean", async () => {
+    H.state.failBuild = new Error("no mic");
+    const { view } = await setup();
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("fault");
+    expect(view.result.current.faultedThisTake).toBe(true);
+
+    // Stand Down ends that take; the next roll is a fresh one.
+    act(() => view.result.current.actions.dismissFault());
+    H.state.failBuild = null;
+    await tick(2_000);
+    await rollToRolling(view);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(view.result.current.faultedThisTake).toBe(false);
+  });
+
+  it("(k4) a healthy take never sets it", async () => {
+    const { view, partner } = await setup();
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+    await tick(2_200);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(view.result.current.faultedThisTake).toBe(false);
+    stopHeartbeat();
+  });
+
+  // -------------------------------------------------------------------
   // The partner grace window: quiet startup lag is forgiven, a fault is not.
   // -------------------------------------------------------------------
   it("(l) a partner still starting up in the first second does not alarm", async () => {
