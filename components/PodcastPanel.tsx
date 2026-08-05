@@ -25,6 +25,11 @@ export type PodcastPanelState =
       lastPhones: Phones | null;
       partnerPhones: Phones | null;
       partnerCodename: string | null;
+      /** The sendable take was restored from a previous session (reload
+       *  recovery) — nothing has rolled in THIS session yet, so the send
+       *  affordance must say it re-sends the last take, not imply a fresh
+       *  episode exists (8/4 rehearsal feedback). */
+      restoredTake?: boolean;
     }
   | { kind: "countdown"; secondsLeft: number }
   | {
@@ -233,7 +238,7 @@ export default function PodcastPanel({
           ) : (
             state.canSend && (
               <button type="button" onClick={onSendEpisode} className={GHOST_BUTTON}>
-                Send Episode
+                {state.restoredTake ? "Send Last Take" : "Send Episode"}
               </button>
             )
           )}

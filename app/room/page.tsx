@@ -29,6 +29,7 @@ import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useCallSession } from "@/hooks/useCallSession";
 import { usePodcastTake } from "@/hooks/usePodcastTake";
 import { useSpeaking } from "@/hooks/useSpeaking";
+import { SELF_SPEAKER, useSpeakerLatch } from "@/hooks/useSpeakerLatch";
 import { mergePanel, useEpisodeExchange } from "@/hooks/useEpisodeExchange";
 import { getSessionSnapshot } from "@/lib/authApi";
 import type { CallStatus } from "@/lib/webrtc/session";
@@ -153,10 +154,13 @@ export default function RoomPage() {
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys, media.stream, stage === "in-room", forceRelay);
-  // Self "Needle Tick" (CS-DR-04 3C): the same speaking detector the remote
-  // tiles use, run on the LOCAL stream. Unconditional hook — safe to compute
-  // even before the room mounts (returns false with no audio track).
+  // The local speaking detector, run on the LOCAL stream. Unconditional
+  // hook — safe to compute even before the room mounts (returns false with
+  // no audio track). Its raw flicker never reaches a tile: the latch below
+  // holds the outline on the most recent speaker until a DIFFERENT person
+  // speaks (8/4 dress-rehearsal rework — no more per-word flashing).
   const selfSpeaking = useSpeaking(media.stream);
+  const { lastSpeaker, noteSpeaker } = useSpeakerLatch(selfSpeaking);
 
   // Podcast mode is for logged-in hosts only; anonymous guests get the plain
   // call. Read through a store with a `false` server snapshot so the server
@@ -188,6 +192,19 @@ export default function RoomPage() {
     podcast.panel.kind === "rolling" ||
     podcast.panel.kind === "fault" ||
     podcast.panel.kind === "stopping";
+  // Take provenance for the armed card's send affordance: until a reel has
+  // actually rolled in THIS session, any sendable take is the restored
+  // previous-session one (usePodcastTake re-reads it from localStorage on
+  // mount for reload recovery), and the button must say so. Render-time
+  // state adjustment (the documented "storing information from previous
+  // renders" pattern) — latches once, never resets within the session.
+  const [rolledThisSession, setRolledThisSession] = useState(false);
+  if (
+    !rolledThisSession &&
+    (podcast.panel.kind === "rolling" || podcast.panel.kind === "stopping")
+  ) {
+    setRolledThisSession(true);
+  }
   const exchange = useEpisodeExchange({
     // "supported" isn't in usePodcastTake's public surface — panel.kind
     // stays "unsupported" forever on an unsupported browser (derivePanel's
@@ -467,7 +484,12 @@ export default function RoomPage() {
     <div className="flex h-[calc(100svh-7rem)] min-h-[20rem] flex-col gap-3">
       {authed && (
         <PodcastPanel
-          state={mergePanel(podcast.panel, exchange)}
+          state={(() => {
+            const merged = mergePanel(podcast.panel, exchange);
+            return merged.kind === "armed" && !rolledThisSession
+              ? { ...merged, restoredTake: true }
+              : merged;
+          })()}
           onChooseVault={() => void podcast.actions.chooseVault()}
           onGrantVault={() => void podcast.actions.grantVault()}
           onRoll={podcast.actions.roll}
@@ -494,7 +516,7 @@ export default function RoomPage() {
           label="You"
           mirrored
           isSelf
-          speaking={selfSpeaking}
+          speaking={lastSpeaker === SELF_SPEAKER}
           camOff={!media.camOn}
           micCut={!media.micOn}
           episodeFrame={podcastLocked}
@@ -513,6 +535,8 @@ export default function RoomPage() {
             // While the tape rolls the composite crops both cameras — crop the
             // partner tile too so the preview is honest (CS-DR-04 2B).
             episodeFrame={podcastLocked}
+            speaking={lastSpeaker === p.peerId}
+            onSpeakingStart={noteSpeaker}
           />
         ))}
         {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}

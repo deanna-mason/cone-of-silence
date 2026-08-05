@@ -137,6 +137,13 @@ describe("PodcastPanel", () => {
     expect(cb.onRoll).not.toHaveBeenCalled();
   });
 
+  test("armed — a restored previous-session take says Send Last Take, not Send Episode", () => {
+    const cb = renderState({ kind: "armed", canSend: true, restoredTake: true, ...PHONES_NONE });
+    expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Send Last Take" }));
+    expect(cb.onSendEpisode).toHaveBeenCalledTimes(1);
+  });
+
   test("armed — delivered shows a static Episode Delivered marker and no Send Episode", () => {
     renderState({ kind: "armed", canSend: true, delivered: true, ...PHONES_NONE });
     expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
