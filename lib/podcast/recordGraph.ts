@@ -1,20 +1,29 @@
 // The recorded audio path: raw mic + sync tone ONLY (spec §5A invariant —
 // the klaxon and all UI sounds must never reach this graph). A second
-// getUserMedia of the call's mic; Chrome applies processing per-track, so the
-// call's track is unaffected. Headphones mode records with ALL browser DSP
-// off. Echo-guard mode (the host declared open speakers) keeps
-// echoCancellation ON — it cancels the partner's voice playing from this
-// host's speakers, the acoustic bleed that ruined the 8/4 rehearsal take —
-// while NS/AGC stay off (the darkroom does its own noise/loudness work).
-// Both modes fail closed when the track's settings don't match the request.
+// getUserMedia of the call's mic with browser DSP off; Chrome applies
+// processing per-track, so the call's track is unaffected.
+//
+// DO NOT re-add an "echo-guard" mode that asks this capture for
+// echoCancellation: true. It cannot work, and the failure is SILENT.
+// Measured on real hardware 2026-08-05 (all four inputs on the author's Mac,
+// built-in and virtual alike):
+//
+//   echoCancellation: true, standalone .................. EC comes back TRUE
+//   echoCancellation: true, while the CALL already holds
+//   that same mic (i.e. always, in production) .......... EC comes back FALSE
+//
+// Chrome will not give a second concurrent capture of a device its own echo
+// canceller, and it does not reject the constraint — it just hands back an
+// unprocessed track. A tape recorded that way carries the partner's voice
+// exactly as if nothing had been asked for. The 8/4 rehearsal echo is
+// therefore NOT fixable at this seam: an open-speakers host records bleed,
+// full stop, and the app's job is to say so rather than to pretend.
+// (If a real fix is ever wanted: record from the CALL's own mic track, which
+// already carries Chrome's AEC, instead of opening a second capture.)
 import { scheduleToneMark } from "./toneMark";
 
 export class ProcessedAudioError extends Error {
   constructor() { super("microphone capture came back with browser processing enabled"); }
-}
-
-export class EchoGuardUnavailableError extends Error {
-  constructor() { super("echo cancellation could not be enabled for open-speakers recording"); }
 }
 
 export interface RecordGraphDeps {           // injectable for jsdom tests
@@ -37,7 +46,6 @@ const MARK_LEAD_S = 0.05;
 
 export async function buildRecordGraph(
   audioDeviceId: string | undefined,
-  opts: { echoGuard: boolean },
   deps: RecordGraphDeps = {},
 ): Promise<RecordGraph> {
   const gum = deps.getUserMedia ?? ((c) => navigator.mediaDevices.getUserMedia(c));
@@ -45,19 +53,12 @@ export async function buildRecordGraph(
   const stream = await gum({
     audio: {
       ...(audioDeviceId ? { deviceId: { exact: audioDeviceId } } : {}),
-      echoCancellation: opts.echoGuard, noiseSuppression: false, autoGainControl: false, channelCount: 1,
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1,
     },
   });
   const raw = stream.getAudioTracks()[0];
   const s = raw.getSettings();
-  if (opts.echoGuard) {
-    // EC is the whole point here — a track without it would bake speaker
-    // bleed into the tape exactly as if no declaration had been made.
-    if (!s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
-      raw.stop();
-      throw new EchoGuardUnavailableError();
-    }
-  } else if (s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
+  if (s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
     raw.stop();
     throw new ProcessedAudioError();
   }

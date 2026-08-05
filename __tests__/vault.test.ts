@@ -245,12 +245,12 @@ describe("PartWriter", () => {
 
   it("finish() writes sidecarExtra keys into the sidecar JSON", async () => {
     const dir = new FakeDirHandle();
-    const writer = new PartWriter(asDir(dir), "audio", 1000, { echoGuard: true });
+    const writer = new PartWriter(asDir(dir), "audio", 1000, { phones: "speakers" });
     await writer.append(new Blob([new Uint8Array(10)]));
     await writer.finish();
 
     const parsed = JSON.parse(new TextDecoder().decode(dir.files.get("audio.sidecar.json")!.committed));
-    expect(parsed.echoGuard).toBe(true);
+    expect(parsed.phones).toBe("speakers");
     expect(parsed.base).toBe("audio");
     expect(Array.isArray(parsed.parts)).toBe(true);
   });

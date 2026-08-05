@@ -18,7 +18,7 @@ import type { PodcastPanelState } from "@/components/PodcastPanel";
 import type { CallBus } from "@/hooks/useCallSession";
 import { getSessionSnapshot } from "@/lib/authApi";
 import { soundKlaxon } from "@/lib/podcast/klaxon";
-import { buildRecordGraph, EchoGuardUnavailableError, type RecordGraph } from "@/lib/podcast/recordGraph";
+import { buildRecordGraph, type RecordGraph } from "@/lib/podcast/recordGraph";
 import { TakeRecorder, type RecorderFault } from "@/lib/podcast/recorder";
 import { COUNTDOWN_MS, TakeCoordinator, type Phones } from "@/lib/podcast/takeProtocol";
 import {
@@ -146,7 +146,8 @@ export interface PodcastTake {
     chooseVault(): Promise<void>;
     grantVault(): Promise<void>;
     /** The per-take headphones answer — armed-state only; resets on every
-     *  return to idle. "speakers" records with echo-guard (EC on). */
+     *  return to idle. "speakers" warns (and is stamped into the tape's
+     *  sidecar); it cannot make the recording echo-free — see recordGraph.ts. */
     declarePhones(phones: Phones): void;
     roll(): void;
     stop(): void;
@@ -273,7 +274,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const coordinatorEpochRef = useRef(0);
   const graphRef = useRef<RecordGraph | null>(null);
   const recorderRef = useRef<TakeRecorder | null>(null);
-  const recorderFaultRef = useRef<{ cause: RecorderFault | "echo-guard"; detail: string } | null>(null);
+  const recorderFaultRef = useRef<{ cause: RecorderFault; detail: string } | null>(null);
   const phaseRef = useRef<Phase>("idle");
   const epochRef = useRef(0); // bumped on every teardown — cancels in-flight starts
   const rollingSinceRef = useRef(0);
@@ -372,7 +373,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
 
   /** The start chain blew up — the wire take lives on, but nothing local is
    *  recording. Hold the banner up until the operator stands it down. */
-  function failStart(cause: RecorderFault | "echo-guard", err: unknown): void {
+  function failStart(cause: RecorderFault, err: unknown): void {
     recorderFaultRef.current = { cause, detail: detailOf(err) };
     graphRef.current?.close();
     graphRef.current = null;
@@ -392,17 +393,20 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       return;
     }
 
-    const echoGuard = phonesRef.current === "speakers";
+    // The declaration does NOT change how we capture — Chrome cannot give a
+    // second capture of an in-call mic its own echo canceller (see the
+    // measurement in recordGraph.ts). It is recorded as provenance and
+    // surfaced in the UI so an open-speakers host knows their tape carries
+    // bleed; it is never a promise that something removed it.
+    const phones = phonesRef.current;
     let graph: RecordGraph;
     try {
-      graph = await buildRecordGraph(deviceId, { echoGuard });
+      graph = await buildRecordGraph(deviceId);
     } catch (err) {
       // ProcessedAudioError (browser DSP still on) and an outright capture
-      // refusal both land here — neither is a disk problem. An echo-guard
-      // build that could not get EC gets its own cause: the banner must name
-      // the remedy (headphones), not a generic recorder failure.
+      // refusal both land here — neither is a disk problem.
       if (stale()) return;
-      failStart(err instanceof EchoGuardUnavailableError ? "echo-guard" : "encoder-error", err);
+      failStart("encoder-error", err);
       return;
     }
     if (stale()) {
@@ -427,9 +431,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         recordedAudioTrack: graph.recordedTrack,
         writers: {
           video: new PartWriter(dir, "video"),
-          // The audio sidecar carries the declaration as provenance — a
-          // stamped tape says on disk whether EC shaped it (echo-guard, 8/5).
-          audio: new PartWriter(dir, "audio", 1000, { echoGuard }),
+          // The audio sidecar carries the declaration as provenance: a tape
+          // says on disk whether its host was on headphones or open speakers,
+          // which is what a later "why does this echo?" hunt actually needs.
+          audio: new PartWriter(dir, "audio", 1000, { phones }),
         },
         onFault: (cause, detail) => {
           // A discarded recorder's writers keep running to completion, so a

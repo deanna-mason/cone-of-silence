@@ -91,7 +91,9 @@ const CAUSE_COPY: Record<FaultCause, string> = {
   "encoder-stalled": "RECORDER STALLED",
   "disk-error": "DISK WRITE FAILED",
   "encoder-error": "RECORDER FAILED",
-  "echo-guard": "ECHO-GUARD FAILED — USE HEADPHONES",
+  // Retired 2026-08-05 (see watchdog.ts): unreachable from this build, kept
+  // so a partner still running the 8/5 build renders as words, not undefined.
+  "echo-guard": "RECORDER FAILED",
   "partner-fault": "REPORTS A FAULT",
   "partner-silent": "WENT SILENT",
 };
@@ -229,26 +231,69 @@ export default function PodcastPanel({
           </button>
         );
       };
+      // Whichever sides are on open speakers is the ONE thing worth shouting
+      // here: their tape records the other host's voice off their speakers and
+      // nothing downstream removes it (recordGraph.ts). Everything else is
+      // quiet — a confirmed pair says so once, softly.
+      const onSpeakers = [
+        state.phones === "speakers" ? "You" : null,
+        state.partnerPhones === "speakers" ? partnerName : null,
+      ].filter(Boolean);
       return (
-        <div className={ROW}>
-          <p className="kicker shrink-0 text-sienna">◈ Ready to Roll</p>
-          {/* The per-take headphones declaration (echo-guard, 2026-08-05):
-              Roll Tape stays disabled until this take's answer is given — the
-              8/4 rehearsal echo came from an undeclared open-speakers rig.
-              The remembered answer is only a dashed hint, never an answer. */}
-          <div className="flex shrink-0 items-center gap-2">
-            {phoneButton("headphones", "Headphones In")}
-            {phoneButton("speakers", "Open Speakers")}
-          </div>
-          <p className="hidden min-w-0 flex-1 truncate font-body text-sm sm:block">
-            {state.partnerPhones === null ? (
-              <span className="text-sienna">{partnerName}: not confirmed</span>
-            ) : state.partnerPhones === "speakers" ? (
-              <span className="text-vermilion">{partnerName}: OPEN SPEAKERS · echo-guard</span>
-            ) : (
-              <span className="text-ink-soft">{partnerName}: headphones in</span>
-            )}
+        // ROW_WRAP, not ROW: this row carries the most controls of any panel
+        // state (declaration + Send + Roll) and MUST wrap rather than spill
+        // its buttons outside the border — the 8/5 sighting, at max-w-3xl.
+        <div className={ROW_WRAP}>
+          <p className="kicker shrink-0 text-sienna">
+            {declared ? "◈ Ready to Roll" : "◈ Headphones?"}
           </p>
+          {/* The per-take headphones declaration (2026-08-05): Roll Tape stays
+              disabled until this take's answer is given — the 8/4 rehearsal
+              echo came from an undeclared open-speakers rig. The remembered
+              answer is only a dashed hint, never an answer.
+              Once answered the pair COLLAPSES to a single chip that toggles:
+              this row is width-critical (measured — two persistent buttons
+              plus Send plus Roll overflow max-w-3xl and push Roll Tape
+              outside the border, the 8/5 sighting), and the answer still
+              reads back at a glance. */}
+          {declared ? (
+            <button
+              type="button"
+              onClick={() => onDeclarePhones(state.phones === "speakers" ? "headphones" : "speakers")}
+              title={
+                state.phones === "speakers"
+                  ? "On open speakers — click to switch to headphones"
+                  : "On headphones — click to switch to open speakers"
+              }
+              className={`kicker shrink-0 border px-3 py-2 ${
+                state.phones === "speakers"
+                  ? "border-vermilion text-vermilion"
+                  : "border-brass text-brass"
+              }`}
+            >
+              {state.phones === "speakers" ? "Speakers" : "Headphones"}
+            </button>
+          ) : (
+            <div className="flex shrink-0 items-center gap-2">
+              {phoneButton("headphones", "Headphones")}
+              {phoneButton("speakers", "Speakers")}
+            </div>
+          )}
+          {/* Silence is the calm default. A confirmed headphones pair needs no
+              words — squeezed into the leftover flex space it only ever
+              rendered as an unreadable stub anyway. When there IS something to
+              say it takes a FULL line (w-full basis in this wrapping row) so
+              the warning is never the thing that gets truncated. */}
+          {onSpeakers.length > 0 ? (
+            <p className="w-full min-w-0 truncate font-body text-sm text-vermilion">
+              {onSpeakers.join(" + ")} on open speakers — that tape will carry echo
+            </p>
+          ) : state.partnerPhones === null ? (
+            <p className="w-full min-w-0 truncate font-body text-sm text-sienna">
+              {partnerName}: not confirmed
+            </p>
+          ) : null}
+          <span className="flex-1" aria-hidden />
           {/* Once this take has been delivered, a static in-theme marker
               (text-brass = static positive) replaces Send Episode — a second
               send of an all-committed episode is an instant "0.0 MB filed."
@@ -266,7 +311,7 @@ export default function PodcastPanel({
             type="button"
             onClick={onRoll}
             disabled={!declared}
-            className={`${CTA_BUTTON} disabled:cursor-not-allowed disabled:opacity-40`}
+            className={`${CTA_BUTTON} shrink-0 disabled:cursor-not-allowed disabled:opacity-40`}
           >
             Roll Tape
           </button>
@@ -296,20 +341,19 @@ export default function PodcastPanel({
             You {formatMB(state.localBytes)} · {state.partnerCodename ?? "Partner"}{" "}
             {formatMB(state.partnerBytes)}
           </p>
-          {/* Loud marker ONLY for open-speakers rigs (echo-guard engaged) —
-              both-headphones takes say nothing here; silence is the calm
-              default, the marker is what the operator must not miss. */}
+          {/* Loud marker ONLY for open-speakers rigs — that tape is recording
+              the other host's voice off the speakers and nothing downstream
+              removes it. Both-headphones takes say nothing here; silence is
+              the calm default, the marker is what must not be missed. */}
           {(state.phones === "speakers" || state.partnerPhones === "speakers") && (
             <p className="kicker hidden shrink-0 text-vermilion sm:block">
               {[
-                state.phones === "speakers" ? "YOU: OPEN SPEAKERS" : null,
-                state.partnerPhones === "speakers"
-                  ? `${state.partnerCodename ?? "PARTNER"}: OPEN SPEAKERS`
-                  : null,
+                state.phones === "speakers" ? "YOU" : null,
+                state.partnerPhones === "speakers" ? (state.partnerCodename ?? "PARTNER") : null,
               ]
                 .filter(Boolean)
-                .join(" · ")}
-              {" · echo-guard on"}
+                .join(" + ")}
+              {": OPEN SPEAKERS"}
             </p>
           )}
           <button

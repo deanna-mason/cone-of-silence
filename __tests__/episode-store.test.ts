@@ -300,12 +300,12 @@ describe("episodeStore", () => {
     ]);
   });
 
-  it("(a) readSendPlan tolerates extra top-level sidecar fields (echo-guard provenance)", async () => {
-    // 5A's echo-guard stamps `echoGuard` into the audio sidecar; the exchange
-    // reads only base/parts and must never choke on a stamped tape.
+  it("(a) readSendPlan tolerates extra top-level sidecar fields (headphones provenance)", async () => {
+    // The recorder stamps `phones` into the audio sidecar; the exchange reads
+    // only base/parts and must never choke on a stamped tape.
     const { dir, takeId } = await freshTakeDir();
     const audioParts: SidecarEntry[] = [{ name: "audio.part000", size: 3, sha256: "aa" }];
-    seedJson(dir, "audio.sidecar.json", { echoGuard: true, base: "audio", parts: audioParts });
+    seedJson(dir, "audio.sidecar.json", { phones: "headphones", base: "audio", parts: audioParts });
     seedJson(dir, "video.sidecar.json", { base: "video", parts: [] });
 
     const plan = await readSendPlan(takeId);

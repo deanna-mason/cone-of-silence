@@ -91,38 +91,78 @@ describe("PodcastPanel", () => {
 
   test("armed — Headphones In / Open Speakers fire onDeclarePhones with the value", () => {
     const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
-    fireEvent.click(screen.getByRole("button", { name: "Headphones In" }));
+    fireEvent.click(screen.getByRole("button", { name: "Headphones" }));
     expect(cb.onDeclarePhones).toHaveBeenCalledWith("headphones");
-    fireEvent.click(screen.getByRole("button", { name: "Open Speakers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Speakers" }));
     expect(cb.onDeclarePhones).toHaveBeenCalledWith("speakers");
   });
 
-  test("armed — the remembered answer is marked before confirmation, and only then", () => {
+  test("armed — the remembered answer is hinted while unanswered, and never counts as an answer", () => {
     renderState({ kind: "armed", canSend: false, ...PHONES_NONE, lastPhones: "speakers" });
-    const speakers = screen.getByRole("button", { name: "Open Speakers" });
-    expect(speakers.hasAttribute("data-remembered")).toBe(true);
-    expect(screen.getByRole("button", { name: "Headphones In" }).hasAttribute("data-remembered")).toBe(false);
-    cleanup();
-    // Once declared, the memory marker disappears (aria-pressed carries state).
-    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers", lastPhones: "speakers" });
-    const pressed = screen.getByRole("button", { name: "Open Speakers" });
-    expect(pressed.hasAttribute("data-remembered")).toBe(false);
-    expect(pressed.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Speakers" }).hasAttribute("data-remembered")).toBe(true);
+    expect(screen.getByRole("button", { name: "Headphones" }).hasAttribute("data-remembered")).toBe(false);
+    // A hint is not an answer: Roll Tape is still gated.
+    expect((screen.getByRole("button", { name: "Roll Tape" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  test("armed — partner status line: not confirmed / headphones / OPEN SPEAKERS", () => {
+  test("armed — answering collapses the pair to one chip that toggles the other way", () => {
+    // The pair costs more width than the row has once Send + Roll are present
+    // (measured — it pushed Roll Tape outside the border, 8/5), so the answer
+    // reads back as a single chip.
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers" });
+    expect(screen.queryByRole("button", { name: "Headphones" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Speakers" }));
+    expect(cb.onDeclarePhones).toHaveBeenCalledWith("headphones");
+    cleanup();
+    const cb2 = renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "headphones" });
+    expect(screen.queryByRole("button", { name: "Speakers" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Headphones" }));
+    expect(cb2.onDeclarePhones).toHaveBeenCalledWith("speakers");
+  });
+
+  test("armed — an unconfirmed partner is named; a confirmed pair says nothing", () => {
     renderState({ kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream" });
     expect(screen.getByText("icecream: not confirmed")).toBeDefined();
     cleanup();
+    // Calm case: both on headphones — no status text at all. Silence is the
+    // default; the row is width-critical and a confirmed pair needs no words.
     renderState({
-      kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream", partnerPhones: "headphones",
+      kind: "armed", canSend: false, ...PHONES_NONE,
+      phones: "headphones", partnerCodename: "icecream", partnerPhones: "headphones",
     });
-    expect(screen.getByText("icecream: headphones in")).toBeDefined();
-    cleanup();
+    expect(screen.queryByText(/icecream/)).toBeNull();
+  });
+
+  // The declaration cannot make a speakers take echo-free (Chrome won't give a
+  // second capture of an in-call mic its own echo canceller — recordGraph.ts),
+  // so the copy must WARN and must never claim protection. "echo-guard" as a
+  // promise was withdrawn 8/5 after it blocked a real take.
+  test("armed — an open-speakers side is named and warned, never reassured", () => {
     renderState({
       kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream", partnerPhones: "speakers",
     });
-    expect(screen.getByText("icecream: OPEN SPEAKERS · echo-guard")).toBeDefined();
+    expect(screen.getByText("icecream on open speakers — that tape will carry echo")).toBeDefined();
+    cleanup();
+    renderState({
+      kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers",
+      partnerCodename: "icecream", partnerPhones: "headphones",
+    });
+    expect(screen.getByText("You on open speakers — that tape will carry echo")).toBeDefined();
+    cleanup();
+    // Both sides on speakers: both named in one line.
+    renderState({
+      kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers",
+      partnerCodename: "icecream", partnerPhones: "speakers",
+    });
+    expect(screen.getByText("You + icecream on open speakers — that tape will carry echo")).toBeDefined();
+  });
+
+  test("armed — the kicker asks the question until it is answered", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    expect(screen.getByText("◈ Headphones?")).toBeDefined();
+    cleanup();
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "headphones" });
+    expect(screen.getByText("◈ Ready to Roll")).toBeDefined();
   });
 
   test("armed — no Send Episode button when canSend is false", () => {
@@ -198,7 +238,7 @@ describe("PodcastPanel", () => {
       phones: "speakers",
       partnerPhones: "speakers",
     });
-    expect(screen.getByText("YOU: OPEN SPEAKERS · Falcon: OPEN SPEAKERS · echo-guard on")).toBeDefined();
+    expect(screen.getByText("YOU + Falcon: OPEN SPEAKERS")).toBeDefined();
     cleanup();
     renderState({
       kind: "rolling",
@@ -249,13 +289,16 @@ describe("PodcastPanel", () => {
     expect(screen.getByText("Falcon: REPORTS A FAULT")).toBeDefined();
   });
 
-  test("fault — echo-guard failure names the remedy", () => {
+  // The retired "echo-guard" cause (8/5) is unreachable from this build but
+  // still renderable, so a partner on the older build beacons words rather
+  // than "PARTNER: undefined" — see lib/podcast/watchdog.ts.
+  test("fault — the retired echo-guard cause still renders as words", () => {
     renderState({
       kind: "fault",
       partnerCodename: null,
       faults: [{ side: "local", cause: "echo-guard" }],
     });
-    expect(screen.getByText("YOUR ECHO-GUARD FAILED — USE HEADPHONES")).toBeDefined();
+    expect(screen.getByText("YOUR RECORDER FAILED")).toBeDefined();
   });
 
   test("fault — remote fault falls back to 'PARTNER' when no codename is known", () => {

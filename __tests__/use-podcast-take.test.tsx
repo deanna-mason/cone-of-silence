@@ -27,7 +27,6 @@ const H = vi.hoisted(() => {
   const state = {
     vaultPerm: "granted" as "granted" | "prompt" | "unset",
     buildArgs: [] as (string | undefined)[],
-    buildOpts: [] as { echoGuard: boolean }[],
     partWriterExtras: [] as { base: string; extra: Record<string, unknown> | undefined }[],
     takeDirIds: [] as string[],
     graphs: [] as {
@@ -111,10 +110,8 @@ vi.mock("@/lib/podcast/vault", () => ({
 
 vi.mock("@/lib/podcast/recordGraph", () => ({
   ProcessedAudioError: class ProcessedAudioError extends Error {},
-  EchoGuardUnavailableError: class EchoGuardUnavailableError extends Error {},
-  buildRecordGraph: vi.fn(async (audioDeviceId: string | undefined, opts: { echoGuard: boolean }) => {
+  buildRecordGraph: vi.fn(async (audioDeviceId: string | undefined) => {
     H.state.buildArgs.push(audioDeviceId);
-    H.state.buildOpts.push(opts);
     if (H.state.failBuild) throw H.state.failBuild;
     if (H.state.deferBuild) {
       await new Promise<void>((resolve) => {
@@ -253,7 +250,6 @@ describe("usePodcastTake", () => {
     H.log.length = 0;
     H.state.vaultPerm = "granted";
     H.state.buildArgs.length = 0;
-    H.state.buildOpts.length = 0;
     H.state.partWriterExtras.length = 0;
     H.state.takeDirIds.length = 0;
     H.state.graphs.length = 0;
@@ -1053,7 +1049,7 @@ describe("usePodcastTake", () => {
     declaredPartner.dispose();
   });
 
-  it("(p7) a speakers declaration reaches the record graph and the audio sidecar", async () => {
+  it("(p7) a speakers declaration is stamped into the audio sidecar as provenance", async () => {
     const { view, partner } = await setup({}, { declare: false });
     act(() => view.result.current.actions.declarePhones("speakers"));
     await tick(1);
@@ -1062,34 +1058,38 @@ describe("usePodcastTake", () => {
     expect(view.result.current.panel.kind).toBe("rolling");
     stopHeartbeat();
 
-    expect(H.state.buildOpts).toEqual([{ echoGuard: true }]);
     const audioWriter = H.state.partWriterExtras.find((w) => w.base === "audio");
-    expect(audioWriter?.extra).toEqual({ echoGuard: true });
+    expect(audioWriter?.extra).toEqual({ phones: "speakers" });
     const videoWriter = H.state.partWriterExtras.find((w) => w.base === "video");
     expect(videoWriter?.extra).toBeUndefined();
   });
 
-  it("(p8) a headphones declaration records raw — echoGuard false, no sidecar stamp", async () => {
+  it("(p8) a headphones declaration is stamped the same way", async () => {
     const { view, partner } = await setup();
     const stopHeartbeat = partnerHeartbeat(partner);
     await rollToRolling(view);
     stopHeartbeat();
-    expect(H.state.buildOpts).toEqual([{ echoGuard: false }]);
-    expect(H.state.partWriterExtras.find((w) => w.base === "audio")?.extra).toEqual({ echoGuard: false });
+    expect(H.state.partWriterExtras.find((w) => w.base === "audio")?.extra).toEqual({ phones: "headphones" });
   });
 
-  it("(p9) EchoGuardUnavailableError raises the echo-guard fault, not a generic encoder fault", async () => {
-    const { EchoGuardUnavailableError } = await import("@/lib/podcast/recordGraph");
-    H.state.failBuild = new EchoGuardUnavailableError();
-    const { view } = await setup({}, { declare: false });
+  // The declaration is a WARNING, not a capture mode: Chrome will not give a
+  // second capture of an in-call mic its own echo canceller (measured 8/5 —
+  // see lib/podcast/recordGraph.ts), so a speakers take must record exactly
+  // like a headphones take and must NOT fail. The 8/5 live failure was this
+  // path refusing to roll at all.
+  it("(p9) declaring speakers does NOT change capture and never blocks the roll", async () => {
+    const { view, partner } = await setup({}, { declare: false });
     act(() => view.result.current.actions.declarePhones("speakers"));
     await tick(1);
+    const stopHeartbeat = partnerHeartbeat(partner);
     await rollToRolling(view);
+    stopHeartbeat();
 
-    expect(view.result.current.panel.kind).toBe("fault");
-    const panel = view.result.current.panel as Extract<typeof view.result.current.panel, { kind: "fault" }>;
-    expect(panel.faults[0]).toMatchObject({ side: "local", cause: "echo-guard" });
-    expect(soundKlaxon).toHaveBeenCalledTimes(1);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(soundKlaxon).not.toHaveBeenCalled();
+    // Same single deviceId argument as any other take — no per-declaration
+    // constraint object reaches the graph at all.
+    expect(H.state.buildArgs).toEqual(["mic-1"]);
   });
 });
 

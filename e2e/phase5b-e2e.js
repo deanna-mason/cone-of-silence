@@ -508,8 +508,8 @@ async function rollAndCut(pageA, pageB, holdMs) {
   // The per-take headphones declaration resets on every return to armed —
   // answer it on BOTH sides before each roll (an undeclared acceptor
   // quiet-ignores the proposal; the proposer's button is disabled).
-  await pageA.getByRole("button", { name: "Headphones In" }).click();
-  await pageB.getByRole("button", { name: "Headphones In" }).click();
+  await pageA.getByRole("button", { name: "Headphones" }).click();
+  await pageB.getByRole("button", { name: "Headphones" }).click();
   await pageA.getByRole("button", { name: "Roll Tape" }).click();
   await Promise.all([waitPod(pageA, "rolling", 5000), waitPod(pageB, "rolling", 5000)]);
   await new Promise((r) => setTimeout(r, holdMs));
