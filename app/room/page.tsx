@@ -1,7 +1,7 @@
 // app/room/page.tsx
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
@@ -30,7 +30,7 @@ import { useCallSession } from "@/hooks/useCallSession";
 import { usePodcastTake } from "@/hooks/usePodcastTake";
 import { useSpeaking } from "@/hooks/useSpeaking";
 import { mergePanel, useEpisodeExchange } from "@/hooks/useEpisodeExchange";
-import { getSession } from "@/lib/authApi";
+import { getSessionSnapshot } from "@/lib/authApi";
 import type { CallStatus } from "@/lib/webrtc/session";
 import {
   buildInviteLink,
@@ -128,6 +128,21 @@ function isCallFailure(status: CallStatus): status is CallFailure {
   return status in CALL_FAILURE_COPY;
 }
 
+// No native "session changed" event to subscribe to, and nothing on this page
+// writes one — the no-op subscribe keeps the old mount effect's "read it, then
+// follow React's own render schedule" behavior. The snapshot is a boolean, so
+// it is referentially stable by value; the server one is false because the
+// server render must never touch localStorage (see the comment at its use).
+function noopSubscribe() {
+  return () => {};
+}
+function getAuthedSnapshot(): boolean {
+  return getSessionSnapshot() != null;
+}
+function getAuthedServerSnapshot(): boolean {
+  return false;
+}
+
 export default function RoomPage() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>("parsing");
@@ -144,12 +159,10 @@ export default function RoomPage() {
   const selfSpeaking = useSpeaking(media.stream);
 
   // Podcast mode is for logged-in hosts only; anonymous guests get the plain
-  // call. `authed` is read in an effect so the server render never touches
-  // localStorage.
-  const [authed, setAuthed] = useState(false);
-  useEffect(() => {
-    setAuthed(getSession() != null);
-  }, []);
+  // call. Read through a store with a `false` server snapshot so the server
+  // render never touches localStorage — React resyncs to the real value right
+  // after hydration, the same flip the old mount effect produced.
+  const authed = useSyncExternalStore(noopSubscribe, getAuthedSnapshot, getAuthedServerSnapshot);
   // usePodcastTake's holdRolls and useEpisodeExchange's takeActive each want
   // the OTHER hook's live output in the same render — a genuine two-hook
   // cycle. Bridged with one render's lag via a ref (same idiom as the
@@ -165,6 +178,7 @@ export default function RoomPage() {
     peerIds: call.peers.map((p) => p.peerId),
     videoTrack: media.stream?.getVideoTracks()[0] ?? null,
     audioDeviceId: media.choice.audioDeviceId,
+    // eslint-disable-next-line react-hooks/refs -- the deliberate one-render-lag bridge documented above: usePodcastTake only ever reads holdRolls back out through holdRollsRef, from wire callbacks and user actions outside the render pass, so a value at most one commit stale is harmless and breaks the genuine two-hook cycle
     holdRolls: exchangeBusyRef.current,
   });
   // While the tape rolls the recorded tracks are frozen: no device toggles,
@@ -189,6 +203,7 @@ export default function RoomPage() {
     dcOpen: call.dcOpen,
   });
   // Available for usePodcastTake on the NEXT render — see the comment above.
+  // eslint-disable-next-line react-hooks/refs -- the write half of that same one-render-lag bridge; nothing in this render's output reads it, and promoting it to state would close the two-hook cycle it exists to break
   exchangeBusyRef.current = exchange.busy;
 
   // Debug mirror for e2e/phase2-e2e.js and e2e/phase5a-e2e.js — harmless in
@@ -218,6 +233,7 @@ export default function RoomPage() {
   // Arrival: read the fragment once, stash it, and strip it from the URL bar
   // via replaceState so the secret never lingers in history. Refresh recovers from the stash.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one atomic mount-only read-and-destroy: the fragment carries the E2EE secret, so it is stashed and scrubbed from history in the same pass, and any later snapshot read would find an already-erased hash
     setForceRelay(readForceTurn(window.location.search));
     const fromHash = parseRoomHash(window.location.hash);
     if (fromHash) {
