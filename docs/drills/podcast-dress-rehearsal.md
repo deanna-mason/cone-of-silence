@@ -13,6 +13,7 @@ this is the human half of the same acceptance.
 | 2 | Both phones cabled to their Mac (reliability + charge, not just the wireless handoff). |
 | 3 | MOTIV Mix closed on both machines. |
 | 4 | Mic meters peak ≈ -12 on both sides before ROLL TAPE. |
+| 5 | Headphones on BOTH hosts, and answer the panel's headphones question honestly — it re-asks before every take. Open speakers engages echo-guard (browser echo-cancellation on the tape): a safety net, not the quality path. The 8/4 rehearsal echo was an open-speakers rig recording raw. |
 
 ## Echo discriminator (F3, 2026-08-03 drill) — run BEFORE the 40-minute take
 
@@ -25,7 +26,7 @@ cellular is ideal). Ordinary call, ~5 minutes.
 | # | Step | Expect |
 |---|------|--------|
 | E1 | Host A cuts their mic and talks | The ghost reproduces: A's voice comes back through the machines after a beat |
-| E2 | Host B cuts their mic too (both room mics cut); A keeps talking | Machines go silent → echo loop proven, app cleared. Co-located seats wear headphones from here on (and for the take: open speakers would bleed call playback onto the raw tapes) |
+| E2 | Host B cuts their mic too (both room mics cut); A keeps talking | Machines go silent → echo loop proven, app cleared. Co-located seats wear headphones from here on (and for the take: open speakers would bleed call playback onto the raw tapes). A host who genuinely can't wear headphones must declare Open Speakers at roll time so echo-guard protects the tape |
 | E3 | Only if E2 still carries A's voice | STOP — real transmit leak. `chrome://webrtc-internals` on A's Mac → Create dump; do not proceed to the take; report |
 
 **Limit of this gate (learned 8/4):** it clears the *call*, not the *tape*.
@@ -38,7 +39,7 @@ rolling.** (Proof: the 8/4 take's raw tape carried a second faint start tone
 
 | # | Step | Expect |
 |---|------|--------|
-| 1 | Both hosts join one call, Tape Vault chosen on each | Roll Tape armed on both |
+| 1 | Both hosts join one call, Tape Vault chosen on each, headphones question answered on each | Roll Tape armed on both — it stays disabled until each host declares Headphones In / Open Speakers |
 | 2 | Either host hits ROLL TAPE | 3-2-1 countdown, both machines; tone mark audible on both at zero |
 | 3 | Let the take run ≥10 minutes | Reel Rolling on both, gauges climbing, no fault banner |
 | 4 | While rolling, check your own self-view against what the tape will hold | The self-view is the FULL letterboxed frame — the whole recorded picture, nothing cropped away. It is displayed MIRRORED while the tape is not; that is orientation only. This is a framing check, not an orientation one — confirm nothing is being cut off, and ignore the flip |

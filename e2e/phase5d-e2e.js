@@ -398,6 +398,10 @@ function waitXfer(page, value, timeoutMs) {
 /** Roll -> wait rolling on both -> hold -> Cut -> wait armed on both
  *  (e2e/phase5b-e2e.js idiom). */
 async function rollAndCut(pageA, pageB, holdMs) {
+  // Per-take headphones declaration (echo-guard) — both sides, before each
+  // roll; it resets on every return to armed.
+  await pageA.getByRole("button", { name: "Headphones In" }).click();
+  await pageB.getByRole("button", { name: "Headphones In" }).click();
   await pageA.getByRole("button", { name: "Roll Tape" }).click();
   await Promise.all([waitPod(pageA, "rolling", 5000), waitPod(pageB, "rolling", 5000)]);
   await new Promise((r) => setTimeout(r, holdMs));
