@@ -1,11 +1,13 @@
 # 🕵️ Cone of Silence
 
 An invite-only recording studio and call lobby, styled like a 1960s spy
-dossier. Invited users get a zero-PII account, a WebRTC call room, and a
-**Studio** that enhances podcast recordings with a real ffmpeg chain
-(denoise → de-ess → compress → EQ → loudness) on a server I run.
+dossier. Invited users get a zero-PII account, an end-to-end encrypted
+WebRTC call room, a podcast mode where each host records locally and a
+real ffmpeg darkroom develops the episode, and a **Studio** that enhances
+uploaded recordings (denoise → de-ess → compress → EQ → loudness) on a
+server I run.
 
-**Live:** https://coneofsilence.app · **Stack:** Next.js + Tailwind (Vercel),
+**Live:** https://www.coneofsilence.app · **Stack:** Next.js + Tailwind (Vercel),
 Express + WebSockets + ffmpeg (DigitalOcean), Supabase Postgres.
 
 ## Why this stack
@@ -23,7 +25,7 @@ Express + WebSockets + ffmpeg (DigitalOcean), Supabase Postgres.
 | Route | Page |
 | --- | --- |
 | `/` | Lobby — invite-token check gates room creation |
-| `/room` | WebRTC call (up to four) |
+| `/room` | E2EE WebRTC call (up to four) · podcast recording mode |
 | `/account` | Invite-only register / login (codename + passphrase only) |
 | `/studio` | Upload → watch it process → listen, download, or burn |
 | `/admin` | Operator console: mint / relabel / revoke / purge invite tokens |
@@ -42,7 +44,7 @@ Express + WebSockets + ffmpeg (DigitalOcean), Supabase Postgres.
 Everything is validated before touching the database and fails **closed**
 (store down ⇒ 503, never a silent grant). Constant-time login, lockouts on
 repeated failures, 1 GiB/file + 2 GiB/user upload caps, owner-scoped 404s.
-130 vitest tests cover happy and sad paths.
+171 vitest tests cover happy and sad paths.
 
 ## Schema
 
@@ -67,14 +69,13 @@ policies, so only the server's service-role key can read anything.
 
 ## Design decisions
 
-- **Zero PII.** An account is a codename and a passphrase hash; invites are
-  stored as hashes. There is nothing worth stealing.
+- **End-to-end encrypted.** The room secret rides the URL fragment and never
+  reaches the server; frames are encrypted client-side, so signaling and TURN
+  carry ciphertext only ([threat model](docs/security-model.md)).
 - **Fail closed.** Every endpoint validates before touching the database;
   store down means 503, never a silent grant.
 - **Theme follows the OS.** One set of semantic CSS variables flips light and
   dark; no component ever branches on theme.
-- **P2P first.** Calls try a direct path and fall back to a TURN relay only
-  on hostile networks — cheapest path that still works on cellular.
 - **Enhancement is server-side.** The ffmpeg chain runs on hardware I control
   so every listener gets the same result, regardless of their browser.
 
