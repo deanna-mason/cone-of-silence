@@ -93,6 +93,17 @@ export class PeerLink {
    *  and since that throw happens inside `ontrack` BEFORE the
    *  `onRemoteStream` call below it, the tile would silently never appear. */
   private readonly attachedReceivers = new WeakSet<RTCRtpReceiver>();
+  /** Same guard on the sending side. addTrack() is spec-allowed to REUSE an
+   *  existing sender whose track is null rather than create one, so the
+   *  replaceStream add-path can hand back a sender that was already wired —
+   *  and createEncodedStreams() throws on a second pipe. */
+  private readonly attachedSenders = new WeakSet<RTCRtpSender>();
+  /** The kind each sender was created to carry. `sender.track.kind` is the
+   *  obvious source, but it is null on a sender we cleared with
+   *  replaceTrack(null) (the new stream had no track of that kind) — and a
+   *  sender whose kind is unknowable is a sender replaceStream can never
+   *  re-populate. Recorded at addTrack time; survives the track going null. */
+  private readonly senderKinds = new WeakMap<RTCRtpSender, string>();
   private makingOffer = false;
   private ignoreOffer = false;
 
@@ -156,16 +167,7 @@ export class PeerLink {
         // and a codec pin — any throw on that dead path destroys the whole
         // link, audio included (the one-way-audio defect). Skip it.
         if (track.readyState === "ended") continue;
-        const sender = pc.addTrack(track, opts.localStream);
-        // Additivity (D15): when e2ee is absent, this loop body is IDENTICAL
-        // to pre-5D — no getTransceivers() call, no transform, no pin — so a
-        // pre-5D fake pc (no getTransceivers/setCodecPreferences) never sees
-        // these calls and every predating test stays green unchanged.
-        if (e2ee) {
-          this.attachSenderTransform(sender);
-          const transceiver = pc.getTransceivers().find((t) => t.sender === sender);
-          if (transceiver) this.applyVp9Pin(transceiver);
-        }
+        this.addLocalTrack(track, opts.localStream);
       }
 
       pc.onnegotiationneeded = async () => {
@@ -245,12 +247,56 @@ export class PeerLink {
     }
   }
 
-  /** Device switch: swap sender tracks in place — no renegotiation storm. */
+  /** The ONE place a local track becomes a sender — construction's addTrack
+   *  loop and replaceStream's add-path both come through here, so a sender
+   *  born mid-call is indistinguishable from one born at construction: same
+   *  E2EE encrypt transform, same VP9 codec pin, same recorded kind. Adding
+   *  a sender by any other route would produce media the far side cannot
+   *  decrypt (no transform) or cannot packetize (no pin).
+   *
+   *  Additivity (D15): when e2ee is absent this body is IDENTICAL to pre-5D —
+   *  no getTransceivers() call, no transform, no pin — so a pre-5D fake pc
+   *  (no getTransceivers/setCodecPreferences) never sees these calls and
+   *  every predating test stays green unchanged. */
+  private addLocalTrack(track: MediaStreamTrack, stream: MediaStream): void {
+    const sender = this.pc.addTrack(track, stream);
+    this.senderKinds.set(sender, track.kind);
+    if (!this.opts.e2ee) return;
+    this.attachSenderTransform(sender);
+    const transceiver = this.pc.getTransceivers().find((t) => t.sender === sender);
+    if (transceiver) this.applyVp9Pin(transceiver);
+  }
+
+  /** Device switch: swap sender tracks in place, and ADD a sender for any
+   *  kind this link has none of.
+   *
+   *  That second half is the 8/5 re-drill fix (finding 3). Construction skips
+   *  ENDED tracks — correctly; a dead camera's sender used to take the whole
+   *  link down, audio included — so a link built while the camera was
+   *  unplugged (or while getLocalStream had fallen back to audio-only) has no
+   *  video sender at all. Swapping alone could never create one, so every
+   *  later camera pick silently reached nobody and the only recovery was the
+   *  OTHER side rejoining to force a rebuild. addTrack renegotiates through
+   *  the existing perfect-negotiation path (onnegotiationneeded → re-pin →
+   *  setLocalDescription → sendSignal), which is exactly how the initial
+   *  offer is made; a swap-only stream still renegotiates nothing. */
   async replaceStream(stream: MediaStream): Promise<void> {
+    const tracks = stream.getTracks();
+    // An ended track is never handed to a sender (85ebec6's guard): it can
+    // carry no media, so the honest swap is to null — which is precisely why
+    // senderKinds exists to remember what a nulled sender is for.
+    const liveTrack = (kind: string) => tracks.find((t) => t.kind === kind && t.readyState !== "ended") ?? null;
+    const covered = new Set<string>();
     for (const sender of this.pc.getSenders()) {
-      const kind = sender.track?.kind;
-      if (!kind) continue;
-      await sender.replaceTrack(stream.getTracks().find((t) => t.kind === kind) ?? null);
+      const kind = sender.track?.kind ?? this.senderKinds.get(sender);
+      if (!kind) continue; // a receive-only transceiver's sender — not ours to fill
+      covered.add(kind);
+      await sender.replaceTrack(liveTrack(kind));
+    }
+    for (const track of tracks) {
+      if (track.readyState === "ended" || covered.has(track.kind)) continue;
+      covered.add(track.kind);
+      this.addLocalTrack(track, stream);
     }
   }
 
@@ -267,14 +313,22 @@ export class PeerLink {
 
   /** Attaches an encrypt transform to a just-added local sender. No-op when
    *  opts.e2ee is absent (additivity — see PeerLinkOptions.e2ee's doc).
-   *  Senders are only ever created here (construction's addTrack loop); a
-   *  later replaceStream() call swaps the TRACK on this same sender via
-   *  replaceTrack, which never touches — and therefore never needs to
-   *  re-attach — `sender.transform` (it lives on the sender, not the
-   *  track), so existing transforms survive device switches for free. */
+   *  Senders are only ever created via addLocalTrack() — construction's
+   *  addTrack loop and replaceStream's add-path — and BOTH call this, so no
+   *  sender can ever carry plaintext. A plain track swap needs nothing here:
+   *  replaceTrack never touches `sender.transform` (it lives on the sender,
+   *  not the track), so existing transforms survive device switches free.
+   *
+   *  Guarded by `attachedSenders`, symmetric to the receiver side: addTrack
+   *  may reuse an existing null-track sender instead of creating one, and
+   *  createEncodedStreams() throws on a sender that already has a live
+   *  pipe — a throw that would propagate out of replaceStream and abandon
+   *  the device switch half-done. */
   private attachSenderTransform(sender: RTCRtpSender): void {
     const e2ee = this.opts.e2ee;
     if (!e2ee || !this.worker) return;
+    if (this.attachedSenders.has(sender)) return;
+    this.attachedSenders.add(sender);
     if (e2ee.api === "script-transform") {
       sender.transform = new RTCRtpScriptTransform(this.worker, { key: e2ee.mediaKey, side: "encrypt" });
     } else {
