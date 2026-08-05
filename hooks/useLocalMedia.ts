@@ -84,6 +84,27 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
     };
   }, []);
 
+  // Keep the picker lists live (8/5 drill: an unplugged Continuity Camera
+  // left a ghost entry and a replug never appeared, so there was no path to
+  // reselect a camera without rejoining). Display-list refresh only — no
+  // stream lifecycle is touched here.
+  useEffect(() => {
+    if (!enabled) return;
+    const md: MediaDevices | undefined = navigator.mediaDevices;
+    if (!md?.addEventListener) return;
+    let cancelled = false;
+    const refresh = () => {
+      void listDevices().then((lists) => {
+        if (!cancelled) setDevices(lists);
+      });
+    };
+    md.addEventListener("devicechange", refresh);
+    return () => {
+      cancelled = true;
+      md.removeEventListener("devicechange", refresh);
+    };
+  }, [enabled]);
+
   // Shared re-acquire behind switchDevice/flipCamera: swap to `next`, keep the
   // live mute state, release the old capture, and drop any stream a newer
   // re-acquire has already superseded (switchGen). The stream state change

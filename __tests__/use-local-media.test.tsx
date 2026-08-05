@@ -103,3 +103,26 @@ test("an explicit camera pick clears any prior facingMode", async () => {
   expect(choice.videoDeviceId).toBe("c2");
   expect(choice.facingMode).toBeUndefined();
 });
+
+test("devicechange re-reads the device lists (8/5 drill: replugged camera must appear)", async () => {
+  const listeners = new Map<string, () => void>();
+  vi.stubGlobal("navigator", {
+    mediaDevices: {
+      addEventListener: (type: string, fn: () => void) => listeners.set(type, fn),
+      removeEventListener: (type: string) => listeners.delete(type),
+    },
+  });
+  const { result, unmount } = await mountReady();
+  await waitFor(() => expect(result.current.devices.cameras.length).toBe(2));
+
+  listDevices.mockResolvedValueOnce({
+    mics: [],
+    cameras: [{ deviceId: "c1" }, { deviceId: "c2" }, { deviceId: "continuity" }],
+  });
+  act(() => listeners.get("devicechange")!());
+  await waitFor(() => expect(result.current.devices.cameras.length).toBe(3));
+
+  unmount();
+  expect(listeners.has("devicechange")).toBe(false);
+  vi.unstubAllGlobals();
+});

@@ -186,12 +186,16 @@ export default function RoomPage() {
     holdRolls: exchangeBusyRef.current,
   });
   // While the tape rolls the recorded tracks are frozen: no device toggles,
-  // and the self tile shows the true recorded frame.
-  const podcastLocked =
+  // and the self tile shows the true recorded frame. `fault` stays in the
+  // broad lock (exchange hold, call controls, honest crop) but NOT in the
+  // device-bar lock below: in a fault the take is already compromised and a
+  // device swap is the remedy — the 8/5 drill's unplugged camera left no
+  // path to reselect one without rejoining.
+  const takeInProgress =
     podcast.panel.kind === "countdown" ||
     podcast.panel.kind === "rolling" ||
-    podcast.panel.kind === "fault" ||
     podcast.panel.kind === "stopping";
+  const podcastLocked = takeInProgress || podcast.panel.kind === "fault";
   // Take provenance for the armed card's send affordance: until a reel has
   // actually rolled in THIS session, any sendable take is the restored
   // previous-session one (usePodcastTake re-reads it from localStorage on
@@ -546,7 +550,7 @@ export default function RoomPage() {
         cameras={media.devices.cameras}
         choice={media.choice}
         hasCamera={media.hasCamera}
-        locked={podcastLocked}
+        locked={takeInProgress}
         onSelectMic={(id) => void media.switchDevice("audio", id)}
         onSelectCamera={(id) => void media.switchDevice("video", id)}
         onFlip={() => void media.flipCamera()}
