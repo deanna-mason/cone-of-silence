@@ -243,6 +243,28 @@ describe("PartWriter", () => {
     expect(parsed.parts).toEqual(entries);
   });
 
+  it("finish() writes sidecarExtra keys into the sidecar JSON", async () => {
+    const dir = new FakeDirHandle();
+    const writer = new PartWriter(asDir(dir), "audio", 1000, { echoGuard: true });
+    await writer.append(new Blob([new Uint8Array(10)]));
+    await writer.finish();
+
+    const parsed = JSON.parse(new TextDecoder().decode(dir.files.get("audio.sidecar.json")!.committed));
+    expect(parsed.echoGuard).toBe(true);
+    expect(parsed.base).toBe("audio");
+    expect(Array.isArray(parsed.parts)).toBe(true);
+  });
+
+  it("sidecarExtra can never clobber base or parts", async () => {
+    const dir = new FakeDirHandle();
+    const writer = new PartWriter(asDir(dir), "audio", 1000, { base: "video", parts: "x" } as never);
+    await writer.finish();
+
+    const parsed = JSON.parse(new TextDecoder().decode(dir.files.get("audio.sidecar.json")!.committed));
+    expect(parsed.base).toBe("audio");
+    expect(Array.isArray(parsed.parts)).toBe(true);
+  });
+
   it("propagates a write() rejection out of append()", async () => {
     const dir = new FakeDirHandle();
     dir.failWriteFor.add("audio.part000");

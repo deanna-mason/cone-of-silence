@@ -115,6 +115,9 @@ export class PartWriter {
     private readonly dir: FileSystemDirectoryHandle,
     private readonly base: "video" | "audio",
     timesliceMs = 1000,
+    /** Extra top-level keys serialized into the sidecar JSON — provenance
+     *  (e.g. echoGuard), never structural. base/parts always win. */
+    private readonly sidecarExtra: Record<string, unknown> = {},
   ) {
     this.quota = Math.ceil(PART_TARGET_MS / timesliceMs);
   }
@@ -155,7 +158,7 @@ export class PartWriter {
     if (this.writable) await this.closeCurrentPart();
     const sidecar = await this.dir.getFileHandle(`${this.base}.sidecar.json`, { create: true });
     const writable = await sidecar.createWritable();
-    await writable.write(JSON.stringify({ base: this.base, parts: this.parts }, null, 2));
+    await writable.write(JSON.stringify({ ...this.sidecarExtra, base: this.base, parts: this.parts }, null, 2));
     await writable.close();
     return this.parts;
   }
