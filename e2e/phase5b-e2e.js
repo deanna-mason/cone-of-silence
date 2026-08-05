@@ -684,10 +684,17 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
       }
     }
 
-    await pageA.getByRole("button", { name: "File Away" }).click(); // dismiss A's xfer-done card
+    await pageA.getByRole("button", { name: "Dismiss" }).click(); // dismiss A's xfer-done card (renamed from "File Away", 5fd9399)
     await waitPod(pageA, "armed", 5000);
-    const sendHiddenAfterDismiss = await pageA.getByRole("button", { name: "Send Episode" }).isVisible();
-    check(sendHiddenAfterDismiss, "A dismisses the delivered card — armed, Send Episode offered again for the next episode");
+    // 5fd9399's delivered state: after delivery the armed card shows a static
+    // Episode Delivered marker and deliberately does NOT re-offer Send — a
+    // fresh take (check 4's roll) is what re-arms it.
+    const deliveredMarker = await pageA.getByText("◈ Episode Delivered").isVisible();
+    const sendGoneAfterDelivery = !(await pageA.getByRole("button", { name: "Send Episode" }).isVisible());
+    check(
+      deliveredMarker && sendGoneAfterDelivery,
+      "A dismisses the delivered card — armed shows Episode Delivered; Send re-arms only with a fresh take",
+    );
 
     // =====================================================================
     // Check 4: a second short real roll+cut mints a FRESH takeId (the only
@@ -695,6 +702,12 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // deviation note 1), whose disk content is then overwritten with the
     // synthetic fixture. A presses Send Episode -> sending begins.
     // =====================================================================
+    // B's "Episode Received" card is still up — dismiss it so B's armed panel
+    // (and its headphones declaration, which every new take now requires on
+    // BOTH sides) is reachable before the next roll.
+    await pageB.getByRole("button", { name: "Dismiss" }).click();
+    await waitPod(pageB, "armed", 5000);
+
     const priorA1 = await opfsTakeDirNames(pageA);
     await rollAndCut(pageA, pageB, 3000);
     const takeId2 = await newTakeDirName(pageA, priorA1);
