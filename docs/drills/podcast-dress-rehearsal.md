@@ -13,7 +13,7 @@ this is the human half of the same acceptance.
 | 2 | Both phones cabled to their Mac (reliability + charge, not just the wireless handoff). |
 | 3 | MOTIV Mix closed on both machines. |
 | 4 | Mic meters peak ≈ -12 on both sides before ROLL TAPE. |
-| 5 | Headphones on BOTH hosts, and answer the panel's headphones question honestly — it re-asks before every take. Open speakers engages echo-guard (browser echo-cancellation on the tape): a safety net, not the quality path. The 8/4 rehearsal echo was an open-speakers rig recording raw. |
+| 5 | **Headphones on BOTH hosts** — this is the only thing that prevents echo, and the panel re-asks before every take. Answering "Speakers" does NOT protect the tape: the browser refuses a second capture of an in-call mic its own echo canceller (measured 8/5), so a speakers host records the other host's voice off their own speakers and no later stage removes it. The declaration is a warning and a provenance stamp, nothing more. The 8/4 rehearsal echo was exactly this. |
 
 ## Echo discriminator (F3, 2026-08-03 drill) — run BEFORE the 40-minute take
 
@@ -26,7 +26,7 @@ cellular is ideal). Ordinary call, ~5 minutes.
 | # | Step | Expect |
 |---|------|--------|
 | E1 | Host A cuts their mic and talks | The ghost reproduces: A's voice comes back through the machines after a beat |
-| E2 | Host B cuts their mic too (both room mics cut); A keeps talking | Machines go silent → echo loop proven, app cleared. Co-located seats wear headphones from here on (and for the take: open speakers would bleed call playback onto the raw tapes). A host who genuinely can't wear headphones must declare Open Speakers at roll time so echo-guard protects the tape |
+| E2 | Host B cuts their mic too (both room mics cut); A keeps talking | Machines go silent → echo loop proven, app cleared. Co-located seats wear headphones from here on (and for the take: open speakers would bleed call playback onto the raw tapes). A host who genuinely cannot wear headphones should declare Speakers so both hosts know that tape will carry echo — it is a warning, not a remedy; that take is compromised by definition |
 | E3 | Only if E2 still carries A's voice | STOP — real transmit leak. `chrome://webrtc-internals` on A's Mac → Create dump; do not proceed to the take; report |
 
 **Limit of this gate (learned 8/4):** it clears the *call*, not the *tape*.

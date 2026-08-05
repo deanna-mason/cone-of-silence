@@ -12,9 +12,21 @@ echo is in the source recording, so no downstream fix can remove it.
 
 - A headphones toggle/check did not exist at rehearsal time. The per-take
   headphones declaration (Roll Tape gated on the answer, partner
-  visibility, echo-guard fault copy) shipped 8/5.
-- **Remedy: headphone re-take scheduled.** The rehearsal tape is
-  demo-usable only if the re-take falls through.
+  visibility) shipped 8/5.
+- **An "echo-guard" capture mode shipped alongside it and was withdrawn the
+  same day.** It asked the recording capture for `echoCancellation: true`
+  when a host declared open speakers. Measured on real hardware (all four
+  inputs on Deanna's Mac): that request returns `EC=true` standalone but
+  **silently returns `EC=false` whenever the call already holds the mic** —
+  which is always, in production. Chrome will not give a second concurrent
+  capture of a device its own echo canceller. The mode's fail-closed assert
+  fired correctly during a live attempt ("ECHO-GUARD FAILED") and blocked
+  the take; the protection it guarded could never have existed. The
+  declaration now warns and stamps provenance (`phones` in the audio
+  sidecar) instead. Fake-device e2e could not have caught this — fake
+  devices honor any constraint asked of them.
+- **Headphones are the only remedy.** A speakers host records bleed, full
+  stop. Re-take done on headphones 8/5.
 
 ## F2 — three mic silences, self-recovered without user action
 
