@@ -9,6 +9,7 @@ import { fireEvent } from "@testing-library/dom";
 const { signup } = vi.hoisted(() => ({ signup: vi.fn() }));
 vi.mock("@/lib/authApi", () => ({
   getSession: () => null,
+  getSessionSnapshot: () => null,
   login: vi.fn(),
   logout: vi.fn(),
   signup,

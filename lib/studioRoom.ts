@@ -38,6 +38,27 @@ export function readStudioRoom(): RoomKeys | null {
   }
 }
 
+// readStudioRoom() parses the stored JSON on every call, which would break
+// the referential stability useSyncExternalStore requires of getSnapshot.
+// This caches the parsed result keyed on the raw localStorage string, only
+// re-parsing when that string changes. Used by app/studio/page.tsx (Task 4).
+let cachedRawRoom: string | null = null;
+let cachedRoomSnapshot: RoomKeys | null = null;
+
+export function readStudioRoomSnapshot(): RoomKeys | null {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    raw = null;
+  }
+  if (raw !== cachedRawRoom) {
+    cachedRawRoom = raw;
+    cachedRoomSnapshot = readStudioRoom();
+  }
+  return cachedRoomSnapshot;
+}
+
 export function clearStudioRoom(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);

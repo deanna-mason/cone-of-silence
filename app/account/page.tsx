@@ -1,21 +1,34 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import {
-  AuthApiError,
-  getSession,
-  login,
-  logout,
-  signup,
-  type StoredSession,
-} from "@/lib/authApi";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { AuthApiError, getSessionSnapshot, login, logout, signup } from "@/lib/authApi";
 import { parseInviteFragment, pinStudioRoom, type InviteFragment } from "@/lib/studioRoom";
 import { buildInviteLink } from "@/lib/roomLink";
 
+// No native "session changed" event to subscribe to — login/signup/logout all
+// write to localStorage synchronously before their promise resolves, and the
+// busy-flag setState right after picks up the fresh getSessionSnapshot() read
+// on the next render. A no-op subscribe preserves the original "read once,
+// re-check on every render" behavior.
+function noopSubscribe() {
+  return () => {};
+}
+
+// Server render never touches localStorage (documented SSR contract below);
+// `ready` mirrors that via the same hydration-resync mechanism as `session`
+// so both flip from their placeholder values to real ones in the same pass —
+// same timing as the old mount effect's setSession + setReady pair.
+function getReadySnapshot(): boolean {
+  return true;
+}
+function getReadyServerSnapshot(): boolean {
+  return false;
+}
+
 export default function AccountPage() {
-  const [session, setSession] = useState<StoredSession | null>(null);
-  const [ready, setReady] = useState(false);
+  const session = useSyncExternalStore(noopSubscribe, getSessionSnapshot, () => null);
+  const ready = useSyncExternalStore(noopSubscribe, getReadySnapshot, getReadyServerSnapshot);
   const [logoutBusy, setLogoutBusy] = useState(false);
 
   // First-run "Seal Broken" screen: a combined invite carries the signup token
@@ -39,17 +52,13 @@ export default function AccountPage() {
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setSession(getSession());
-    setReady(true);
-  }, []);
-
   // Combined first-run invite: `#invite=<token>&r=<id>&s=<secret>` opens the
   // Seal Broken screen. The fragment is scrubbed via replaceState so the E2EE
   // secret never lingers in history — same idiom as the room page's arrival scrub.
   useEffect(() => {
     const parsed = parseInviteFragment(window.location.hash);
     if (!parsed) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- atomic read-then-scrub: the parse and the replaceState scrub are one mount-only act (see comment above — the E2EE secret must not linger in history), not a resubscribable snapshot.
     setInvite(parsed);
     window.history.replaceState(null, "", window.location.pathname);
   }, []);
@@ -78,8 +87,10 @@ export default function AccountPage() {
     setSignupError(null);
     setSignupBusy(true);
     try {
-      const s = await signup(signupToken.trim(), signupUsername.trim(), signupPassword);
-      setSession(s);
+      // saveSession() (inside signup()) writes localStorage before this
+      // resolves; setSignupBusy(false) below re-renders and the derived
+      // `session` snapshot picks up the fresh value — no separate setter needed.
+      await signup(signupToken.trim(), signupUsername.trim(), signupPassword);
     } catch (err) {
       setSignupError(err instanceof AuthApiError ? err.message : "channel unavailable");
     } finally {
@@ -93,8 +104,8 @@ export default function AccountPage() {
     setLoginError(null);
     setLoginBusy(true);
     try {
-      const s = await login(loginUsername.trim(), loginPassword);
-      setSession(s);
+      // Same store-resync-on-next-render idiom as handleSignup above.
+      await login(loginUsername.trim(), loginPassword);
     } catch (err) {
       if (err instanceof AuthApiError && err.status === 401) {
         setLoginError("credentials denied");
@@ -114,7 +125,8 @@ export default function AccountPage() {
     try {
       await logout();
     } finally {
-      setSession(null);
+      // logout() clears localStorage before this resolves; setLogoutBusy(false)
+      // re-renders and the derived `session` snapshot reads null.
       setLogoutBusy(false);
     }
   }

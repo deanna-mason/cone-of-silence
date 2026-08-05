@@ -72,6 +72,7 @@ export default function AdminConsole() {
 
   useEffect(() => {
     const stashed = readStashedSecret();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- auto-unlock must revalidate the stashed secret against the server on mount (see comment in refresh() above: an invalid stashed secret would otherwise keep auto-unlocking, and burning lockout attempts, on every reload); refresh is an async network call, not a render-derivable value.
     if (stashed) void refresh(stashed);
   }, [refresh]);
 
