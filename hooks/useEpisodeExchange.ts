@@ -662,8 +662,8 @@ export function mergePanel(take: PodcastPanelState, xchg: EpisodeExchange): Podc
     return take;
   }
   if (xchg.state !== null) return xchg.state;
-  // Spread, don't rebuild: armed carries the headphones-declaration fields
-  // (phones/lastPhones/partnerPhones/partnerCodename) that this merge must
+  // Spread, don't rebuild: armed carries fields (partnerCodename, and
+  // formerly the headphones declaration) that this merge must
   // hand through untouched — only the exchange's own two fields are its say.
   if (take.kind === "armed") return { ...take, canSend: xchg.canSend, delivered: xchg.delivered };
   return take;

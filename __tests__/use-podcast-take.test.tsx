@@ -287,7 +287,7 @@ describe("usePodcastTake", () => {
     });
   }
 
-  async function setup(overrides: Partial<Args> = {}, opts: { declare?: boolean } = {}) {
+  async function setup(overrides: Partial<Args> = {}) {
     const pair = new FakeBusPair();
     const bus = pair.bus(0);
     const videoTrack = fakeTrack();
@@ -307,13 +307,6 @@ describe("usePodcastTake", () => {
     const view = renderHook((p: Args) => usePodcastTake(p), { initialProps: props });
     // Let the mount effects (vault query, hello handshake) settle.
     await tick(1);
-    // Most tests exercise flows PAST the per-take headphones declaration —
-    // answer it up front so roll() isn't gated. Undeclared-state tests pass
-    // { declare: false }.
-    if (opts.declare !== false) {
-      act(() => view.result.current.actions.declarePhones("headphones"));
-      await tick(1);
-    }
     return { pair, partner, partnerCb, videoTrack, view, props };
   }
 
@@ -325,13 +318,6 @@ describe("usePodcastTake", () => {
    * grace window covers exactly the first of them.
    */
   async function rollToRolling(view: Awaited<ReturnType<typeof setup>>["view"]) {
-    // Every return to idle re-opens the declaration (per-take rule) — answer
-    // it again before a repeat roll, without clobbering a test's own choice.
-    const panel = view.result.current.panel;
-    if (panel.kind === "armed" && panel.phones === null) {
-      act(() => view.result.current.actions.declarePhones("headphones"));
-      await tick(1);
-    }
     act(() => view.result.current.actions.roll());
     await tick(3_600);
   }
@@ -589,8 +575,9 @@ describe("usePodcastTake", () => {
     view.rerender({ ...props, dcOpen: true });
     await tick(50);
     expect(view.result.current.partnerCodename).toBe("Falcon");
-    // 3 = mount announce + declaration announce (setup's declarePhones) + this rebuild's.
-    expect(pair.countSent(0, "pod/hello")).toBe(3);
+    // 2 = mount announce + this rebuild's. (Was 3 until 2026-08-05: the
+    // per-take declaration re-announced hello every time it changed.)
+    expect(pair.countSent(0, "pod/hello")).toBe(2);
     // No second ping round: a re-announce must not disturb an offset already
     // in hand (this can land mid-take).
     expect(pair.countSent(0, "pod/ping")).toBe(pingsAfterFirstOpen);
@@ -606,8 +593,9 @@ describe("usePodcastTake", () => {
     expect(view.result.current.partnerCodename).toBeNull();
     // …and we speak first, so a late joiner learns who we are (their own
     // announcement will not be auto-replied to — our reply latch is spent).
-    // 3 = mount announce + declaration announce (setup's declarePhones) + this one.
-    expect(pair.countSent(0, "pod/hello")).toBe(3);
+    // 2 = mount announce + this one. (Was 3 until 2026-08-05: the per-take
+    // declaration re-announced hello every time it changed.)
+    expect(pair.countSent(0, "pod/hello")).toBe(2);
   });
 
   // -------------------------------------------------------------------
@@ -967,129 +955,38 @@ describe("usePodcastTake", () => {
   });
 
   // -------------------------------------------------------------------
-  // The per-take headphones declaration (echo-guard, 2026-08-05).
+  // The per-take headphones declaration was REMOVED 2026-08-05 (Deanna).
+  // Tests p1/p4-p9 went with it. p2 and p3 are INVERTED and kept, because
+  // both guard a landmine the removal created: the declaration was wired
+  // into `roll()` as an early-return guard AND into `canAcceptRoll`, so
+  // deleting the UI alone would have left `phonesRef.current === null`
+  // forever — a proposer whose roll() silently did nothing, and an acceptor
+  // that silently ignored EVERY inbound proposal. Neither surfaces an error;
+  // podcast mode would simply have stopped recording.
   // -------------------------------------------------------------------
-  it("(p1) armed starts undeclared; declarePhones flips the panel and persists the memory", async () => {
-    const { view } = await setup({}, { declare: false });
-    expect(view.result.current.panel).toMatchObject({ kind: "armed", phones: null, lastPhones: null });
-
-    act(() => view.result.current.actions.declarePhones("speakers"));
-    await tick(1);
-    expect(view.result.current.panel).toMatchObject({ kind: "armed", phones: "speakers", lastPhones: "speakers" });
-    expect(localStorage.getItem("cos-phones-last")).toBe("speakers");
-  });
-
-  it("(p2) roll() is a no-op while undeclared — no pod/roll on the bus", async () => {
-    const { pair, view } = await setup({}, { declare: false });
+  it("(p2, inverted) roll() puts a pod/roll on the bus with nothing to declare first", async () => {
+    const { pair, view } = await setup();
     act(() => view.result.current.actions.roll());
     await tick(1_000);
-    expect(pair.countSent(0, "pod/roll")).toBe(0);
-    expect(view.result.current.panel.kind).toBe("armed");
+    expect(pair.countSent(0, "pod/roll")).toBe(1);
+    expect(view.result.current.panel.kind).toBe("countdown");
   });
 
-  it("(p3) an inbound proposal is quiet-ignored while undeclared — no ack, proposer aborts", async () => {
-    const { pair, view, partner, partnerCb } = await setup({}, { declare: false });
-    void view;
+  it("(p3, inverted) an inbound proposal is ACCEPTED — nothing gates it but a transfer", async () => {
+    const { pair, partner, partnerCb } = await setup();
     const takeId = partner.propose();
     expect(takeId).not.toBeNull();
     await tick(3_600);
-    expect(partnerCb.onAborted).toHaveBeenCalledWith(takeId);
+    expect(pair.countSent(0, "pod/roll-ack")).toBe(1);
+    expect(partnerCb.onAborted).not.toHaveBeenCalled();
+  });
+
+  it("a transfer in flight still quiet-ignores an inbound proposal (decision 8 survives)", async () => {
+    const { pair, partner, partnerCb } = await setup({ holdRolls: true });
+    const takeId = partner.propose();
+    await tick(3_600);
     expect(pair.countSent(0, "pod/roll-ack")).toBe(0);
-  });
-
-  it("(p4) the declaration resets on return to idle; the remembered answer survives", async () => {
-    const { view, partner } = await setup();
-    const stopHeartbeat = partnerHeartbeat(partner);
-    await rollToRolling(view);
-    expect(view.result.current.panel.kind).toBe("rolling");
-
-    act(() => view.result.current.actions.stop());
-    await tick(3_000); // through the stop drain
-    stopHeartbeat();
-    expect(view.result.current.panel).toMatchObject({
-      kind: "armed",
-      phones: null, // a NEW take needs a NEW answer…
-      lastPhones: "headphones", // …but the preselect hint remembers
-    });
-    expect(localStorage.getItem("cos-phones-last")).toBe("headphones");
-  });
-
-  it("(p5) declaring re-announces hello carrying the declaration", async () => {
-    const { pair } = await setup(); // setup declares "headphones"
-    const hellos = pair.sentLog
-      .filter((e) => e.from === 0 && (JSON.parse(e.text) as { t: string }).t === "pod/hello")
-      .map((e) => JSON.parse(e.text) as { phones?: unknown });
-    expect(hellos.length).toBe(2); // mount announce + declaration announce
-    expect("phones" in hellos[0]!).toBe(false);
-    expect(hellos[1]!.phones).toBe("headphones");
-  });
-
-  it("(p6) the partner's declaration surfaces on the panel and is retired with the roster", async () => {
-    const { pair, view, props, partner } = await setup();
-    expect(view.result.current.panel).toMatchObject({ kind: "armed", partnerPhones: null });
-
-    // The partner declares: their side re-announces carrying phones (the hook
-    // does this automatically; the bare far-side coordinator is driven by hand).
-    partner.dispose();
-    const declaredPartner = new TakeCoordinator(pair.bus(1), "Falcon", partnerCallbacks(), {
-      localPhones: () => "speakers",
-    });
-    declaredPartner.announce();
-    await tick(10);
-    expect(view.result.current.panel).toMatchObject({ kind: "armed", partnerPhones: "speakers" });
-
-    // A roster change retires the declaration together with the codename.
-    view.rerender({ ...props, peerIds: ["peer-2"] });
-    await tick(1);
-    expect(view.result.current.panel).toMatchObject({
-      kind: "armed",
-      partnerPhones: null,
-      partnerCodename: null,
-    });
-    declaredPartner.dispose();
-  });
-
-  it("(p7) a speakers declaration is stamped into the audio sidecar as provenance", async () => {
-    const { view, partner } = await setup({}, { declare: false });
-    act(() => view.result.current.actions.declarePhones("speakers"));
-    await tick(1);
-    const stopHeartbeat = partnerHeartbeat(partner);
-    await rollToRolling(view);
-    expect(view.result.current.panel.kind).toBe("rolling");
-    stopHeartbeat();
-
-    const audioWriter = H.state.partWriterExtras.find((w) => w.base === "audio");
-    expect(audioWriter?.extra).toEqual({ phones: "speakers" });
-    const videoWriter = H.state.partWriterExtras.find((w) => w.base === "video");
-    expect(videoWriter?.extra).toBeUndefined();
-  });
-
-  it("(p8) a headphones declaration is stamped the same way", async () => {
-    const { view, partner } = await setup();
-    const stopHeartbeat = partnerHeartbeat(partner);
-    await rollToRolling(view);
-    stopHeartbeat();
-    expect(H.state.partWriterExtras.find((w) => w.base === "audio")?.extra).toEqual({ phones: "headphones" });
-  });
-
-  // The declaration is a WARNING, not a capture mode: Chrome will not give a
-  // second capture of an in-call mic its own echo canceller (measured 8/5 —
-  // see lib/podcast/recordGraph.ts), so a speakers take must record exactly
-  // like a headphones take and must NOT fail. The 8/5 live failure was this
-  // path refusing to roll at all.
-  it("(p9) declaring speakers does NOT change capture and never blocks the roll", async () => {
-    const { view, partner } = await setup({}, { declare: false });
-    act(() => view.result.current.actions.declarePhones("speakers"));
-    await tick(1);
-    const stopHeartbeat = partnerHeartbeat(partner);
-    await rollToRolling(view);
-    stopHeartbeat();
-
-    expect(view.result.current.panel.kind).toBe("rolling");
-    expect(soundKlaxon).not.toHaveBeenCalled();
-    // Same single deviceId argument as any other take — no per-declaration
-    // constraint object reaches the graph at all.
-    expect(H.state.buildArgs).toEqual(["mic-1"]);
+    expect(partnerCb.onAborted).toHaveBeenCalledWith(takeId);
   });
 });
 

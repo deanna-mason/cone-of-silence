@@ -524,13 +524,12 @@ async function stopSelfVideoTrack(page) {
     check(true, "third leaves — Roll Tape returns on both");
 
     // ---- Check 3: A rolls — both reach countdown, then rolling, within 6s ----
-    // Per-take headphones declaration (echo-guard): Roll Tape is disabled on
-    // BOTH sides until each host answers — an undeclared acceptor quiet-ignores
-    // the proposal outright.
-    await pageA.getByRole("button", { name: "Headphones" }).click();
-    await pageB.getByRole("button", { name: "Headphones" }).click();
+    // The per-take headphones declaration was removed 2026-08-05; Roll Tape
+    // is ungated and opens a pre-roll reminder that must be confirmed. Only
+    // the PROPOSER sees it — the acceptor just gets the countdown.
     const t3 = Date.now();
     await pageA.getByRole("button", { name: "Roll Tape" }).click();
+    await pageA.getByRole("button", { name: "Roll It" }).click();
     await Promise.all([waitPod(pageA, "countdown", 3000), waitPod(pageB, "countdown", 3000)]);
     await Promise.all([waitPod(pageA, "rolling", 5000), waitPod(pageB, "rolling", 5000)]);
     const elapsed3 = Date.now() - t3;

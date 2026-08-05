@@ -17,17 +17,12 @@ function callbacks() {
     onSendEpisode: vi.fn(),
     onResendEpisode: vi.fn(),
     onDismissXfer: vi.fn(),
-    onDeclarePhones: vi.fn(),
   };
 }
 
-/** Armed-state phones fields, undeclared everywhere — spread then override. */
-const PHONES_NONE = {
-  phones: null,
-  lastPhones: null,
-  partnerPhones: null,
-  partnerCodename: null,
-} as const;
+/** Armed-state base. Carried the per-take headphones declaration until it was
+ *  removed 2026-08-05; partnerCodename is what is left. */
+const PHONES_NONE = { partnerCodename: null } as const;
 
 function renderState(state: PodcastPanelState) {
   const cb = callbacks();
@@ -75,93 +70,62 @@ describe("PodcastPanel", () => {
     expect(screen.queryByRole("button", { name: "Roll Tape" })).toBeNull();
   });
 
-  test("armed — Roll Tape fires onRoll once declared", () => {
-    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "headphones" });
-    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
-    expect(cb.onRoll).toHaveBeenCalledTimes(1);
-  });
-
-  test("armed — Roll Tape is disabled while undeclared", () => {
-    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
-    const roll = screen.getByRole("button", { name: "Roll Tape" }) as HTMLButtonElement;
-    expect(roll.disabled).toBe(true);
-    fireEvent.click(roll);
-    expect(cb.onRoll).not.toHaveBeenCalled();
-  });
-
-  test("armed — Headphones In / Open Speakers fire onDeclarePhones with the value", () => {
-    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
-    fireEvent.click(screen.getByRole("button", { name: "Headphones" }));
-    expect(cb.onDeclarePhones).toHaveBeenCalledWith("headphones");
-    fireEvent.click(screen.getByRole("button", { name: "Speakers" }));
-    expect(cb.onDeclarePhones).toHaveBeenCalledWith("speakers");
-  });
-
-  test("armed — the remembered answer is hinted while unanswered, and never counts as an answer", () => {
-    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, lastPhones: "speakers" });
-    expect(screen.getByRole("button", { name: "Speakers" }).hasAttribute("data-remembered")).toBe(true);
-    expect(screen.getByRole("button", { name: "Headphones" }).hasAttribute("data-remembered")).toBe(false);
-    // A hint is not an answer: Roll Tape is still gated.
-    expect((screen.getByRole("button", { name: "Roll Tape" }) as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  test("armed — answering collapses the pair to one chip that toggles the other way", () => {
-    // The pair costs more width than the row has once Send + Roll are present
-    // (measured — it pushed Roll Tape outside the border, 8/5), so the answer
-    // reads back as a single chip.
-    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers" });
-    expect(screen.queryByRole("button", { name: "Headphones" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Speakers" }));
-    expect(cb.onDeclarePhones).toHaveBeenCalledWith("headphones");
-    cleanup();
-    const cb2 = renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "headphones" });
-    expect(screen.queryByRole("button", { name: "Speakers" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Headphones" }));
-    expect(cb2.onDeclarePhones).toHaveBeenCalledWith("speakers");
-  });
-
-  test("armed — an unconfirmed partner is named; a confirmed pair says nothing", () => {
-    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream" });
-    expect(screen.getByText("icecream: not confirmed")).toBeDefined();
-    cleanup();
-    // Calm case: both on headphones — no status text at all. Silence is the
-    // default; the row is width-critical and a confirmed pair needs no words.
-    renderState({
-      kind: "armed", canSend: false, ...PHONES_NONE,
-      phones: "headphones", partnerCodename: "icecream", partnerPhones: "headphones",
-    });
-    expect(screen.queryByText(/icecream/)).toBeNull();
-  });
-
-  // The declaration cannot make a speakers take echo-free (Chrome won't give a
-  // second capture of an in-call mic its own echo canceller — recordGraph.ts),
-  // so the copy must WARN and must never claim protection. "echo-guard" as a
-  // promise was withdrawn 8/5 after it blocked a real take.
-  test("armed — an open-speakers side is named and warned, never reassured", () => {
-    renderState({
-      kind: "armed", canSend: false, ...PHONES_NONE, partnerCodename: "icecream", partnerPhones: "speakers",
-    });
-    expect(screen.getByText("icecream on open speakers — that tape will carry echo")).toBeDefined();
-    cleanup();
-    renderState({
-      kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers",
-      partnerCodename: "icecream", partnerPhones: "headphones",
-    });
-    expect(screen.getByText("You on open speakers — that tape will carry echo")).toBeDefined();
-    cleanup();
-    // Both sides on speakers: both named in one line.
-    renderState({
-      kind: "armed", canSend: false, ...PHONES_NONE, phones: "speakers",
-      partnerCodename: "icecream", partnerPhones: "speakers",
-    });
-    expect(screen.getByText("You + icecream on open speakers — that tape will carry echo")).toBeDefined();
-  });
-
-  test("armed — the kicker asks the question until it is answered", () => {
+  // The per-take headphones/speakers declaration was REMOVED 2026-08-05
+  // (Deanna): open speakers have no fix at this seam — Chrome will not give a
+  // second capture of an in-call mic its own echo canceller (recordGraph.ts) —
+  // so asking the question every take bought a gate and a provenance field but
+  // never a remedy. The remedy is a person putting headphones on, so the panel
+  // now reminds instead of interrogating.
+  test("armed — Roll Tape is always enabled; nothing gates it", () => {
     renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
-    expect(screen.getByText("◈ Headphones?")).toBeDefined();
-    cleanup();
-    renderState({ kind: "armed", canSend: false, ...PHONES_NONE, phones: "headphones" });
+    expect((screen.getByRole("button", { name: "Roll Tape" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test("armed — the declaration controls are gone", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    expect(screen.queryByRole("button", { name: "Headphones" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Speakers" })).toBeNull();
+    expect(screen.queryByText(/not confirmed/i)).toBeNull();
+    expect(screen.queryByText(/open speakers/i)).toBeNull();
+  });
+
+  test("armed — Roll Tape opens the reminder instead of rolling straight away", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    expect(cb.onRoll).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeDefined();
+  });
+
+  test("armed — the reminder names both things that ruined a real take", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    const dialog = screen.getByRole("dialog");
+    // 8/4 rehearsal: a co-host on open speakers baked ~465ms of echo into her
+    // raw tape, unrecoverable in post.
+    expect(dialog.textContent).toMatch(/headphones/i);
+    // 7/30 dress rehearsal: an incoming call steals the Continuity Camera
+    // mid-take.
+    expect(dialog.textContent).toMatch(/do not disturb/i);
+  });
+
+  test("armed — confirming the reminder rolls once and closes it", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    fireEvent.click(screen.getByRole("button", { name: /roll it/i }));
+    expect(cb.onRoll).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("armed — backing out of the reminder rolls nothing", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    fireEvent.click(screen.getByRole("button", { name: /not yet/i }));
+    expect(cb.onRoll).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("armed — the kicker is a steady label, no longer a question", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
     expect(screen.getByText("◈ Ready to Roll")).toBeDefined();
   });
 
@@ -205,8 +169,6 @@ describe("PodcastPanel", () => {
       localBytes: 2_400_000,
       partnerBytes: 2_100_000,
       partnerCodename: "Falcon",
-      phones: "headphones",
-      partnerPhones: "headphones",
     });
     expect(screen.getByText("◈ Reel Rolling")).toBeDefined();
     expect(screen.getByText("02:05")).toBeDefined();
@@ -222,35 +184,13 @@ describe("PodcastPanel", () => {
       localBytes: 0,
       partnerBytes: 0,
       partnerCodename: null,
-      phones: null,
-      partnerPhones: null,
     });
     expect(screen.getByText("You 0.0MB · Partner 0.0MB")).toBeDefined();
   });
 
-  test("rolling — open-speakers declarations get a loud marker; both-headphones stays silent", () => {
-    renderState({
-      kind: "rolling",
-      elapsedS: 10,
-      localBytes: 0,
-      partnerBytes: 0,
-      partnerCodename: "Falcon",
-      phones: "speakers",
-      partnerPhones: "speakers",
-    });
-    expect(screen.getByText("YOU + Falcon: OPEN SPEAKERS")).toBeDefined();
-    cleanup();
-    renderState({
-      kind: "rolling",
-      elapsedS: 10,
-      localBytes: 0,
-      partnerBytes: 0,
-      partnerCodename: "Falcon",
-      phones: "headphones",
-      partnerPhones: "headphones",
-    });
-    expect(screen.queryByText(/OPEN SPEAKERS/)).toBeNull();
-  });
+  // The rolling-state open-speakers marker was removed with the declaration
+  // that fed it (2026-08-05): a warning mid-take is too late to act on, and
+  // the pre-roll reminder covers the moment that can still change something.
 
   test("fault — lists a local AND a remote fault, Acknowledge fires onDismissFault", () => {
     const cb = renderState({

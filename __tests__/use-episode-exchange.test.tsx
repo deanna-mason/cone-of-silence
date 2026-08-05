@@ -1006,7 +1006,7 @@ describe("useEpisodeExchange", () => {
     const xchg = fakeExchange({ state: sendingState });
     const takeStates: PodcastPanelState[] = [
       { kind: "countdown", secondsLeft: 3 },
-      { kind: "rolling", elapsedS: 1, localBytes: 0, partnerBytes: 0, partnerCodename: null, phones: null, partnerPhones: null },
+      { kind: "rolling", elapsedS: 1, localBytes: 0, partnerBytes: 0, partnerCodename: null },
       { kind: "stopping" },
       { kind: "fault", faults: [], partnerCodename: null },
     ];
@@ -1019,7 +1019,7 @@ describe("useEpisodeExchange", () => {
     const doneState: ExchangePanelState = { kind: "xfer-done", direction: "receive", totalBytes: 5 };
     const xchg = fakeExchange({ state: doneState });
     const takeStates: PodcastPanelState[] = [
-      { kind: "armed", canSend: true, phones: null, lastPhones: null, partnerPhones: null, partnerCodename: null },
+      { kind: "armed", canSend: true, partnerCodename: null },
       { kind: "not-two", count: 3 },
       { kind: "vault-needed", permission: "unset" },
       { kind: "link-down" },
@@ -1035,9 +1035,6 @@ describe("useEpisodeExchange", () => {
     // spreads the take state rather than rebuilding it (echo-guard, 8/5).
     const ARMED = {
       kind: "armed",
-      phones: "speakers",
-      lastPhones: "headphones",
-      partnerPhones: "headphones",
       partnerCodename: "Falcon",
     } as const;
     expect(mergePanel({ ...ARMED, canSend: false }, fakeExchange({ canSend: true }))).toEqual({

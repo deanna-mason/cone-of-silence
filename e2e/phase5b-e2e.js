@@ -505,12 +505,10 @@ async function seedSyntheticFixture(page, takeDir, partBytes, partsPerStream) {
  *  "short REAL take" idiom from e2e/phase5a-e2e.js's Checks 3/6, generalized
  *  into one helper since this scenario needs it twice. */
 async function rollAndCut(pageA, pageB, holdMs) {
-  // The per-take headphones declaration resets on every return to armed —
-  // answer it on BOTH sides before each roll (an undeclared acceptor
-  // quiet-ignores the proposal; the proposer's button is disabled).
-  await pageA.getByRole("button", { name: "Headphones" }).click();
-  await pageB.getByRole("button", { name: "Headphones" }).click();
+  // The per-take headphones declaration was removed 2026-08-05. Roll Tape is
+  // ungated; it opens a pre-roll reminder the PROPOSER confirms.
   await pageA.getByRole("button", { name: "Roll Tape" }).click();
+  await pageA.getByRole("button", { name: "Roll It" }).click();
   await Promise.all([waitPod(pageA, "rolling", 5000), waitPod(pageB, "rolling", 5000)]);
   await new Promise((r) => setTimeout(r, holdMs));
   await pageA.getByRole("button", { name: "Cut" }).click();
@@ -703,8 +701,8 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // synthetic fixture. A presses Send Episode -> sending begins.
     // =====================================================================
     // B's "Episode Received" card is still up — dismiss it so B's armed panel
-    // (and its headphones declaration, which every new take now requires on
-    // BOTH sides) is reachable before the next roll.
+    // is reachable before the next roll. (It also carried a headphones
+    // declaration that had to be re-answered here, until 2026-08-05.)
     await pageB.getByRole("button", { name: "Dismiss" }).click();
     await waitPod(pageB, "armed", 5000);
 

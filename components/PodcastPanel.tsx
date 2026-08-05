@@ -1,13 +1,17 @@
-// components/PodcastPanel.tsx — pure presentational chrome for podcast mode.
-// ALL state arrives via props; no hooks, no local state. Sits above the tile
-// grid as a slim row (3rem at rest). Live-telemetry states hold that height
-// exactly (ROW) so a take never costs tile space; states whose static
-// MESSAGE is the point may grow to a second line rather than ellipsize
-// (ROW_WRAP), as may the fault banner. The no-scroll rule owns the viewport;
-// this panel is chrome.
+// components/PodcastPanel.tsx — presentational chrome for podcast mode.
+// Every piece of TAKE state arrives via props. The one exception is the
+// pre-roll reminder's open/closed flag (2026-08-05): it is ephemeral
+// presentation with no meaning outside this component and nothing upstream
+// needs to observe it, so lifting it would only widen the hook's surface.
+// Sits above the tile grid as a slim row (3rem at rest). Live-telemetry
+// states hold that height exactly (ROW) so a take never costs tile space;
+// states whose static MESSAGE is the point may grow to a second line rather
+// than ellipsize (ROW_WRAP), as may the fault banner. The no-scroll rule owns
+// the viewport; this panel is chrome — the reminder is a fixed overlay for
+// that reason, and never affects the row's geometry.
 "use client";
 
-import type { Phones } from "@/lib/podcast/takeProtocol";
+import { useState } from "react";
 import type { Fault, FaultCause } from "@/lib/podcast/watchdog";
 
 export type PodcastPanelState =
@@ -21,12 +25,6 @@ export type PodcastPanelState =
       kind: "armed";
       canSend: boolean;
       delivered?: boolean;
-      /** This host's per-take headphones declaration — null until answered;
-       *  Roll Tape stays disabled while null. */
-      phones: Phones | null;
-      /** The remembered previous answer (preselect hint only — never rolls). */
-      lastPhones: Phones | null;
-      partnerPhones: Phones | null;
       partnerCodename: string | null;
       /** The sendable take was restored from a previous session (reload
        *  recovery) — nothing has rolled in THIS session yet, so the send
@@ -41,8 +39,6 @@ export type PodcastPanelState =
       localBytes: number;
       partnerBytes: number;
       partnerCodename: string | null;
-      phones: Phones | null;
-      partnerPhones: Phones | null;
     }
   | { kind: "fault"; faults: Fault[]; partnerCodename: string | null }
   | { kind: "stopping" }
@@ -78,7 +74,6 @@ export interface PodcastPanelProps {
   onGrantVault(): void;
   onRoll(): void;
   onStop(): void;
-  onDeclarePhones(phones: Phones): void;
   onDismissFault(): void;
   onSendEpisode(): void;
   onResendEpisode(): void;
@@ -145,18 +140,82 @@ function pctOf(current: number, total: number): number {
   return total > 0 ? Math.min(100, (current / total) * 100) : 0;
 }
 
+/**
+ * The pre-roll reminder (2026-08-05, replaces the per-take headphones
+ * declaration).
+ *
+ * The declaration asked "headphones or open speakers?" every take and gated
+ * Roll Tape on the answer. It was withdrawn because the honest answer to
+ * "speakers" is nothing: Chrome will not give a second capture of an in-call
+ * mic its own echo canceller (measured, see recordGraph.ts), so an
+ * open-speakers host records the partner's voice off their own speakers and
+ * nothing downstream removes it. A gate that can only ever say "yes, that
+ * will be bad" is a toll, not a safeguard — the remedy is a person putting
+ * headphones on before the tape rolls, which is what this says.
+ *
+ * Both lines are things that actually cost a real take:
+ *  - 8/4 dress rehearsal: a co-host on open speakers baked ~465ms of echo
+ *    into her raw tape. Unrecoverable in post; the take was scrapped.
+ *  - 7/30 rehearsal: an incoming call stole the Continuity Camera mid-take.
+ *
+ * Fixed overlay, not an inline row: the panel is chrome under the no-scroll
+ * rule and must never grow the tile grid's budget.
+ */
+function RollReminder({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-6">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="roll-reminder-title"
+        className="hairline w-full max-w-md border bg-inset p-6"
+      >
+        <p className="kicker text-sienna">Before You Roll</p>
+        <h2
+          id="roll-reminder-title"
+          className="mt-2 font-display text-3xl tracking-[0.04em] text-ink"
+        >
+          Two Things
+        </h2>
+
+        <ul className="mt-4 space-y-3 font-body text-ink-soft">
+          <li>
+            <span className="text-ink">Headphones on — both chairs.</span> Open speakers bleed the
+            other voice into your tape, and nothing downstream can take it back out.
+          </li>
+          <li>
+            <span className="text-ink">Phones on Do Not Disturb.</span> An incoming call steals the
+            camera mid-take.
+          </li>
+        </ul>
+
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button type="button" onClick={onConfirm} className={`${CTA_BUTTON} shrink-0`}>
+            Roll It
+          </button>
+          <button type="button" onClick={onCancel} className={GHOST_BUTTON}>
+            Not Yet
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PodcastPanel({
   state,
   onChooseVault,
   onGrantVault,
   onRoll,
   onStop,
-  onDeclarePhones,
   onDismissFault,
   onSendEpisode,
   onResendEpisode,
   onDismissXfer,
 }: PodcastPanelProps) {
+  // The documented exception to this component's props-only rule — see the
+  // file header. Declared before the switch so it stays unconditional.
+  const [rollReminderOpen, setRollReminderOpen] = useState(false);
   switch (state.kind) {
     case "unsupported":
       return (
@@ -209,90 +268,13 @@ export default function PodcastPanel({
       );
 
     case "armed": {
-      const declared = state.phones !== null;
-      const partnerName = state.partnerCodename ?? "Partner";
-      const phoneButton = (p: Phones, label: string) => {
-        const remembered = !declared && state.lastPhones === p;
-        return (
-          <button
-            type="button"
-            onClick={() => onDeclarePhones(p)}
-            aria-pressed={state.phones === p}
-            data-remembered={remembered ? "" : undefined}
-            className={
-              state.phones === p
-                ? "kicker border border-brass px-3 py-2 text-brass"
-                : `kicker border px-3 py-2 text-ink-soft transition hover:border-brass hover:text-signal ${
-                    remembered ? "border-dashed border-brass/60" : "border-ink-faint/30"
-                  }`
-            }
-          >
-            {label}
-          </button>
-        );
-      };
-      // Whichever sides are on open speakers is the ONE thing worth shouting
-      // here: their tape records the other host's voice off their speakers and
-      // nothing downstream removes it (recordGraph.ts). Everything else is
-      // quiet — a confirmed pair says so once, softly.
-      const onSpeakers = [
-        state.phones === "speakers" ? "You" : null,
-        state.partnerPhones === "speakers" ? partnerName : null,
-      ].filter(Boolean);
       return (
-        // ROW_WRAP, not ROW: this row carries the most controls of any panel
-        // state (declaration + Send + Roll) and MUST wrap rather than spill
-        // its buttons outside the border — the 8/5 sighting, at max-w-3xl.
+        // ROW_WRAP, not ROW: this row still carries Send + Roll and MUST wrap
+        // rather than spill its buttons outside the border — the 8/5 sighting,
+        // at max-w-3xl. (It carried the declaration pair too until 8/5, which
+        // is what tipped it over in the first place.)
         <div className={ROW_WRAP}>
-          <p className="kicker shrink-0 text-sienna">
-            {declared ? "◈ Ready to Roll" : "◈ Headphones?"}
-          </p>
-          {/* The per-take headphones declaration (2026-08-05): Roll Tape stays
-              disabled until this take's answer is given — the 8/4 rehearsal
-              echo came from an undeclared open-speakers rig. The remembered
-              answer is only a dashed hint, never an answer.
-              Once answered the pair COLLAPSES to a single chip that toggles:
-              this row is width-critical (measured — two persistent buttons
-              plus Send plus Roll overflow max-w-3xl and push Roll Tape
-              outside the border, the 8/5 sighting), and the answer still
-              reads back at a glance. */}
-          {declared ? (
-            <button
-              type="button"
-              onClick={() => onDeclarePhones(state.phones === "speakers" ? "headphones" : "speakers")}
-              title={
-                state.phones === "speakers"
-                  ? "On open speakers — click to switch to headphones"
-                  : "On headphones — click to switch to open speakers"
-              }
-              className={`kicker shrink-0 border px-3 py-2 ${
-                state.phones === "speakers"
-                  ? "border-vermilion text-vermilion"
-                  : "border-brass text-brass"
-              }`}
-            >
-              {state.phones === "speakers" ? "Speakers" : "Headphones"}
-            </button>
-          ) : (
-            <div className="flex shrink-0 items-center gap-2">
-              {phoneButton("headphones", "Headphones")}
-              {phoneButton("speakers", "Speakers")}
-            </div>
-          )}
-          {/* Silence is the calm default. A confirmed headphones pair needs no
-              words — squeezed into the leftover flex space it only ever
-              rendered as an unreadable stub anyway. When there IS something to
-              say it takes a FULL line (w-full basis in this wrapping row) so
-              the warning is never the thing that gets truncated. */}
-          {onSpeakers.length > 0 ? (
-            <p className="w-full min-w-0 truncate font-body text-sm text-vermilion">
-              {onSpeakers.join(" + ")} on open speakers — that tape will carry echo
-            </p>
-          ) : state.partnerPhones === null ? (
-            <p className="w-full min-w-0 truncate font-body text-sm text-sienna">
-              {partnerName}: not confirmed
-            </p>
-          ) : null}
+          <p className="kicker shrink-0 text-sienna">◈ Ready to Roll</p>
           <span className="flex-1" aria-hidden />
           {/* Once this take has been delivered, a static in-theme marker
               (text-brass = static positive) replaces Send Episode — a second
@@ -307,14 +289,25 @@ export default function PodcastPanel({
               </button>
             )
           )}
+          {/* Roll Tape is no longer gated on anything — it opens the reminder,
+              and the reminder rolls. See RollReminder for why the question
+              became a reminder. */}
           <button
             type="button"
-            onClick={onRoll}
-            disabled={!declared}
-            className={`${CTA_BUTTON} shrink-0 disabled:cursor-not-allowed disabled:opacity-40`}
+            onClick={() => setRollReminderOpen(true)}
+            className={`${CTA_BUTTON} shrink-0`}
           >
             Roll Tape
           </button>
+          {rollReminderOpen && (
+            <RollReminder
+              onCancel={() => setRollReminderOpen(false)}
+              onConfirm={() => {
+                setRollReminderOpen(false);
+                onRoll();
+              }}
+            />
+          )}
         </div>
       );
     }
@@ -341,21 +334,11 @@ export default function PodcastPanel({
             You {formatMB(state.localBytes)} · {state.partnerCodename ?? "Partner"}{" "}
             {formatMB(state.partnerBytes)}
           </p>
-          {/* Loud marker ONLY for open-speakers rigs — that tape is recording
-              the other host's voice off the speakers and nothing downstream
-              removes it. Both-headphones takes say nothing here; silence is
-              the calm default, the marker is what must not be missed. */}
-          {(state.phones === "speakers" || state.partnerPhones === "speakers") && (
-            <p className="kicker hidden shrink-0 text-vermilion sm:block">
-              {[
-                state.phones === "speakers" ? "YOU" : null,
-                state.partnerPhones === "speakers" ? (state.partnerCodename ?? "PARTNER") : null,
-              ]
-                .filter(Boolean)
-                .join(" + ")}
-              {": OPEN SPEAKERS"}
-            </p>
-          )}
+          {/* The open-speakers marker lived here until 2026-08-05. It went out
+              with the declaration that fed it: nobody was answering it
+              truthfully under time pressure, and a warning mid-take is too
+              late to act on anyway. The reminder now fires before the roll,
+              which is the only moment it can change anything. */}
           <button
             type="button"
             onClick={onStop}

@@ -20,7 +20,7 @@ import { getSessionSnapshot } from "@/lib/authApi";
 import { soundKlaxon } from "@/lib/podcast/klaxon";
 import { buildRecordGraph, type RecordGraph } from "@/lib/podcast/recordGraph";
 import { TakeRecorder, type RecorderFault } from "@/lib/podcast/recorder";
-import { COUNTDOWN_MS, TakeCoordinator, type Phones } from "@/lib/podcast/takeProtocol";
+import { COUNTDOWN_MS, TakeCoordinator } from "@/lib/podcast/takeProtocol";
 import {
   chooseVault as chooseVaultFolder,
   openTakeDir,
@@ -61,21 +61,6 @@ function writeLastTakeId(takeId: string): void {
     localStorage.setItem(LAST_TAKE_KEY, JSON.stringify({ takeId, at: Date.now() }));
   } catch {
     // best-effort — a failed write only costs the reload-recovery convenience
-  }
-}
-
-/** localStorage key for the REMEMBERED headphones answer — a preselect hint
- *  only. The per-take declaration itself always resets to null (echo-guard,
- *  2026-08-05): a remembered answer that silently rolls is exactly the
- *  stale-state failure that put echo on the 8/4 rehearsal tape. */
-export const PHONES_KEY = "cos-phones-last";
-
-function readLastPhones(): Phones | null {
-  try {
-    const v = localStorage.getItem(PHONES_KEY);
-    return v === "headphones" || v === "speakers" ? v : null;
-  } catch {
-    return null;
   }
 }
 
@@ -145,10 +130,6 @@ export interface PodcastTake {
   actions: {
     chooseVault(): Promise<void>;
     grantVault(): Promise<void>;
-    /** The per-take headphones answer — armed-state only; resets on every
-     *  return to idle. "speakers" warns (and is stamped into the tape's
-     *  sidecar); it cannot make the recording echo-free — see recordGraph.ts. */
-    declarePhones(phones: Phones): void;
     roll(): void;
     stop(): void;
     dismissFault(): void;
@@ -222,12 +203,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const [phase, setPhase] = useState<Phase>("idle");
   const [countdownS, setCountdownS] = useState(0);
   const [partnerCodename, setPartnerCodename] = useState<string | null>(null);
-  // The per-take headphones declaration: null until this take's answer is
-  // given, reset on every return to idle. lastPhones is only the preselect
-  // hint. (Client-only hook — the initializer never runs during SSR.)
-  const [phones, setPhones] = useState<Phones | null>(null);
-  const [lastPhones, setLastPhones] = useState<Phones | null>(readLastPhones);
-  const [partnerPhones, setPartnerPhones] = useState<Phones | null>(null);
   const [faults, setFaults] = useState<Fault[]>([]);
   const [startFault, setStartFault] = useState<Fault | null>(null);
   const [dismissedKey, setDismissedKey] = useState("");
@@ -287,19 +262,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // openTakeDir — hasn't finished yet). startRecorders plays it the instant
   // recorder.start() returns — see the comment there.
   const pendingMarkRef = useRef(false);
-  // The coordinator's localPhones dep and startRecorders read the declaration
-  // outside React's render pass — same ref idiom as `latest`/`holdRollsRef`.
-  const phonesRef = useRef<Phones | null>(null);
-
-  function clearPhones(): void {
-    phonesRef.current = null;
-    setPhones(null);
-  }
-
   function goPhase(next: Phase): void {
-    // Every return to idle re-opens the declaration: a NEW take needs a NEW
-    // answer (per-take rule — the remembered answer is only a preselect hint).
-    if (next === "idle" && phaseRef.current !== "idle") clearPhones();
     phaseRef.current = next;
     setPhase(next);
   }
@@ -393,12 +356,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       return;
     }
 
-    // The declaration does NOT change how we capture — Chrome cannot give a
-    // second capture of an in-call mic its own echo canceller (see the
-    // measurement in recordGraph.ts). It is recorded as provenance and
-    // surfaced in the UI so an open-speakers host knows their tape carries
-    // bleed; it is never a promise that something removed it.
-    const phones = phonesRef.current;
     let graph: RecordGraph;
     try {
       graph = await buildRecordGraph(deviceId);
@@ -431,10 +388,11 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         recordedAudioTrack: graph.recordedTrack,
         writers: {
           video: new PartWriter(dir, "video"),
-          // The audio sidecar carries the declaration as provenance: a tape
-          // says on disk whether its host was on headphones or open speakers,
-          // which is what a later "why does this echo?" hunt actually needs.
-          audio: new PartWriter(dir, "audio", 1000, { phones }),
+          // The audio sidecar carried a `phones` declaration as provenance
+          // until 2026-08-05. It went out with the declaration itself — a
+          // self-reported field nobody could act on. PartWriter still takes
+          // extra sidecar fields; there are simply none to add today.
+          audio: new PartWriter(dir, "audio", 1000),
         },
         onFault: (cause, detail) => {
           // A discarded recorder's writers keep running to completion, so a
@@ -597,7 +555,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     if (!enabled || !supported || !username) return;
     const coordinator = new TakeCoordinator(bus, username, {
       onPartnerCodename: (name) => setPartnerCodename(name),
-      onPartnerPhones: (p) => setPartnerPhones(p),
+      // Still required by TakeCoordinator, and the wire still PARSES an
+      // inbound `phones` (a partner on an older build sends it, and rejecting
+      // it would drop their whole hello). Nothing surfaces it any more.
+      onPartnerPhones: () => {},
       onCountdown: (msLeft) => {
         setCountdownS(Math.round(msLeft / 1000));
         if (phaseRef.current === "idle") {
@@ -655,11 +616,13 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     {
       // Roll hold (decision 8): a transfer in flight quiet-ignores an
       // inbound proposal entirely — no ack, no slot claim, no fault. The
-      // proposer's own abort-if-unacked unwinds their countdown. An
-      // undeclared side refuses the same quiet way (echo-guard, 8/5): its
-      // recorders must not run before ITS headphones answer exists.
-      canAcceptRoll: () => !holdRollsRef.current && phonesRef.current !== null,
-      localPhones: () => phonesRef.current,
+      // proposer's own abort-if-unacked unwinds their countdown.
+      //
+      // Declaration removed 2026-08-05 — this used to also require
+      // `phonesRef.current !== null`, which with the declaration gone would
+      // be null forever and silently ignore EVERY inbound roll. A transfer
+      // in flight is now the only reason to refuse one.
+      canAcceptRoll: () => !holdRollsRef.current,
       // Ghost-pin release (8/5): a pinned partner who has left the live
       // roster (server restart re-mints every peerId) must not hold the
       // mid-take pin — see TakeProtocolDeps.isPeerLive.
@@ -678,8 +641,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       phaseRef.current = "idle";
       setPhase("idle");
       setPartnerCodename(null);
-      setPartnerPhones(null);
-      clearPhones();
       setFaults([]);
       setStartFault(null);
     };
@@ -732,20 +693,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   if (prevPeerKey !== peerKey) {
     setPrevPeerKey(peerKey);
     setPartnerCodename(null);
-    setPartnerPhones(null); // a declaration belongs to the peer who made it
   }
-
-  // Re-announce whenever THIS side's declaration changes — the partner's
-  // armed panel shows it live (echo-guard, 8/5). The mount run is skipped by
-  // the ref (null === null); the dcOpen rising edge is the effect above's
-  // job, and sendHello reads the current declaration at send time anyway.
-  const phonesAnnouncedRef = useRef<Phones | null>(null);
-  useEffect(() => {
-    if (phonesAnnouncedRef.current === phones) return;
-    phonesAnnouncedRef.current = phones;
-    if (!dcOpen) return;
-    coordinatorRef.current?.announce();
-  }, [phones, dcOpen]);
 
   // ---------------------------------------------------------------------
   // Panel derivation. Take-in-progress states outrank the readiness gates:
@@ -769,8 +717,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         localBytes: meter.localBytes,
         partnerBytes: meter.partnerBytes,
         partnerCodename,
-        phones,
-        partnerPhones,
       };
     }
     if (!enabled || !username || peerCount !== 1) return { kind: "not-two", count: peerCount + 1 };
@@ -789,9 +735,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     return {
       kind: "armed",
       canSend: false,
-      phones,
-      lastPhones,
-      partnerPhones,
       partnerCodename,
     };
   }
@@ -820,17 +763,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     actions: {
       chooseVault: () => refreshVault(chooseVaultFolder),
       grantVault: () => refreshVault(requestVaultAccess),
-      declarePhones: (p: Phones) => {
-        if (phaseRef.current !== "idle") return; // armed-state control only
-        phonesRef.current = p;
-        setPhones(p);
-        setLastPhones(p);
-        try {
-          localStorage.setItem(PHONES_KEY, p);
-        } catch {
-          // best-effort — losing the write only costs the preselect hint
-        }
-      },
       // ROLL TAPE is only ever offered from "armed" — the guard makes that a
       // rule rather than a fact about which button the panel happens to show.
       roll: () => {
@@ -838,9 +770,6 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
         // Belt + suspenders: the merged panel already hides the button while
         // a transfer holds the roll (decision 8), this is the backstop.
         if (holdRolls) return;
-        // Same backstop for the declaration gate — the panel disables Roll
-        // Tape while undeclared; recorders must never run without an answer.
-        if (phonesRef.current === null) return;
         if (panel.kind !== "armed" || !coordinator) return;
         // A take still draining its stop (the ~1.25 s tail after a Stand Down
         // from a failed start, say) holds the coordinator's slot: propose()
