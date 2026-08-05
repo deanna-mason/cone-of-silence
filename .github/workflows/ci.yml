@@ -36,10 +36,8 @@ jobs:
       - name: Test
         run: npx vitest run
 
-      # Non-blocking until the 51 pre-existing react-hooks/any errors are burned down — remove this line then.
       - name: Lint
         run: npm run lint
-        continue-on-error: true
 
   server:
     name: server (typecheck, test)
