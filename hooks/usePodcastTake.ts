@@ -256,6 +256,12 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   // eslint-disable-next-line react-hooks/refs -- same `latest` idiom, far end of the one-render-lag bridge documented in app/room/page.tsx (its exchangeBusyRef comment): the only reader is canAcceptRoll, which the coordinator calls from a wire callback outside React's render pass
   holdRollsRef.current = holdRolls;
 
+  // Same idiom again: the coordinator's isPeerLive dep (8/5 ghost-pin fix)
+  // reads the CURRENT roster from wire callbacks outside the render pass.
+  const peerIdsRef = useRef(peerIds);
+  // eslint-disable-next-line react-hooks/refs -- same `latest` idiom as holdRollsRef above; the only reader is the coordinator's isPeerLive, called from a wire callback outside React's render pass
+  peerIdsRef.current = peerIds;
+
   const coordinatorRef = useRef<TakeCoordinator | null>(null);
   // Which coordinator instance is installed, as a number — bumped the moment
   // one is constructed, and the hello effect's announce latch keys on it. The
@@ -649,6 +655,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       // recorders must not run before ITS headphones answer exists.
       canAcceptRoll: () => !holdRollsRef.current && phonesRef.current !== null,
       localPhones: () => phonesRef.current,
+      // Ghost-pin release (8/5): a pinned partner who has left the live
+      // roster (server restart re-mints every peerId) must not hold the
+      // mid-take pin — see TakeProtocolDeps.isPeerLive.
+      isPeerLive: (peerId) => peerIdsRef.current.includes(peerId),
     });
     coordinatorRef.current = coordinator;
     coordinatorEpochRef.current += 1;

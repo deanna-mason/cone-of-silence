@@ -68,9 +68,20 @@ export interface TakeProtocolDeps {
   /** This side's current headphones declaration, read at every hello send —
    *  default () => null (field omitted from the wire). */
   localPhones?: () => Phones | null;
+  /** Whether a peerId is still on the live roster — default () => true
+   *  (today's behavior). Gates the mid-take hello stash: after a server
+   *  restart every peer is re-minted a NEW id, so the pinned partner id is
+   *  a ghost — a fresh hello must re-pin immediately, or pod/stop targets
+   *  the ghost until the take ends, which it can't (8/5 drill: one side's
+   *  Cut never reached the other, whose reel kept rolling). A LIVE pinned
+   *  partner still can't be clobbered mid-take. */
+  isPeerLive?: (peerId: string) => boolean;
 }
 
-type HelloMsg = { t: "pod/hello"; codename: string; phones?: Phones };
+/** `takeId` (additive, 8/5): present iff the sender has an active take —
+ *  the reconnect re-sync signal. A hello naming no take, arriving while OUR
+ *  take is live, means the partner is not rolling with us. */
+type HelloMsg = { t: "pod/hello"; codename: string; phones?: Phones; takeId?: string };
 type PingMsg = { t: "pod/ping"; sentAt: number };
 type PongMsg = { t: "pod/pong"; sentAt: number };
 type RollMsg = { t: "pod/roll"; takeId: string; startAtMs: number };
@@ -137,7 +148,15 @@ function parseWireMsg(text: string): WireMsg | null {
       // undeclared) — but present-and-invalid rejects the whole message,
       // same enum-membership stance as `fault` below.
       if (m.phones !== undefined && m.phones !== "headphones" && m.phones !== "speakers") return null;
-      return { t: "pod/hello", codename: m.codename, ...(m.phones !== undefined ? { phones: m.phones } : {}) };
+      // `takeId` is additive and OPTIONAL like `phones`; present-and-invalid
+      // rejects the whole message, same stance.
+      if (m.takeId !== undefined && typeof m.takeId !== "string") return null;
+      return {
+        t: "pod/hello",
+        codename: m.codename,
+        ...(m.phones !== undefined ? { phones: m.phones } : {}),
+        ...(m.takeId !== undefined ? { takeId: m.takeId } : {}),
+      };
     }
     case "pod/ping": {
       if (typeof m.sentAt !== "number" || !Number.isFinite(m.sentAt)) return null;
@@ -213,6 +232,7 @@ export class TakeCoordinator {
   private readonly nowFn: () => number;
   private readonly canAcceptRollFn: () => boolean;
   private readonly localPhonesFn: () => Phones | null;
+  private readonly isPeerLiveFn: (peerId: string) => boolean;
   private readonly unsubscribe: () => void;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -246,6 +266,9 @@ export class TakeCoordinator {
   // stop-before-start can cancel just the roll-phase timers (countdown
   // ticks, start, mark) without touching anything else.
   private activeTakeId: string | null = null;
+  /** A stop is already scheduled for `activeTakeId` — makes scheduleStop
+   *  idempotent (see its comment). Cleared by claiming a fresh slot. */
+  private stopScheduled = false;
   private pendingProposal: { takeId: string; startAtMs: number } | null = null;
   private startFired = false;
   private rollTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -257,6 +280,7 @@ export class TakeCoordinator {
     this.nowFn = deps.now ?? Date.now;
     this.canAcceptRollFn = deps.canAcceptRoll ?? (() => true);
     this.localPhonesFn = deps.localPhones ?? (() => null);
+    this.isPeerLiveFn = deps.isPeerLive ?? (() => true);
     this.unsubscribe = bus.onMessage((peerId, text) => this.onMessage(peerId, text));
   }
 
@@ -305,7 +329,15 @@ export class TakeCoordinator {
   private sendHello(): void {
     this.helloSent = true;
     const phones = this.localPhonesFn();
-    this.send({ t: "pod/hello", codename: this.codename, ...(phones !== null ? { phones } : {}) });
+    this.send({
+      t: "pod/hello",
+      codename: this.codename,
+      ...(phones !== null ? { phones } : {}),
+      // Take-state on the one broadcast message (8/5): a reconnecting
+      // partner learns whether we're still rolling from the same hello that
+      // re-pins us — see onHello's re-sync.
+      ...(this.activeTakeId !== null ? { takeId: this.activeTakeId } : {}),
+    });
   }
 
   /** The auto-reply to an incoming hello — latched, so a hello can never
@@ -401,7 +433,16 @@ export class TakeCoordinator {
    * ledgered third-host codename-clobber rider.
    */
   private onHello(peerId: string, msg: HelloMsg): void {
-    if (this.partnerId !== null && peerId !== this.partnerId && this.activeTakeId !== null) {
+    if (
+      this.partnerId !== null &&
+      peerId !== this.partnerId &&
+      this.activeTakeId !== null &&
+      // A pinned partner who is GONE from the roster (server restart
+      // re-minted every id, force-quit) must not hold the pin: nothing sent
+      // to that ghost can arrive, so waiting for take-end deadlocks —
+      // the take can only end via messages the ghost pin is eating (8/5).
+      this.isPeerLiveFn(this.partnerId)
+    ) {
       // Pinned mid-take/proposal — a foreign hello cannot clobber
       // partnerCodename, but it isn't discarded either: stash it (latest
       // wins) so applyPendingHello() can heal the moment the take ends.
@@ -415,6 +456,20 @@ export class TakeCoordinator {
     this.cb.onPartnerPhones(msg.phones ?? null);
     this.ensureHelloSent();
     this.maybeStartPinging();
+    // Take-state re-sync (8/5 drill): our reel is ROLLING but the (re-)pinned
+    // partner's hello names no matching take — they are not rolling with us
+    // (their stop was lost across a reconnect, or they relaunched). Cut now
+    // instead of letting an orphaned reel run until someone notices.
+    //
+    // Gated on startFired, not merely on activeTakeId: between propose() and
+    // the partner's onRoll claim there is a legitimate window where THEY have
+    // no take yet, and a hello crossing it must not cancel the countdown. An
+    // unacked proposal already has its own abort-if-unacked backstop, and the
+    // window closes COUNTDOWN_MS - ROLL_LEAD_MS (3 s) after propose — orders
+    // of magnitude longer than the wire round trip that clears it.
+    if (this.startFired && this.activeTakeId !== null && msg.takeId !== this.activeTakeId) {
+      this.scheduleStop(this.activeTakeId, this.now());
+    }
   }
 
   /**
@@ -468,6 +523,7 @@ export class TakeCoordinator {
   private claimTakeSlot(takeId: string): void {
     this.activeTakeId = takeId;
     this.startFired = false;
+    this.stopScheduled = false;
   }
 
   private scheduleRoll(takeId: string, startLocalMs: number): void {
@@ -515,6 +571,12 @@ export class TakeCoordinator {
   }
 
   private scheduleStop(takeId: string, markLocalMs: number): void {
+    // Idempotent: a take stops once. Both a duplicate pod/stop and the
+    // hello re-sync above can reach here for a take whose stop is already
+    // scheduled, and a second pass would double-fire onStopMark/
+    // onStopRecorders (two mark tones on the tape, two stop calls).
+    if (this.stopScheduled) return;
+    this.stopScheduled = true;
     const scheduledAt = this.now();
     this.schedule(markLocalMs - scheduledAt, () => this.cb.onStopMark());
     this.schedule(markLocalMs + MARK_TOTAL_MS + 250 - scheduledAt, () => {
@@ -540,6 +602,7 @@ export class TakeCoordinator {
     this.activeTakeId = null;
     this.pendingProposal = null;
     this.startFired = false;
+    this.stopScheduled = false;
     this.cb.onAborted(takeId);
     this.applyPendingHello();
   }

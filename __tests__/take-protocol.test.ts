@@ -1345,3 +1345,147 @@ describe("parseWireMsg field validation (malformed messages silently ignored)", 
     a.dispose();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 8/5 throwaway drill: a signaling-server restart re-mints every peerId, so
+// the pinned partner becomes a ghost. One side's Cut then targeted the ghost
+// and never arrived; the other side's reel kept rolling. Two mechanisms fix
+// it — isPeerLive releases a ghost pin mid-take, and pod/hello now carries
+// the sender's active takeId so the survivor can tell it has been orphaned.
+// ---------------------------------------------------------------------------
+describe("reconnect take-state re-sync (8/5 drill)", () => {
+  it("a ghost pinned partner does NOT hold the pin: a rejoin hello re-pins mid-take and cuts the orphaned reel", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    // Roster after the restart: p2 is gone, the same human is back as p3.
+    let roster = ["p2"];
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA, {
+      isPeerLive: (peerId) => roster.includes(peerId),
+    });
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // rolling on both sides
+    expect(cbA.onStartRecorders).toHaveBeenCalledWith(takeId);
+    expect(cbA.onStopRecorders).not.toHaveBeenCalled();
+
+    // Server restart: p2's id is dead, the partner reappears as p3 with no
+    // take of its own (their recorder is gone with the reload).
+    roster = ["p3"];
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "MONGOOSE" }), "p3");
+
+    // Re-pinned immediately — not stashed until take-end, which could never
+    // arrive while the pin pointed at a ghost.
+    expect(cbA.onPartnerCodename).toHaveBeenLastCalledWith("MONGOOSE");
+
+    // ...and the orphaned reel is cut rather than left running.
+    vi.advanceTimersByTime(MARK_TOTAL_MS + 250 + 100);
+    expect(cbA.onStopRecorders).toHaveBeenCalledWith(takeId);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("a LIVE pinned partner still cannot be clobbered mid-take — the ledgered third-host rider holds", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA, {
+      isPeerLive: () => true, // p2 is still on the roster
+    });
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+
+    // A genuine third host announcing mid-take is still ignored (stashed).
+    pair.injectRaw(0, JSON.stringify({ t: "pod/hello", codename: "JACKAL" }), "p3");
+    expect(cbA.onPartnerCodename).toHaveBeenLastCalledWith("MONGOOSE");
+
+    // And the take is untouched — no stop from the foreign hello.
+    vi.advanceTimersByTime(MARK_TOTAL_MS + 250 + 100);
+    expect(cbA.onStopRecorders).not.toHaveBeenCalled();
+    expect(cbA.onStartRecorders).toHaveBeenCalledWith(takeId);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("a re-announce from the partner who IS rolling our take carries its takeId and does not cut it", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100); // both rolling
+
+    // B re-announces mid-take (the hook does this on every dcOpen rising
+    // edge). Its hello names the take it is rolling, so A leaves it alone.
+    b.announce();
+    vi.advanceTimersByTime(50);
+    expect(cbA.onStopRecorders).not.toHaveBeenCalled();
+
+    // Prove the takeId actually rode the wire, rather than the assertion
+    // above passing because nothing arrived at all.
+    const helloFromB = pair.sentLog
+      .filter((e) => e.from === 1 && (JSON.parse(e.text) as { t: string }).t === "pod/hello")
+      .map((e) => JSON.parse(e.text) as { takeId?: string });
+    expect(helloFromB.at(-1)!.takeId).toBe(takeId);
+
+    a.dispose();
+    b.dispose();
+  });
+
+  it("an idle side's hello carries no takeId (additive field, absent when nothing rolls)", () => {
+    const pair = new FakeBusPair();
+    const { cb } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cb);
+    a.hello();
+    const hello = JSON.parse(pair.sentLog[0].text) as Record<string, unknown>;
+    expect(hello.t).toBe("pod/hello");
+    expect("takeId" in hello).toBe(false);
+    a.dispose();
+  });
+
+  it("a duplicate stop for the same take does not double-fire the stop path", () => {
+    const pair = new FakeBusPair(["host-a", "p2"]);
+    pair.latency = [10, 10];
+    const { cb: cbA } = makeCb();
+    const { cb: cbB } = makeCb();
+    const a = new TakeCoordinator(pair.bus(0), "Alpha", cbA);
+    const b = new TakeCoordinator(pair.bus(1), "MONGOOSE", cbB);
+    a.hello();
+    b.hello();
+    vi.runAllTimers();
+
+    const takeId = a.propose()!;
+    vi.advanceTimersByTime(COUNTDOWN_MS + 100);
+
+    // B receives the real stop, then a duplicate of the very same message.
+    const markAtMs = Date.now();
+    pair.injectRaw(1, JSON.stringify({ t: "pod/stop", takeId, markAtMs }), "host-a");
+    pair.injectRaw(1, JSON.stringify({ t: "pod/stop", takeId, markAtMs }), "host-a");
+    vi.advanceTimersByTime(MARK_TOTAL_MS + 250 + 100);
+
+    expect(cbB.onStopMark).toHaveBeenCalledTimes(1);
+    expect(cbB.onStopRecorders).toHaveBeenCalledTimes(1);
+
+    a.dispose();
+    b.dispose();
+  });
+});
