@@ -1,7 +1,10 @@
 // components/PodcastPanel.tsx — pure presentational chrome for podcast mode.
 // ALL state arrives via props; no hooks, no local state. Sits above the tile
-// grid as a slim single row (<=3rem) in every state except the fault banner,
-// which may wrap. The no-scroll rule owns the viewport; this panel is chrome.
+// grid as a slim row (3rem at rest). Live-telemetry states hold that height
+// exactly (ROW) so a take never costs tile space; states whose static
+// MESSAGE is the point may grow to a second line rather than ellipsize
+// (ROW_WRAP), as may the fault banner. The no-scroll rule owns the viewport;
+// this panel is chrome.
 "use client";
 
 import type { Phones } from "@/lib/podcast/takeProtocol";
@@ -57,7 +60,15 @@ export type PodcastPanelState =
       etaS: number | null;
       fromCodename: string | null;
     }
-  | { kind: "xfer-interrupted"; direction: "send" | "receive"; canResend: boolean }
+  | {
+      kind: "xfer-interrupted";
+      direction: "send" | "receive";
+      canResend: boolean;
+      /** The last attempt was refused because the PARTNER's take is still
+       *  rolling (xfr/busy) — a different problem from a dropped line, with
+       *  a different remedy, so the card says which one it is. */
+      partnerRolling?: boolean;
+    }
   | { kind: "xfer-done"; direction: "send" | "receive"; totalBytes: number }
   | { kind: "xfer-fault"; reason: string };
 
@@ -105,6 +116,15 @@ function mbNum(bytes: number): string {
 }
 
 const ROW = "hairline flex h-12 items-center gap-3 border bg-inset px-4";
+/** The same 3rem shape at rest, but free to grow to a second line rather
+ *  than ellipsize. Used by every state whose MESSAGE is the point — an
+ *  explanation the operator has to read in full — as opposed to live
+ *  telemetry, which keeps the fixed ROW so a take never costs tile height.
+ *  The 8/5 drill found the interrupted card reading "Transmission
+ *  Interrupted The li…"; the grid below is flex-1/min-h-0, so a wrapped
+ *  line costs tile height, never a scrollbar. */
+const ROW_WRAP =
+  "hairline flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1.5 border bg-inset px-4 py-2";
 const ROW_BAR = "hairline flex flex-col gap-1.5 border bg-inset px-4 py-2";
 const GHOST_BUTTON =
   "kicker border border-ink-faint/30 px-4 py-2 text-ink-soft transition hover:border-brass hover:text-signal";
@@ -138,9 +158,9 @@ export default function PodcastPanel({
   switch (state.kind) {
     case "unsupported":
       return (
-        <div className={ROW}>
+        <div className={ROW_WRAP}>
           <p className="kicker shrink-0 text-vermilion">◈ Wrong Equipment</p>
-          <p className="truncate font-body text-sm text-ink-soft">
+          <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
             <span className="font-display tracking-[0.04em] text-ink">
               Recording Requires the Bureau Browser
             </span>{" "}
@@ -151,9 +171,9 @@ export default function PodcastPanel({
 
     case "not-two":
       return (
-        <div className={ROW}>
+        <div className={ROW_WRAP}>
           <p className="kicker shrink-0 text-sienna">◈ Two Chairs Only</p>
-          <p className="truncate font-body text-sm text-ink-soft">
+          <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
             The reel rolls for exactly two agents. Presently: {state.count}.
           </p>
         </div>
@@ -161,9 +181,9 @@ export default function PodcastPanel({
 
     case "vault-needed":
       return (
-        <div className={ROW}>
+        <div className={ROW_WRAP}>
           <p className="kicker shrink-0 text-sienna">◈ Tape Vault</p>
-          <p className="flex-1 truncate font-body text-sm text-ink-soft">
+          <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
             Choose where the reel is written before the tape can roll.
           </p>
           <button
@@ -178,9 +198,9 @@ export default function PodcastPanel({
 
     case "link-down":
       return (
-        <div className={ROW}>
+        <div className={ROW_WRAP}>
           <p className="kicker shrink-0 text-sienna">◈ Line Down</p>
-          <p className="truncate font-body text-sm text-ink-soft">
+          <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
             The tape rolls on both machines or neither. Waiting for the line to the other chair.
           </p>
         </div>
@@ -379,12 +399,20 @@ export default function PodcastPanel({
       );
     }
 
-    case "xfer-interrupted":
+    case "xfer-interrupted": {
+      // A refused resume and a dropped line are different problems with
+      // different remedies, so the card names which one it is instead of
+      // leaving Resume to no-op silently (both 8/5 drill findings).
+      const held = state.partnerRolling === true;
       return (
-        <div className={ROW}>
-          <p className="kicker shrink-0 text-sienna">◈ Transmission Interrupted</p>
-          <p className="flex-1 truncate font-body text-sm text-ink-soft">
-            The line dropped mid-reel. Committed parts are safe in the vault.
+        <div className={ROW_WRAP}>
+          <p className="kicker shrink-0 text-sienna">
+            {held ? "◈ Transmission Held" : "◈ Transmission Interrupted"}
+          </p>
+          <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
+            {held
+              ? "The other chair is still rolling tape. Resume once they cut."
+              : "The line dropped mid-reel. Committed parts are safe in the vault."}
           </p>
           {state.direction === "send" && state.canResend && (
             <button type="button" onClick={onResendEpisode} className={CTA_BUTTON}>
@@ -396,6 +424,7 @@ export default function PodcastPanel({
           </button>
         </div>
       );
+    }
 
     case "xfer-done":
       return (

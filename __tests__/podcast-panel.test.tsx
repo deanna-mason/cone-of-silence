@@ -358,6 +358,46 @@ describe("PodcastPanel", () => {
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeDefined();
   });
 
+  // 8/5 drill: this card truncated to "Transmission Interrupted The li…" —
+  // the one state whose whole job is explaining a stall.
+  test("xfer-interrupted — the message may wrap and is never ellipsized", () => {
+    const { container } = render(
+      <PodcastPanel
+        state={{ kind: "xfer-interrupted", direction: "send", canResend: true }}
+        {...callbacks()}
+      />,
+    );
+    const message = screen.getByText(
+      "The line dropped mid-reel. Committed parts are safe in the vault.",
+    );
+    expect(message.className).not.toContain("truncate");
+    // The row itself must be free to grow rather than clamp to one line:
+    // a min-height floor (same 3rem at rest), never a fixed height.
+    const row = container.firstElementChild!;
+    const classes = row.className.split(/\s+/);
+    expect(classes).toContain("flex-wrap");
+    expect(classes).toContain("min-h-12");
+    expect(classes).not.toContain("h-12");
+  });
+
+  test("xfer-interrupted (partner still rolling) — says so, and still offers Resume", () => {
+    const cb = renderState({
+      kind: "xfer-interrupted",
+      direction: "send",
+      canResend: true,
+      partnerRolling: true,
+    });
+    expect(screen.getByText("◈ Transmission Held")).toBeDefined();
+    expect(
+      screen.getByText("The other chair is still rolling tape. Resume once they cut."),
+    ).toBeDefined();
+    // The dropped-line copy must not also be on screen — one cause, one message.
+    expect(screen.queryByText(/line dropped mid-reel/)).toBeNull();
+    // Resume stays live: it works the moment they cut.
+    fireEvent.click(screen.getByRole("button", { name: "Resume Transmission" }));
+    expect(cb.onResendEpisode).toHaveBeenCalledTimes(1);
+  });
+
   test("xfer-done (send) — Episode Delivered, Dismiss fires onDismissXfer", () => {
     const cb = renderState({ kind: "xfer-done", direction: "send", totalBytes: 7_800_000 });
     expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
