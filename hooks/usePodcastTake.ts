@@ -314,7 +314,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
 
     let graph: RecordGraph;
     try {
-      graph = await buildRecordGraph(deviceId);
+      graph = await buildRecordGraph(deviceId, { echoGuard: false });
     } catch (err) {
       // ProcessedAudioError (browser DSP still on) and an outright capture
       // refusal both land here — neither is a disk problem.

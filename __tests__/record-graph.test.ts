@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ProcessedAudioError, buildRecordGraph } from "@/lib/podcast/recordGraph";
+import { EchoGuardUnavailableError, ProcessedAudioError, buildRecordGraph } from "@/lib/podcast/recordGraph";
 
 function fakes(settings: Partial<MediaTrackSettings> = {}) {
   const rawTrack = {
@@ -47,7 +47,7 @@ describe("record graph", () => {
 
   it("requests a raw mono capture of the chosen device at 48 kHz", async () => {
     const { deps, gum, ctxOpts, destTrack, rawTrack, ctx, stream } = fakes();
-    const graph = await buildRecordGraph("mic-1", deps);
+    const graph = await buildRecordGraph("mic-1", { echoGuard: false }, deps);
     expect(gum).toHaveBeenCalledWith({
       audio: { deviceId: { exact: "mic-1" }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
     });
@@ -63,13 +63,39 @@ describe("record graph", () => {
 
   it("fails closed when the track comes back processed", async () => {
     const { deps, rawTrack } = fakes({ echoCancellation: true });
-    await expect(buildRecordGraph(undefined, deps)).rejects.toBeInstanceOf(ProcessedAudioError);
+    await expect(buildRecordGraph(undefined, { echoGuard: false }, deps)).rejects.toBeInstanceOf(ProcessedAudioError);
+    expect(rawTrack.stop).toHaveBeenCalled();
+  });
+
+  it("echo-guard mode requests EC on with NS/AGC still off", async () => {
+    const { deps, gum } = fakes({ echoCancellation: true });
+    await buildRecordGraph("mic-1", { echoGuard: true }, deps);
+    expect(gum).toHaveBeenCalledWith({
+      audio: { deviceId: { exact: "mic-1" }, echoCancellation: true, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+    });
+  });
+
+  it("echo-guard mode succeeds when settings report exactly EC on, NS off, AGC off", async () => {
+    const { deps, destTrack } = fakes({ echoCancellation: true });
+    const graph = await buildRecordGraph(undefined, { echoGuard: true }, deps);
+    expect(graph.recordedTrack).toBe(destTrack);
+  });
+
+  it("echo-guard mode fails closed when EC comes back off", async () => {
+    const { deps, rawTrack } = fakes({ echoCancellation: false });
+    await expect(buildRecordGraph(undefined, { echoGuard: true }, deps)).rejects.toBeInstanceOf(EchoGuardUnavailableError);
+    expect(rawTrack.stop).toHaveBeenCalled();
+  });
+
+  it("echo-guard mode fails closed when NS or AGC ride along", async () => {
+    const { deps, rawTrack } = fakes({ echoCancellation: true, noiseSuppression: true });
+    await expect(buildRecordGraph(undefined, { echoGuard: true }, deps)).rejects.toBeInstanceOf(EchoGuardUnavailableError);
     expect(rawTrack.stop).toHaveBeenCalled();
   });
 
   it("close() releases mic and context", async () => {
     const { deps, rawTrack, ctx } = fakes();
-    const graph = await buildRecordGraph(undefined, deps);
+    const graph = await buildRecordGraph(undefined, { echoGuard: false }, deps);
     graph.close();
     expect(rawTrack.stop).toHaveBeenCalled();
     expect(ctx.close).toHaveBeenCalled();
@@ -77,7 +103,7 @@ describe("record graph", () => {
 
   it("playMark() routes the tone into BOTH the recorded destination and speakers, exactly 50ms out", async () => {
     const { deps, ctx, gains } = fakes();
-    const graph = await buildRecordGraph(undefined, deps);
+    const graph = await buildRecordGraph(undefined, { echoGuard: false }, deps);
     const destNode = ctx.createMediaStreamDestination.mock.results[0]!.value;
 
     const startedAt = graph.playMark();
