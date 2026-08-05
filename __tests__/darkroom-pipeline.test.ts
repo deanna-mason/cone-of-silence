@@ -589,7 +589,10 @@ describe("pipeline.mjs — developEpisode", () => {
     expect(receipt.ratio).toBeCloseTo(expectedRatio, 9);
     expect(receipt.delayMs).toBe(expectedAlignment.delayMs);
     expect(receipt.who).toBe(expectedAlignment.who);
-    expect(receipt.products).toEqual(["m4a", "mp4"]);
+    // "m4a-full" = the untrimmed companion (Deanna, 2026-08-05): same mix,
+    // same two-pass mastering, no cut — the chimes and the dead air around
+    // them survive in it, so nothing is lost by trimming the deliverable.
+    expect(receipt.products).toEqual(["m4a", "m4a-full", "mp4"]);
     expect(receipt.toolVersions).toEqual({ node: process.version, ffmpeg: "8.1.2-static" });
 
     // --- labels (D14: local LEFT as --own-codename, remote RIGHT as receivedFrom) ---
@@ -597,6 +600,7 @@ describe("pipeline.mjs — developEpisode", () => {
 
     // --- products on disk ----------------------------------------------
     expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "episode-full.m4a"))).toBe(true);
     expect(fs.existsSync(finalMp4)).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "stems", "NIGHTINGALE.m4a"))).toBe(true);
@@ -626,7 +630,7 @@ describe("pipeline.mjs — developEpisode", () => {
     const stemsDir = path.join(episodesRoot, "stems");
     const lastArg = (call: string[]) => call[call.length - 1];
 
-    expect(calls.length).toBe(12);
+    expect(calls.length).toBe(14);
     expect(calls[0]).toEqual(["-version"]);
     expect(lastArg(calls[1])).toBe(path.join(rawDir, "local-audio.mkv"));
     expect(lastArg(calls[2])).toBe(path.join(rawDir, "local-video.mkv"));
@@ -636,9 +640,25 @@ describe("pipeline.mjs — developEpisode", () => {
     expect(lastArg(calls[6])).toBe(path.join(stemsDir, "CARDINAL.m4a")); // applyStemArgs(local)
     expect(lastArg(calls[7])).toBe("-"); // measureStem(remote)
     expect(lastArg(calls[8])).toBe(path.join(stemsDir, "NIGHTINGALE.m4a")); // applyStemArgs(remote)
-    expect(lastArg(calls[9])).toBe("-"); // mixMeasureArgs
-    expect(lastArg(calls[10])).toBe(path.join(episodesRoot, "episode.m4a")); // mixApplyArgs
-    expect(lastArg(calls[11])).toBe(workMp4); // compositeArgs
+    expect(lastArg(calls[9])).toBe("-"); // mixMeasureArgs (trimmed)
+    expect(lastArg(calls[10])).toBe(path.join(episodesRoot, "episode.m4a")); // mixApplyArgs (trimmed)
+    expect(lastArg(calls[11])).toBe("-"); // mixMeasureArgs (untrimmed companion)
+    expect(lastArg(calls[12])).toBe(path.join(episodesRoot, "episode-full.m4a")); // mixApplyArgs (untrimmed)
+    expect(lastArg(calls[13])).toBe(workMp4); // compositeArgs
+
+    // The deliverable is trimmed; its companion is not. The companion gets
+    // its OWN measure pass rather than reusing the trimmed measurement —
+    // reusing it would master the full file to a loudness measured on
+    // different audio, and the two 0.5-amplitude beeps it still contains are
+    // exactly what that measurement deliberately excluded.
+    const graphOf = (call: string[]) => call[call.indexOf("-filter_complex") + 1];
+    expect(graphOf(calls[9])).toContain("atrim=");
+    expect(graphOf(calls[10])).toContain("atrim=");
+    expect(graphOf(calls[11])).not.toContain("atrim=");
+    expect(graphOf(calls[12])).not.toContain("atrim=");
+    expect(graphOf(calls[11])).toContain("print_format=json"); // a real measure pass, not a reuse
+    // Same two stems, same alignment delays — only the cut differs.
+    expect(graphOf(calls[12])).toBe(graphOf(calls[10]).replace(/atrim=[^,]+,asetpts=PTS-STARTPTS,/, ""));
 
     // Remote's chain carried the drift filter; local's did not.
     expect(calls[7][calls[7].indexOf("-af") + 1]).toMatch(/^asetrate=/);
@@ -723,11 +743,14 @@ describe("pipeline.mjs — developEpisode", () => {
 
     const receipt = await developEpisode(deps, manifestPath, { ownCodename: "CARDINAL" });
 
-    expect(receipt.products).toEqual(["m4a"]);
+    // The untrimmed companion is an AUDIO product, so it rides along even on
+    // an audio-only episode — unlike the mp4, which needs both hosts' video.
+    expect(receipt.products).toEqual(["m4a", "m4a-full"]);
     expect(backdropCalls.length).toBe(0);
 
     const episodesRoot = path.join(tmpRoot, "episodes", takeId);
     expect(fs.existsSync(path.join(episodesRoot, "episode.m4a"))).toBe(true);
+    expect(fs.existsSync(path.join(episodesRoot, "episode-full.m4a"))).toBe(true);
     expect(fs.existsSync(path.join(episodesRoot, "episode.mp4"))).toBe(false);
     expect(fs.existsSync(path.join(episodesRoot, "work"))).toBe(false); // IMPORTANT 4: gone on success too
     expect(fs.existsSync(path.join(episodesRoot, "stems", "CARDINAL.m4a"))).toBe(true);
@@ -888,7 +911,9 @@ describe("pipeline.mjs — developEpisode", () => {
     );
 
     // --- the composite takes the same window on both panes ---------------
-    const compositeFc = fcOf(fakeRunner.calls[11]);
+    // calls[11]/[12] are the untrimmed companion's own measure+apply, so the
+    // composite sits at [13].
+    const compositeFc = fcOf(fakeRunner.calls[13]);
     expect((compositeFc.match(new RegExp(`trim=start=${startS}:end=${endS}`, "g")) || []).length).toBe(2);
     // Video re-zeroes on the exact cut point; audio re-zeroes on STARTPTS
     // (sample-accurate) — the asymmetry is deliberate, see composite.mjs.

@@ -250,6 +250,35 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
       ),
     );
 
+    // Step 5b: the untrimmed companion, `episode-full.m4a` (Deanna,
+    // 2026-08-05). Identical mix, identical two-pass mastering, no cut — so
+    // the chimes and the dead air around them survive somewhere playable and
+    // nothing is lost by trimming the deliverable. The stems already preserve
+    // that material, but they are per-host and unmixed; this is the whole
+    // episode as it would have been before the trim shipped.
+    //
+    // It gets its OWN measure pass rather than reusing `mixMeasurement`:
+    // that measurement was deliberately taken on trimmed audio, and applying
+    // it here would master the full file to a loudness measured on different
+    // content — with the two 0.5-amplitude beeps (exactly what the trimmed
+    // measurement excluded) free to drive the limiter.
+    const episodeFullM4a = path.join(episodesRoot, "episode-full.m4a");
+    const { stderr: fullStderr } = await deps.runner.run(
+      mixMeasureArgs(localStemOut, remoteStemOut, localDelayFilter, remoteDelayFilter, ""),
+    );
+    const fullMeasurement = parseMixLoudnorm(fullStderr);
+    await deps.runner.run(
+      mixApplyArgs(
+        localStemOut,
+        remoteStemOut,
+        localDelayFilter,
+        remoteDelayFilter,
+        "",
+        fullMeasurement,
+        episodeFullM4a,
+      ),
+    );
+
     // Step 6: backdrop render + composite -> work/episode.mp4 -> rename
     // LAST. Only attempted when BOTH hosts have video (mirrors the audio
     // rule) — an audio-only episode (or a one-sided video episode) has
@@ -310,7 +339,9 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
       // delay + pad (design 2026-08-05). These are the exact values the
       // atrim/trim filters were given.
       trim: { startS: trimStartS, endS: trimEndS, padMs: PAD_MS },
-      products: mp4Written ? ["m4a", "mp4"] : ["m4a"],
+      // "m4a-full" is unconditional — it is an audio product, so unlike the
+      // mp4 it rides along on an audio-only episode too.
+      products: mp4Written ? ["m4a", "m4a-full", "mp4"] : ["m4a", "m4a-full"],
       toolVersions: { node: process.version, ffmpeg: ffmpegVersion },
     };
     const workReceipt = path.join(workDir, "develop.json");

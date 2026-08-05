@@ -124,7 +124,12 @@ export function applyStemArgs(input, model, m, out, extraFilter) {
  * Studio path has no two-input mix and no `mixFilterComplex` at all.
  */
 function mixFilterComplex(delayFilterA, delayFilterB, trimFilter, tail) {
-  return `[0:a]${delayFilterA}[da];[1:a]${delayFilterB}[db];[da][db]amix=inputs=2:normalize=0,${trimFilter},${tail}`;
+  // An EMPTY trim segment must take its comma with it — `amix=...,,loudnorm`
+  // is a malformed filtergraph and ffmpeg rejects the whole graph. The
+  // untrimmed companion product (`episode-full.m4a`) is the caller that
+  // passes "", and it is otherwise the identical graph.
+  const trim = trimFilter ? `${trimFilter},` : "";
+  return `[0:a]${delayFilterA}[da];[1:a]${delayFilterB}[db];[da][db]amix=inputs=2:normalize=0,${trim}${tail}`;
 }
 
 /**

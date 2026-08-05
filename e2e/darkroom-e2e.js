@@ -439,6 +439,46 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
     `[${label}] episode.m4a duration ${actualM4aDuration.toFixed(3)}s matches the trimmed window ${trimmedDurationS.toFixed(3)}s = truth mark span ${truthMarkSpanS.toFixed(3)}s - mark ${darkroom.MARK_TOTAL_MS}ms - 2x pad ${darkroom.PAD_MS}ms (delta ${m4aDurationDelta.toFixed(3)}s, tolerance ${M4A_DURATION_TOLERANCE_S}s)`,
   );
 
+  // ---- Check 4c: the UNTRIMMED companion, episode-full.m4a (Deanna,
+  // 2026-08-05). Same mix, same mastering, no cut — so its expected duration
+  // is the untrimmed mix's natural `duration=longest` length, which is
+  // exactly the expectation check 4b used to carry before the trim:
+  //
+  //     max(local + localDelay, corrected remote + remoteDelay)
+  //
+  // Keeping it here is not nostalgia. That formula is DELAY-DEPENDENT, and
+  // 4b's replacement deliberately is not (the alignment delay cancels out of
+  // a mark-to-mark length). So this check restores, on the companion product,
+  // precisely the `who`-side-swap cross-check the trim cost us on the
+  // deliverable — a swapped side changes which stream gets padded and so
+  // changes this max, while leaving the trimmed window's length untouched. ----
+  const fullM4aPath = path.join(episodesDir, "episode-full.m4a");
+  check(fs.existsSync(fullM4aPath), `[${label}] episode-full.m4a (untrimmed companion) exists`);
+  check(
+    Array.isArray(develop.products) && develop.products.includes("m4a-full"),
+    `[${label}] develop.json.products lists m4a-full (got ${JSON.stringify(develop.products)})`,
+  );
+  const localDelayS = (develop.who === "local" ? develop.delayMs : 0) / 1000;
+  const remoteDelayS = (develop.who === "remote" ? develop.delayMs : 0) / 1000;
+  const localAudioDurationS = await ffprobeDuration(path.join(rawDir, "local-audio.mkv"));
+  const remoteAudioDurationS = await ffprobeDuration(path.join(rawDir, "remote-audio.mkv"));
+  const expectedFullDuration = Math.max(
+    localAudioDurationS + localDelayS,
+    remoteAudioDurationS * develop.ratio + remoteDelayS,
+  );
+  const actualFullDuration = await ffprobeDuration(fullM4aPath);
+  const fullDurationDelta = Math.abs(actualFullDuration - expectedFullDuration);
+  check(
+    fullDurationDelta <= M4A_DURATION_TOLERANCE_S,
+    `[${label}] episode-full.m4a duration ${actualFullDuration.toFixed(3)}s matches the UNTRIMMED mix ${expectedFullDuration.toFixed(3)}s = max(local+delay, corrected remote+delay) (delta ${fullDurationDelta.toFixed(3)}s, tolerance ${M4A_DURATION_TOLERANCE_S}s)`,
+  );
+  // And it must genuinely be longer than the deliverable — i.e. the trim
+  // really did remove material, rather than both files being written the same.
+  check(
+    actualFullDuration > actualM4aDuration + 0.5,
+    `[${label}] episode-full.m4a (${actualFullDuration.toFixed(3)}s) is materially longer than the trimmed episode.m4a (${actualM4aDuration.toFixed(3)}s)`,
+  );
+
   // ---- Check 5: ffprobe products. ----
   const m4aProbe = await ffprobeJson(m4aPath);
   const m4aAudio = (m4aProbe.streams || []).find((s) => s.codec_type === "audio");

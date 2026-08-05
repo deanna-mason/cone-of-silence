@@ -358,3 +358,49 @@ describe("chain.mjs — mix builders", () => {
     );
   });
 });
+
+// The untrimmed companion product (Deanna, 2026-08-05): `episode-full.m4a`
+// is the same mix, same mastering, NO cut — so the pipeline calls these same
+// two builders a second time with an empty trim segment. An empty segment has
+// to drop the comma with it, or the graph is `amix=...,,loudnorm` and ffmpeg
+// rejects the whole filtergraph.
+describe("chain.mjs — mix builders with no trim (the untrimmed companion)", () => {
+  const M = {
+    input_i: "-14.02",
+    input_tp: "-1.80",
+    input_lra: "4.00",
+    input_thresh: "-24.02",
+    target_offset: "0.02",
+  };
+  const graphOf = (args: string[]) => args[args.indexOf("-filter_complex") + 1];
+  const TRIM = "atrim=start=1.670:end=4.950,asetpts=PTS-STARTPTS";
+
+  it("measure pass with an empty trim emits no atrim and no empty filter slot", () => {
+    const graph = graphOf(mixMeasureArgs("/a.m4a", "/b.m4a", "adelay=0:all=1", "adelay=10:all=1", ""));
+    expect(graph).not.toContain("atrim=");
+    expect(graph).not.toContain(",,");
+    expect(graph).toBe(
+      `[0:a]adelay=0:all=1[da];[1:a]adelay=10:all=1[db];[da][db]amix=inputs=2:normalize=0,` +
+        `${LOUDNORM_TARGET}:print_format=json`,
+    );
+  });
+
+  it("apply pass with an empty trim emits no atrim and no empty filter slot", () => {
+    const graph = graphOf(
+      mixApplyArgs("/a.m4a", "/b.m4a", "adelay=0:all=1", "adelay=10:all=1", "", M, "/out.m4a"),
+    );
+    expect(graph).not.toContain("atrim=");
+    expect(graph).not.toContain(",,");
+    expect(graph).toContain("amix=inputs=2:normalize=0,loudnorm");
+  });
+
+  it("the untrimmed graph is otherwise byte-identical to the trimmed one minus the trim segment", () => {
+    const withTrim = graphOf(
+      mixApplyArgs("/a.m4a", "/b.m4a", "adelay=0:all=1", "adelay=10:all=1", TRIM, M, "/out.m4a"),
+    );
+    const without = graphOf(
+      mixApplyArgs("/a.m4a", "/b.m4a", "adelay=0:all=1", "adelay=10:all=1", "", M, "/out.m4a"),
+    );
+    expect(withTrim.replace(`${TRIM},`, "")).toBe(without);
+  });
+});
