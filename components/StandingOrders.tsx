@@ -192,9 +192,21 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
         <p className="kicker text-ink-soft">Transfer of Custody</p>
         {!handoffOpen ? (
           <>
+            {/* "Your own device, not a guest" is a real distinction, not
+                etiquette: this is the STANDING studio's secret, the same room
+                every time, and lib/studioRoom.ts keeps it as the only way back
+                in. A guest handed this link holds that key permanently. The
+                disposable alternative is the lobby's Initiate Contact, which
+                mints fresh keys per room (RoomControls.tsx). The old copy said
+                "bearer key ... and to no one else" without ever saying why, or
+                where to send a guest instead. */}
             <p className="mt-2 font-body text-sm italic text-ink-soft">
-              This link is a bearer key — whoever holds it walks in, and closing this panel takes
-              nothing back. Hand it to your own other device, and to no one else.
+              The key to this studio. Anyone who opens it walks in, and you cannot call it back.
+              <br />
+              Your studio never leaves this browser, so this link is the only way onto another
+              device.
+              <br />
+              For a guest, open a fresh line from the lobby instead.
             </p>
             <button
               type="button"
@@ -227,9 +239,19 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
                 {copied ? "LINK COPIED" : copyFailed ? "COPY FAILED — SELECT MANUALLY" : "Copy link"}
               </button>
             </div>
+            {/* This link opens /room directly — it does NOT pin a studio, and
+                the Identity Desk (/account) cannot read it: that page parses a
+                different fragment (#invite=…&r=&s=). The room also only exists
+                on the server while someone is seated in it (30s grace, see
+                server/src/rooms/registry.ts), so a link opened cold reports
+                "This Corridor Is Dark". Both facts were missing from the old
+                copy, which sent hosts hunting for somewhere to paste it. */}
             <p className="mt-3 font-body text-xs italic text-ink-soft">
-              Open this link at the other device&rsquo;s Identity Desk to pin the same studio. The
-              countdown only hides the link here — it is a convenience, not a revocation.
+              Stay in the studio, then open this link on your other device. It walks straight in.
+              <br />
+              If you leave, the link stops working until you are back.
+              <br />
+              The countdown hides the link here. It does not revoke it.
             </p>
           </div>
         )}
