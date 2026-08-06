@@ -216,20 +216,31 @@ Two further traps found the hard way: the room's code only loads once you are
 no network traffic from before it was opened, so a Network-panel check of the
 initial load is worthless unless it was open first.
 
+## D4 (resume → deliver): PASS — 2026-08-05, ~6:40 pm
+
+Owed across **three** drills. The first attempt was eaten by the take-state
+bug, the second by the roster desync; this time the mid-transfer wifi drop
+parked both sides on a correctly-worded interrupted card, Resume Transmission
+picked it up, and the episode delivered in full (Deanna's report).
+
+That also puts a third live sighting on the finding-2a truncation fix, and the
+card correctly read "Interrupted" rather than "Held" — the partner was not
+rolling, which is exactly the distinction `xfr/busy` exists to draw.
+
 ## Owed
 
-1. Capture and root-cause finding 1 (`reconnect-desync-evidence.md`). No code
-   until the evidence is in.
-2. **Live re-drill of block F**, which now proves findings 2 and 3 together.
-   They are entangled in the other direction: finding 2 is what lets the
-   operator *reach* the camera picker, and finding 3 is what makes the pick
-   actually reach the partner. Neither can be demonstrated without the other.
-   Run F5 **both ways** — alarm acknowledged and alarm still on screen — since
-   acknowledging is what defeated it last time. The pass condition for F7 is
-   that the partner sees a **real picture**, not a frozen or garbled tile: a
-   sender added without its E2EE transform would look correct locally and fail
-   only on the far side.
-3. Re-verify Block C's vault parts: concatenate Deanna's and Lily's parts in
+1. **Finding 1 (roster desync) — DEFERRED by Deanna, 8/5. Deliberately NOT in
+   the final submission; follow-up fix later.** It fired hard once and then
+   declined to reproduce across three further wifi drops the same night, and
+   the "transfer in flight is the trigger" theory is disproven (it fired once
+   without one, and did not fire twice with one). Rare but severe: when it
+   hits, the call is dead until someone rejoins — do not let that get
+   downgraded to "works fine." No code until the evidence in
+   `reconnect-desync-evidence.md` is captured. Workaround for the demo: the
+   host who did **not** drop leaves and rejoins.
+2. Re-verify Block C's vault parts: concatenate Deanna's and Lily's parts in
    sidecar order and confirm both play clean with both tone marks. Needs the
-   parts exported out of the OPFS vault to disk first.
-4. Re-run D4 (resume → deliver) once finding 1 is resolved.
+   parts exported out of the OPFS vault to disk first. **The only drill item
+   still genuinely open.**
+3. Finding 4 (a replugged camera shows as selected without being selected) —
+   cosmetic, unfixed, cost real confusion on two separate nights.
