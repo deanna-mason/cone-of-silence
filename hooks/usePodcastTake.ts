@@ -154,8 +154,15 @@ export interface PodcastTakeArgs {
   /** The remote roster. Identity, not just headcount — a codename belongs to
    *  the peer that claimed it and must not outlive them. */
   peerIds: string[];
-  /** The CALL's video track — the same one the recorder encodes. */
+  /** The CALL's video track, as it stands right now. Whichever one is here at
+   *  roll time is the one the recorder is handed and encodes for the whole
+   *  take; a later swap does NOT re-wire it (see recordedVideoTrackRef). */
   videoTrack: MediaStreamTrack | null;
+  /** The mic the capture is ACTUALLY on (useLocalMedia.liveDeviceIds), not the
+   *  stored choice: this becomes an `exact` deviceId constraint on the tape's
+   *  own mic capture, so a stale pick would silently record the wrong input.
+   *  Undefined is the honest "cannot say" — recordGraph omits the constraint
+   *  and takes the default. */
   audioDeviceId: string | undefined;
   /** A transfer is in flight — no take may start (decision 8). Gates both
    *  the coordinator's acceptance of an inbound proposal and this hook's own
@@ -262,6 +269,18 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
   const coordinatorEpochRef = useRef(0);
   const graphRef = useRef<RecordGraph | null>(null);
   const recorderRef = useRef<TakeRecorder | null>(null);
+  // The EXACT video track handed to the recorder at construction — the thing
+  // actually being encoded onto the tape, which is not necessarily the track
+  // the call is showing. There is no re-wire path (no replaceTrack anywhere in
+  // hooks/ or lib/podcast/), so a mid-take device swap ends this track and
+  // mints a new live one for the call while the recorder keeps holding the
+  // dead one. The watchdog must poll THIS, exactly as it polls graph.rawTrack
+  // for the mic rather than the graph's never-ending destination track;
+  // polling the call's current track instead let `camera-lost` clear itself
+  // after a swap — panel back to "rolling", beacon back to camOk:true — while
+  // the tape's video had silently stopped. Cleared wherever a take begins and
+  // wherever one is released.
+  const recordedVideoTrackRef = useRef<MediaStreamTrack | null>(null);
   const recorderFaultRef = useRef<{ cause: RecorderFault; detail: string } | null>(null);
   const phaseRef = useRef<Phase>("idle");
   const epochRef = useRef(0); // bumped on every teardown — cancels in-flight starts
@@ -320,6 +339,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     // tell the truth).
     graphRef.current?.close();
     graphRef.current = null;
+    recordedVideoTrackRef.current = null;
     recorderFaultRef.current = null;
     pendingMarkRef.current = false;
   }
@@ -333,6 +353,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     partnerRolledRef.current = false;
     klaxonArmedRef.current = true;
     recorderFaultRef.current = null;
+    recordedVideoTrackRef.current = null;
     pendingMarkRef.current = false;
     setFaults([]);
     setStartFault(null);
@@ -354,6 +375,7 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     recorderFaultRef.current = { cause, detail: detailOf(err) };
     graphRef.current?.close();
     graphRef.current = null;
+    recordedVideoTrackRef.current = null;
     recorderRef.current = null;
     setStartFault({ side: "local", cause });
     goPhase("failed");
@@ -419,6 +441,10 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       });
       recorder.start();
       recorderRef.current = recorder;
+      // Pin the track the recorder is actually encoding (see the ref's doc).
+      // Set only once the recorder is up, so a construction that threw leaves
+      // nothing pinned.
+      recordedVideoTrackRef.current = track;
     } catch (err) {
       if (stale()) return;
       failStart("encoder-error", err);
@@ -492,7 +518,13 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     if (total !== bytesRef.current.total) bytesRef.current = { total, lastChangeAt: now };
     if (counted) setStreamBytes(counted);
 
-    const camera = latest.current.videoTrack;
+    // Both rows poll the RECORDED source, never the one the call is currently
+    // showing: the track the recorder was handed (see recordedVideoTrackRef)
+    // and the raw mic behind the graph (a destination track never ends, so
+    // recordedTrack would stay "live" past an unplug — recordGraph's own note).
+    // A device swap mid-take replaces neither, which is why `camera-lost`
+    // rightly PERSISTS for the rest of the take once the recorded track dies.
+    const camera = recordedVideoTrackRef.current;
     const mic = graphRef.current?.rawTrack ?? null;
 
     // The startup race, and nothing else: a quiet "not rolling yet" from a

@@ -450,6 +450,23 @@ describe("usePodcastTake", () => {
     expect(view.result.current.bytes.video).toBeGreaterThan(videoAtRollStart);
   });
 
+  // The room page now feeds this from media.liveDeviceIds (what the capture is
+  // ACTUALLY on), not media.choice (what was asked for) — see
+  // __tests__/room-device-lock.test.tsx for that wiring. liveDeviceIds is
+  // undefined whenever nothing can be said for certain, and that has to reach
+  // buildRecordGraph AS undefined: lib/podcast/recordGraph.ts omits the
+  // deviceId constraint entirely in that case and records the default input.
+  // Passing a stale id instead would put an `exact` constraint on the tape's
+  // mic and record the wrong microphone.
+  it("(d2) an unknown live mic is forwarded as undefined, not guessed", async () => {
+    const { view } = await setup({ audioDeviceId: undefined });
+    await rollToRolling(view);
+
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(H.state.buildArgs).toHaveLength(1);
+    expect(H.state.buildArgs[0]).toBeUndefined();
+  });
+
   it("(e) a muted camera raises a fault within a tick, sounds the klaxon once, and beacons camOk:false", async () => {
     const { pair, view, videoTrack } = await setup();
     await rollToRolling(view);
@@ -773,6 +790,71 @@ describe("usePodcastTake", () => {
 
   it("(k4) a healthy take never sets it", async () => {
     const { view, partner } = await setup();
+    const stopHeartbeat = partnerHeartbeat(partner);
+    await rollToRolling(view);
+    await tick(2_200);
+    expect(view.result.current.panel.kind).toBe("rolling");
+    expect(view.result.current.faultedThisTake).toBe(false);
+    stopHeartbeat();
+  });
+
+  // -------------------------------------------------------------------
+  // The watchdog polls the RECORDED video track, not the call's current one.
+  //
+  // The device bar unlocks the moment a take is compromised (k2 above), so a
+  // mid-take swap is now reachable by design — and a swap ENDS the track the
+  // recorder was handed and mints a brand new live one for the call. Nothing
+  // re-wires the recorder (there is no replaceTrack anywhere in hooks/ or
+  // lib/podcast/), so the tape's video has stopped for good. Polling the live
+  // track made `camera-lost` clear itself on the next tick: panel back to
+  // "rolling", beacon back to camOk:true, tape still dead. Byte-stall cannot
+  // catch it either — the recorder's total is video+audio, and audio keeps
+  // flowing from the record graph's own separate capture.
+  // -------------------------------------------------------------------
+  it("(k5) a mid-take camera swap does NOT clear camera-lost — the recorder still holds the dead track", async () => {
+    const { pair, view, props, videoTrack, partner } = await setup();
+    await rollToRolling(view);
+    const stopHeartbeat = partnerHeartbeat(partner);
+    expect(view.result.current.panel.kind).toBe("rolling");
+
+    // The recorded camera dies — unplugged, or ended by the swap's own
+    // stopStream (hooks/useLocalMedia.ts reacquire).
+    (videoTrack as unknown as { readyState: string }).readyState = "ended";
+    await tick(1_100);
+    const faulted = view.result.current.panel;
+    if (faulted.kind !== "fault") throw new Error(`expected fault, got ${faulted.kind}`);
+    expect(faulted.faults).toContainEqual({ side: "local", cause: "camera-lost" });
+
+    // The operator does exactly what the unlocked bar invites: picks another
+    // camera. useLocalMedia mints a new live track and the room page hands it
+    // down — but the recorder is still encoding the dead one.
+    view.rerender({ ...props, videoTrack: fakeTrack() });
+    await tick(2_200);
+
+    const after = view.result.current.panel;
+    if (after.kind !== "fault") throw new Error(`expected fault, got ${after.kind}`);
+    expect(after.faults).toContainEqual({ side: "local", cause: "camera-lost" });
+    expect(view.result.current.faultedThisTake).toBe(true);
+    // …and the partner is told the same truth, rather than a cheerful camOk.
+    const beacons = pair.beaconsFrom(0);
+    expect(beacons[beacons.length - 1]!.camOk).toBe(false);
+    stopHeartbeat();
+  });
+
+  it("(k6) the NEXT take polls the newly recorded track — the swap is honoured at roll time", async () => {
+    const { view, props, videoTrack, partner } = await setup();
+    await rollToRolling(view);
+    (videoTrack as unknown as { readyState: string }).readyState = "ended";
+    await tick(1_100);
+    expect(view.result.current.panel.kind).toBe("fault");
+
+    // Swap, then cut. The pin is dropped with the take it belonged to.
+    const swapped = fakeTrack();
+    view.rerender({ ...props, videoTrack: swapped });
+    act(() => view.result.current.actions.stop());
+    await tick(3_500);
+
+    // A fresh take on the healthy camera is clean, and stays clean.
     const stopHeartbeat = partnerHeartbeat(partner);
     await rollToRolling(view);
     await tick(2_200);

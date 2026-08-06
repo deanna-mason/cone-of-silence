@@ -86,19 +86,33 @@ test("blocked autoplay falls back to muted playback + Restore Audio treatment", 
   expect(screen.queryByText(/audio blocked/i)).toBeNull();
 });
 
+// The Mute button names WHO it silences (8/5 a11y pass): with four tiles on
+// screen every one of these buttons read as the same control to a screen
+// reader, so the accessible name carries the tile's label.
 test("mute silences one person locally; unmute restores them", async () => {
   const { container } = render(<VideoTile stream={fakeStream()} label="Agent 99" />);
   const video = container.querySelector("video")!;
   await waitFor(() => expect(video.muted).toBe(false));
 
-  fireEvent.click(screen.getByRole("button", { name: /^mute$/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Mute Agent 99" }));
   expect(video.muted).toBe(true);
   expect(video.className).toContain("saturate-"); // muted tile dims
 
-  fireEvent.click(screen.getByRole("button", { name: /unmute/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Unmute Agent 99" }));
   await waitFor(() => expect(video.muted).toBe(false));
-  expect(screen.getByRole("button", { name: /^mute$/i })).toBeDefined();
+  expect(screen.getByRole("button", { name: "Mute Agent 99" })).toBeDefined();
   expect(video.className).not.toContain("saturate-");
+});
+
+test("two remote tiles expose two DIFFERENT mute controls, one per agent", async () => {
+  render(
+    <>
+      <VideoTile stream={fakeStream()} label="Agent 2" />
+      <VideoTile stream={fakeStream()} label="Agent 3" />
+    </>,
+  );
+  expect(screen.getByRole("button", { name: "Mute Agent 2" })).toBeDefined();
+  expect(screen.getByRole("button", { name: "Mute Agent 3" })).toBeDefined();
 });
 
 test("a replaced stream is a fresh join: mute resets to audible", async () => {
@@ -108,12 +122,12 @@ test("a replaced stream is a fresh join: mute resets to audible", async () => {
   const video = container.querySelector("video")!;
   await waitFor(() => expect(video.muted).toBe(false));
 
-  fireEvent.click(screen.getByRole("button", { name: /^mute$/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Mute Agent 99" }));
   expect(video.muted).toBe(true);
 
   rerender(<VideoTile stream={fakeStream()} label="Agent 99" />);
   await waitFor(() => expect(video.muted).toBe(false));
-  expect(screen.getByRole("button", { name: /^mute$/i })).toBeDefined();
+  expect(screen.getByRole("button", { name: "Mute Agent 99" })).toBeDefined();
 });
 
 test("a stale play() rejection from a swapped-out stream does not blockade the new one", async () => {
@@ -159,7 +173,7 @@ test("a failed Restore Audio gesture leaves the tile blocked, with no corner Mut
   render(<VideoTile stream={fakeStream()} label="Agent 13" />);
 
   const restore = await screen.findByRole("button", { name: /restore audio/i });
-  expect(screen.queryByRole("button", { name: /^mute$/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^mute /i })).toBeNull();
 
   const container = screen.getByText(/agent 13/i).closest("figure")!;
   const video = container.querySelector("video")!;
@@ -172,5 +186,5 @@ test("a failed Restore Audio gesture leaves the tile blocked, with no corner Mut
 
   expect(screen.getByText(/audio blocked by browser/i)).toBeDefined();
   expect(video.muted).toBe(true);
-  expect(screen.queryByRole("button", { name: /^mute$/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^mute /i })).toBeNull();
 });

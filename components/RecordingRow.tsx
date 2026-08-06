@@ -160,7 +160,7 @@ export default function RecordingRow({
               onClick={() => setConfirmingBurn(false)}
               className="kicker text-ink-soft transition hover:text-brass disabled:opacity-40"
             >
-              Stand Down
+              Keep it
             </button>
           </>
         ) : (

@@ -213,7 +213,8 @@ async function newHostPage(browser, codename) {
 }
 
 // Remote tiles are every figure except the self tile ("You") and the empty
-// "Awaiting agent" placeholder. NOTE this departs from phase2-e2e.js's
+// seat, whose caption is the invite instruction ("Copy Invite to fill this
+// seat"). NOTE this departs from phase2-e2e.js's
 // `/^Agent \d$/` label filter: here A and B are both logged in, so once the
 // podcast hello handshake completes (fast — rides the data channel's rising
 // edge) a two-peer remote tile's label swaps from "Agent 2" to the peer's
@@ -223,7 +224,7 @@ async function waitRemoteVideosFlowing(page, count, timeoutMs) {
     (expected) => {
       const figs = [...document.querySelectorAll("figure")].filter((f) => {
         const cap = f.querySelector("figcaption")?.textContent || "";
-        return cap !== "You" && cap !== "Awaiting agent";
+        return cap !== "You" && cap !== "Copy Invite to fill this seat";
       });
       if (figs.length !== expected) return false;
       return figs.every((f) => {

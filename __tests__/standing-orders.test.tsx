@@ -31,10 +31,15 @@ test("shows the custom studio name when one is set", () => {
   expect(screen.getByText(/night desk/i)).toBeDefined();
 });
 
-test("renders the line-status lamp and the Enter the Studio CTA", () => {
+// The line-status lamp was deleted 2026-08-05: "Line: quiet — standing by" was
+// hardcoded, so the dot reported a state nothing ever measured. What is left in
+// the card must be facts that are actually read.
+test("renders the Enter the Studio CTA and no invented line telemetry", () => {
   render(<StandingOrders room={ROOM} />);
-  expect(screen.getByText(/standing by/i)).toBeDefined();
   expect(screen.getByRole("button", { name: /enter the studio/i })).toBeDefined();
+  expect(screen.queryByText(/standing by/i)).toBeNull();
+  expect(screen.getByText(/room for 4/i)).toBeDefined();
+  expect(screen.getByText(/last convened/i)).toBeDefined();
 });
 
 test("Enter the Studio marks convened and does a full-page load to the room link", () => {

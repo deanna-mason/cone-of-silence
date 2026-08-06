@@ -46,7 +46,7 @@ describe("PodcastPanel", () => {
     renderState({ kind: "not-two", count: 3 });
     expect(screen.getByText("◈ Two Chairs Only")).toBeDefined();
     expect(
-      screen.getByText("The reel rolls for exactly two agents. Presently: 3."),
+      screen.getByText("The tape rolls for exactly two agents. Presently: 3."),
     ).toBeDefined();
   });
 
@@ -124,35 +124,125 @@ describe("PodcastPanel", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  // The reminder flag is the only state this component owns, and until
+  // 2026-08-05 nothing cleared it when the panel left "armed". The panel is
+  // never unmounted during a call (app/room/page.tsx renders it under `authed`),
+  // so a reminder abandoned by a state change came back on screen by itself the
+  // next time the panel armed — a full-viewport overlay nobody opened, with
+  // "Roll It" sitting under the operator's cursor. Every assertion below needs
+  // a rerender to reach: the whole class of bug lives BETWEEN renders, which is
+  // why a file full of single-render dialog tests never saw it.
+  test("armed → link-down → armed — an abandoned reminder does not reopen itself", () => {
+    const cb = callbacks();
+    const armed: PodcastPanelState = { kind: "armed", canSend: false, ...PHONES_NONE };
+    const { rerender } = render(<PodcastPanel state={armed} {...cb} />);
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    expect(screen.getByRole("dialog")).toBeDefined();
+
+    // The line to the other chair drops with the reminder still up — the armed
+    // branch stops rendering and takes the dialog off screen unanswered.
+    rerender(<PodcastPanel state={{ kind: "link-down" }} {...cb} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // The line returns. The operator has not touched Roll Tape again, so the
+    // row must be back to a plain armed row, not an overlay.
+    rerender(<PodcastPanel state={armed} {...cb} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: "Roll Tape" })).toBeDefined();
+    expect(cb.onRoll).not.toHaveBeenCalled();
+  });
+
+  // The likeliest way to abandon a reminder in practice: the OTHER chair
+  // proposes the roll while this one is still reading it. The take runs to
+  // completion and the panel lands back on armed with a sendable take — the
+  // exact moment a stale overlay would be reached for.
+  test("armed → countdown → rolling → armed — a take by the other chair leaves no stale reminder", () => {
+    const cb = callbacks();
+    const armed: PodcastPanelState = { kind: "armed", canSend: false, ...PHONES_NONE };
+    const { rerender } = render(<PodcastPanel state={armed} {...cb} />);
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    expect(screen.getByRole("dialog")).toBeDefined();
+
+    rerender(<PodcastPanel state={{ kind: "countdown", secondsLeft: 3 }} {...cb} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    rerender(
+      <PodcastPanel
+        state={{
+          kind: "rolling",
+          elapsedS: 4,
+          localBytes: 0,
+          partnerBytes: 0,
+          partnerCodename: "Falcon",
+        }}
+        {...cb}
+      />,
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    rerender(<PodcastPanel state={{ kind: "armed", canSend: true, ...PHONES_NONE }} {...cb} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cb.onRoll).not.toHaveBeenCalled();
+  });
+
+  // The reminder claims aria-modal, so the keyboard has to be able to answer
+  // it (8/5 copy/a11y pass): Roll It takes focus on open, Escape backs out.
+  test("armed — the reminder puts focus on Roll It, and Escape cancels it", () => {
+    const cb = renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    fireEvent.click(screen.getByRole("button", { name: "Roll Tape" }));
+    const rollIt = screen.getByRole("button", { name: /roll it/i });
+    expect(document.activeElement).toBe(rollIt);
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cb.onRoll).not.toHaveBeenCalled();
+  });
+
   test("armed — the kicker is a steady label, no longer a question", () => {
     renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
     expect(screen.getByText("◈ Ready to Roll")).toBeDefined();
   });
 
-  test("armed — no Send Episode button when canSend is false", () => {
-    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
-    expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
+  // Cut lands back on armed, and the row used to look exactly like the row
+  // before the take — the only evidence a take existed was a button quietly
+  // appearing. The kicker now says it outright (8/5 copy pass).
+  test("armed — the kicker reports a secured take once one is sendable", () => {
+    renderState({ kind: "armed", canSend: true, ...PHONES_NONE });
+    expect(screen.getByText("◈ Take Secured — Ready to Roll")).toBeDefined();
+    expect(screen.queryByText("◈ Ready to Roll")).toBeNull();
   });
 
-  test("armed — Send Episode shown and fires onSendEpisode when canSend", () => {
-    const cb = renderState({ kind: "armed", canSend: true, ...PHONES_NONE });
-    fireEvent.click(screen.getByRole("button", { name: "Send Episode" }));
+  test("armed — no send button when canSend is false", () => {
+    renderState({ kind: "armed", canSend: false, ...PHONES_NONE });
+    expect(screen.queryByRole("button", { name: /^send/i })).toBeNull();
+  });
+
+  test("armed — the send button names the partner and fires onSendEpisode", () => {
+    const cb = renderState({ kind: "armed", canSend: true, partnerCodename: "Falcon" });
+    fireEvent.click(screen.getByRole("button", { name: "Send Take to Falcon" }));
     expect(cb.onSendEpisode).toHaveBeenCalledTimes(1);
     expect(cb.onRoll).not.toHaveBeenCalled();
   });
 
-  test("armed — a restored previous-session take says Send Last Take, not Send Episode", () => {
+  // What crosses the wire is this host's HALF — never the merged episode, which
+  // only exists after the darkroom (episodeId === takeId, useEpisodeExchange).
+  test("armed — the send button falls back to 'Partner' with no codename, and never says Episode", () => {
+    renderState({ kind: "armed", canSend: true, ...PHONES_NONE });
+    expect(screen.getByRole("button", { name: "Send Take to Partner" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /episode/i })).toBeNull();
+  });
+
+  test("armed — a restored previous-session take says Send Last Take, not Send Take to …", () => {
     const cb = renderState({ kind: "armed", canSend: true, restoredTake: true, ...PHONES_NONE });
-    expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^send take to/i })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Send Last Take" }));
     expect(cb.onSendEpisode).toHaveBeenCalledTimes(1);
   });
 
-  test("armed — delivered shows a static Episode Delivered marker and no Send Episode", () => {
+  test("armed — delivered shows a static Take Delivered marker and no send button", () => {
     renderState({ kind: "armed", canSend: true, delivered: true, ...PHONES_NONE });
-    expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
+    expect(screen.getByText("◈ Take Delivered")).toBeDefined();
     // Even with canSend true, a delivered take never re-offers Send.
-    expect(screen.queryByRole("button", { name: "Send Episode" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^send/i })).toBeNull();
     // Roll Tape stays — record another take to send again.
     expect(screen.getByRole("button", { name: "Roll Tape" })).toBeDefined();
   });
@@ -297,7 +387,7 @@ describe("PodcastPanel", () => {
       etaS: 40,
       fromCodename: "Falcon",
     });
-    expect(screen.getByText("◈ Incoming Reel")).toBeDefined();
+    expect(screen.getByText("◈ Incoming Take")).toBeDefined();
     // Sender + progress numbers lead; the part file name trails (dropped below sm).
     expect(screen.getByText("Falcon · 2.0/6.0 MB · ETA 00:40")).toBeDefined();
     expect(screen.getByText(/video\.part002/)).toBeDefined();
@@ -322,7 +412,7 @@ describe("PodcastPanel", () => {
     const cb = renderState({ kind: "xfer-interrupted", direction: "send", canResend: true });
     expect(screen.getByText("◈ Transmission Interrupted")).toBeDefined();
     expect(
-      screen.getByText("The line dropped mid-reel. Committed parts are safe in the vault."),
+      screen.getByText("The line dropped mid-take. Committed parts are safe in the vault."),
     ).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Resume Transmission" }));
     expect(cb.onResendEpisode).toHaveBeenCalledTimes(1);
@@ -351,7 +441,7 @@ describe("PodcastPanel", () => {
       />,
     );
     const message = screen.getByText(
-      "The line dropped mid-reel. Committed parts are safe in the vault.",
+      "The line dropped mid-take. Committed parts are safe in the vault.",
     );
     expect(message.className).not.toContain("truncate");
     // The row itself must be free to grow rather than clamp to one line:
@@ -375,33 +465,33 @@ describe("PodcastPanel", () => {
       screen.getByText("The other chair is still rolling tape. Resume once they cut."),
     ).toBeDefined();
     // The dropped-line copy must not also be on screen — one cause, one message.
-    expect(screen.queryByText(/line dropped mid-reel/)).toBeNull();
+    expect(screen.queryByText(/line dropped mid-take/)).toBeNull();
     // Resume stays live: it works the moment they cut.
     fireEvent.click(screen.getByRole("button", { name: "Resume Transmission" }));
     expect(cb.onResendEpisode).toHaveBeenCalledTimes(1);
   });
 
-  test("xfer-done (send) — Episode Delivered, Dismiss fires onDismissXfer", () => {
+  test("xfer-done (send) — Take Delivered, Dismiss fires onDismissXfer", () => {
     const cb = renderState({ kind: "xfer-done", direction: "send", totalBytes: 7_800_000 });
-    expect(screen.getByText("◈ Episode Delivered")).toBeDefined();
+    expect(screen.getByText("◈ Take Delivered")).toBeDefined();
     expect(screen.getByText("7.8 MB filed.")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(cb.onDismissXfer).toHaveBeenCalledTimes(1);
   });
 
-  test("xfer-done (receive) — Episode Received", () => {
+  test("xfer-done (receive) — Take Received", () => {
     renderState({ kind: "xfer-done", direction: "receive", totalBytes: 100_000 });
-    expect(screen.getByText("◈ Episode Received")).toBeDefined();
+    expect(screen.getByText("◈ Take Received")).toBeDefined();
     expect(screen.getByText("0.1 MB filed.")).toBeDefined();
   });
 
-  test("xfer-fault — hash-mismatch reason gets the damaged-reel copy; alert role; Acknowledge fires onDismissXfer", () => {
+  test("xfer-fault — hash-mismatch reason gets the damaged-take copy; alert role; Acknowledge fires onDismissXfer", () => {
     const cb = renderState({ kind: "xfer-fault", reason: "hash-mismatch:audio.part000" });
     const banner = screen.getByRole("alert");
     expect(banner).toBeDefined();
     expect(screen.getByText("◈ Transmission Fault")).toBeDefined();
     expect(
-      screen.getByText("A reel arrived damaged and was burned. Resume to send it again."),
+      screen.getByText("A take arrived damaged and was burned. Resume to send it again."),
     ).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
     expect(cb.onDismissXfer).toHaveBeenCalledTimes(1);

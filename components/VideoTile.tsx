@@ -201,6 +201,9 @@ export default function VideoTile({
         <button
           type="button"
           onClick={() => setAudio(audio === "muted" ? "on" : "muted")}
+          // Every remote tile's Mute button read as the same control to a
+          // screen reader; the label names which agent it silences.
+          aria-label={audio === "muted" ? `Unmute ${label}` : `Mute ${label}`}
           className={`kicker absolute right-2 top-2 border bg-field/80 px-3 py-1.5 transition hover:text-signal ${
             audio === "muted"
               ? "border-vermilion/60 text-vermilion"
@@ -234,7 +237,7 @@ export default function VideoTile({
           className="slate-flash kicker absolute right-2 top-2 flex items-center gap-2 bg-vermilion px-2.5 py-1 text-cream"
         >
           <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-cream" />
-          Rolling — Take 01
+          Rolling
         </p>
       )}
       <figcaption className="kicker absolute bottom-2 left-2 bg-field/80 px-2 py-1 text-ink-soft">

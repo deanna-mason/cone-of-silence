@@ -151,7 +151,9 @@ test("2B: the roller's own tile flashes a slate stamp; the partner tile does not
   const self = render(<VideoTile stream={fakeStream()} label="You" isSelf episodeFrame />);
   const slate = within(self.container).getByTestId("slate-stamp");
   expect(slate.textContent).toMatch(/rolling/i);
-  expect(slate.textContent).toMatch(/take 01/i);
+  // The take number came off 8/5: it was hardcoded "01" on every take, so it
+  // was wrong from the second take onward. The slate says only what it knows.
+  expect(slate.textContent).not.toMatch(/\d/);
   expect(slate.className).toContain("slate-flash");
 
   const remote = render(<VideoTile stream={fakeStream()} label="Agent 2" episodeFrame />);

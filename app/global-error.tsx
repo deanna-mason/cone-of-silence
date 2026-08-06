@@ -1,9 +1,9 @@
-"use client"; // Error boundaries must be Client Components (Next 16.2.9).
+"use client"; // Error boundaries must be Client Components (Next 16.3.0).
 
 import { useEffect } from "react";
 
 // The last line of defense: an error thrown by the ROOT layout itself is not
-// caught by app/error.tsx — it is caught here. Per the Next 16.2.9 docs
+// caught by app/error.tsx — it is caught here. Per the Next 16.3.0 docs
 // (node_modules/next/dist/docs/.../file-conventions/error.md#global-error) this
 // file REPLACES the root layout, so it must render its own <html>/<body> and
 // carry its own styles and fonts — none of globals.css, next/font, or the
@@ -18,20 +18,27 @@ const TYPE = '"Courier New", ui-monospace, monospace';
 const DISPLAY = '"Arial Narrow", sans-serif';
 const BODY = "Georgia, serif";
 
+// Same recover contract as app/error.tsx: 16.3.0 passes the stable `retry`,
+// which re-fetches and re-renders the boundary's children, and the docs say to
+// prefer it over `reset` (which re-renders without re-fetching). `reset` stays
+// as the fallback because this prop was `unstable_retry` until 16.3.0 stabilized
+// it (error.md Version History) — on an older runtime the required `retry`
+// below would arrive undefined, and a blackout page whose only button is dead
+// is worse than one that merely re-renders.
 export default function GlobalError({
   error,
   reset,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
-  unstable_retry?: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error(error);
   }, [error]);
 
-  const recover = unstable_retry ?? reset;
+  const recover = retry ?? reset;
 
   return (
     <html lang="en">

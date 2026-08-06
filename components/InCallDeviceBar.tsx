@@ -3,10 +3,24 @@
 // and flip front/back on phones. A disclosure so the collapsed default costs
 // one short row — the no-scroll room layout stays intact (Deanna, 2026-07-25).
 //
-// DESIGN RULING: while a podcast take is rolling, device swaps are LOCKED. The
-// record graph holds the raw mic + the exact video track the recorder encodes,
-// so a mid-take swap would poison the tape. `locked` mirrors the page's
-// podcastLocked (countdown / rolling / fault / stopping).
+// DESIGN RULING (amended 2026-08-05): while a podcast take is rolling CLEANLY,
+// device swaps are LOCKED — the record graph holds the raw mic and the recorder
+// holds the exact video track it encodes, so a swap mid-take would poison the
+// tape. Once the take is COMPROMISED the lock lifts: the tape is already hurt,
+// and reselecting a device is the only remedy that doesn't require rejoining
+// (8/5 re-drill finding 2 — acknowledging the unplugged-camera alarm dropped
+// the panel back to "rolling" and re-locked the operator out).
+//
+// A swap does NOT re-wire the recorder. There is no replaceTrack path: the
+// recorder keeps the track it was handed at roll time, and that track is dead
+// after the swap. So the video row stays faulted for the rest of the take, and
+// it SHOULD — usePodcastTake's watchdog polls the recorded track, not the live
+// one, precisely so the panel and the partner's beacon cannot report a healthy
+// camera over a tape whose video has stopped. The swap fixes the CALL; only a
+// re-take fixes the tape.
+//
+// `locked` is the page's deviceBarLocked (a take in progress that has not
+// faulted), NOT the broader podcastLocked the call controls still use.
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
@@ -43,7 +57,9 @@ interface InCallDeviceBarProps {
   liveMicId?: string;
   liveCameraId?: string;
   hasCamera: boolean;
-  /** True while a podcast take is in progress — swaps disabled to protect the tape. */
+  /** True while a podcast take is in progress AND still clean — swaps disabled
+   *  to protect the tape. False once the take is compromised (see the ruling
+   *  above): the swap is then the remedy, and the video row stays faulted. */
   locked: boolean;
   onSelectMic: (deviceId: string) => void;
   onSelectCamera: (deviceId: string) => void;

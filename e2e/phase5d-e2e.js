@@ -141,6 +141,12 @@ const { spawn } = require("child_process");
 const BASE = "http://localhost:3000";
 const PORT = 8787;
 const ADMIN_SECRET = "phase5d-e2e-secret-0123456789";
+// The send affordance is named after the partner — `Send Take to CODENAME`
+// (components/PodcastPanel.tsx:325) — and reads `Send Last Take` for a take
+// restored from a previous session. It was a literal "Send Episode" until the
+// 8/5 copy pass; match the stable prefix so a codename (or that restored
+// variant) can never make the selector miss.
+const SEND_TAKE_BUTTON = /^Send (Take to|Last Take)/;
 const REPO_ROOT = path.join(__dirname, "..");
 const SERVER_DIR = path.join(REPO_ROOT, "server");
 const VAULT_DIR_NAME = "cos-vault";
@@ -291,7 +297,7 @@ async function waitRemoteVideosFlowing(page, count, timeoutMs) {
     (expected) => {
       const figs = [...document.querySelectorAll("figure")].filter((f) => {
         const cap = f.querySelector("figcaption")?.textContent || "";
-        return cap !== "You" && cap !== "Awaiting agent";
+        return cap !== "You" && cap !== "Copy Invite to fill this seat";
       });
       if (figs.length !== expected) return false;
       return figs.every((f) => {
@@ -398,11 +404,10 @@ function waitXfer(page, value, timeoutMs) {
 /** Roll -> wait rolling on both -> hold -> Cut -> wait armed on both
  *  (e2e/phase5b-e2e.js idiom). */
 async function rollAndCut(pageA, pageB, holdMs) {
-  // Per-take headphones declaration (echo-guard) — both sides, before each
-  // roll; it resets on every return to armed.
-  await pageA.getByRole("button", { name: "Headphones" }).click();
-  await pageB.getByRole("button", { name: "Headphones" }).click();
+  // The per-take headphones declaration was removed 2026-08-05. Roll Tape is
+  // ungated; it opens a pre-roll reminder the PROPOSER confirms.
   await pageA.getByRole("button", { name: "Roll Tape" }).click();
+  await pageA.getByRole("button", { name: "Roll It" }).click();
   await Promise.all([waitPod(pageA, "rolling", 5000), waitPod(pageB, "rolling", 5000)]);
   await new Promise((r) => setTimeout(r, holdMs));
   await pageA.getByRole("button", { name: "Cut" }).click();
@@ -856,7 +861,7 @@ async function seedMarkerFixture(page, takeDir, partBytes, marker) {
       `check 6 setup: marker fixture seeded — audio ${fixture.audio.size}B, video ${fixture.video.size}B`,
     );
 
-    await pageA.getByRole("button", { name: "Send Episode" }).click();
+    await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).click();
     await Promise.all([waitXfer(pageA, "done", 30000), waitXfer(pageB, "done", 30000)]);
     check(true, "check 6: episode exchange completes on both sides");
 

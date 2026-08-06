@@ -86,6 +86,12 @@ const { spawn } = require("child_process");
 const BASE = "http://localhost:3000";
 const PORT = 8787;
 const ADMIN_SECRET = "phase5b-e2e-secret-0123456789";
+// The send affordance is named after the partner — `Send Take to CODENAME`
+// (components/PodcastPanel.tsx:325) — and reads `Send Last Take` for a take
+// restored from a previous session. It was a literal "Send Episode" until the
+// 8/5 copy pass; match the stable prefix so a codename (or that restored
+// variant) can never make the selector miss.
+const SEND_TAKE_BUTTON = /^Send (Take to|Last Take)/;
 const REPO_ROOT = path.join(__dirname, "..");
 const SERVER_DIR = path.join(REPO_ROOT, "server");
 const VAULT_DIR_NAME = "cos-vault";
@@ -204,7 +210,7 @@ async function waitRemoteVideosFlowing(page, count, timeoutMs) {
     (expected) => {
       const figs = [...document.querySelectorAll("figure")].filter((f) => {
         const cap = f.querySelector("figcaption")?.textContent || "";
-        return cap !== "You" && cap !== "Awaiting agent";
+        return cap !== "You" && cap !== "Copy Invite to fill this seat";
       });
       if (figs.length !== expected) return false;
       return figs.every((f) => {
@@ -618,22 +624,22 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     await waitPod(pageB, "armed", 15000);
 
     // =====================================================================
-    // Check 1: a short REAL take completes; A's panel offers Send Episode.
+    // Check 1: a short REAL take completes; A's panel offers the send button.
     // =====================================================================
     const priorA0 = await opfsTakeDirNames(pageA);
     await rollAndCut(pageA, pageB, 5000);
     const takeId1 = await newTakeDirName(pageA, priorA0);
     const podArmedA = await pageA.evaluate(() => window.__cosCall && window.__cosCall.pod);
     check(podArmedA === "armed", `A's __cosCall.pod === "armed" after the short real take (got "${podArmedA}")`);
-    const sendVisible1 = await pageA.getByRole("button", { name: "Send Episode" }).isVisible();
-    check(sendVisible1, "A's panel offers Send Episode after a real-recording take");
+    const sendVisible1 = await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).isVisible();
+    check(sendVisible1, "A's panel offers the send button after a real-recording take");
 
     // =====================================================================
     // Checks 2 & 3: A sends the real take. B reaches xfer-receiving then
     // both reach xfer-done; committed parts + episode.json land on B;
     // manifest is absent for the entire in-flight window (observed live).
     // =====================================================================
-    await pageA.getByRole("button", { name: "Send Episode" }).click();
+    await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).click();
     await waitXfer(pageB, "receiving", 10000);
     check(true, "B reaches receiving phase after A sends the real take");
 
@@ -688,7 +694,7 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // Episode Delivered marker and deliberately does NOT re-offer Send — a
     // fresh take (check 4's roll) is what re-arms it.
     const deliveredMarker = await pageA.getByText("◈ Episode Delivered").isVisible();
-    const sendGoneAfterDelivery = !(await pageA.getByRole("button", { name: "Send Episode" }).isVisible());
+    const sendGoneAfterDelivery = !(await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).isVisible());
     check(
       deliveredMarker && sendGoneAfterDelivery,
       "A dismisses the delivered card — armed shows Episode Delivered; Send re-arms only with a fresh take",
@@ -698,7 +704,7 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // Check 4: a second short real roll+cut mints a FRESH takeId (the only
     // way lastTakeId's React state legitimately advances — see header
     // deviation note 1), whose disk content is then overwritten with the
-    // synthetic fixture. A presses Send Episode -> sending begins.
+    // synthetic fixture. A presses the send button -> sending begins.
     // =====================================================================
     // B's "Episode Received" card is still up — dismiss it so B's armed panel
     // is reachable before the next roll. (It also carried a headphones
@@ -717,7 +723,7 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
       `check 4 setup: synthetic fixture seeded — ${fixture.audio.length} audio + ${fixture.video.length} video parts, ~${FIXTURE_PART_BYTES / 1_000_000}MB each`,
     );
 
-    await pageA.getByRole("button", { name: "Send Episode" }).click();
+    await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).click();
     await pageA.waitForFunction(
       () => {
         const kind = window.__cosCall && window.__cosCall.xfer && window.__cosCall.xfer.kind;
@@ -730,7 +736,7 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // the real transition, or waitForFirstCommittedPart below could mistake
     // episode #1's leftover "done" for episode #2 finishing before it began.
     await waitXfer(pageB, "receiving", 10000);
-    check(true, "check 4: A presses Send Episode on the fixture — sending begins, B adopts the new offer");
+    check(true, "check 4: A presses the send button on the fixture — sending begins, B adopts the new offer");
 
     // =====================================================================
     // Check 5: kill the signaling server once B has committed >=1 real
@@ -770,7 +776,7 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // Check-13 pattern). See header deviation note 2: canResend correctly
     // requires the SAME peer, so Resume Transmission does NOT (and should
     // not) reappear here — assert that, then drive the real recovery path
-    // (Stand Down -> Send Episode) and prove the resume is disk-driven.
+    // (Stand Down -> send again) and prove the resume is disk-driven.
     // =====================================================================
     server = await spawnServer(tokenFile);
     await pageA.getByText("Agents present: 2").waitFor({ timeout: 90000 });
@@ -797,8 +803,8 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
 
     await pageA.getByRole("button", { name: "Dismiss" }).click();
     await waitPod(pageA, "armed", 5000);
-    await pageA.getByRole("button", { name: "Send Episode" }).waitFor({ timeout: 5000 });
-    await pageA.getByRole("button", { name: "Send Episode" }).click();
+    await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).waitFor({ timeout: 5000 });
+    await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).click();
     check(true, "check 6: A dismisses the parked sender, then sends again at the fresh peer");
 
     await waitXfer(pageA, "done", 60000);

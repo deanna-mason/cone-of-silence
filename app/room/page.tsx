@@ -192,7 +192,14 @@ export default function RoomPage() {
     dcOpen: call.dcOpen,
     peerIds: call.peers.map((p) => p.peerId),
     videoTrack: media.stream?.getVideoTracks()[0] ?? null,
-    audioDeviceId: media.choice.audioDeviceId,
+    // liveDeviceIds, NOT `choice` — the same truth rule the pickers follow
+    // (useLocalMedia's doc on `choice`: what was ASKED for). This value becomes
+    // an `exact` deviceId constraint on the tape's own mic capture
+    // (lib/podcast/recordGraph.ts), so a stored pick that never came up —
+    // the mic was busy at join and the call quietly degraded to the default —
+    // would record the WRONG microphone with no fault shown. Undefined is
+    // safe: recordGraph omits the constraint and takes the default.
+    audioDeviceId: media.liveDeviceIds.audioDeviceId,
     // eslint-disable-next-line react-hooks/refs -- the deliberate one-render-lag bridge documented above: usePodcastTake only ever reads holdRolls back out through holdRollsRef, from wire callbacks and user actions outside the render pass, so a value at most one commit stale is harmless and breaks the genuine two-hook cycle
     holdRolls: exchangeBusyRef.current,
   });
@@ -613,7 +620,12 @@ export default function RoomPage() {
             onSpeakingStart={noteSpeaker}
           />
         ))}
-        {call.peers.length === 0 && <VideoTile fill stream={null} label="Awaiting agent" />}
+        {/* The empty seat's centre overlay already says "Awaiting agent" — the
+            caption is the only line that can say what to DO about it, and it
+            names the Copy Invite button two rows below (8/5 copy pass). */}
+        {call.peers.length === 0 && (
+          <VideoTile fill stream={null} label="Copy Invite to fill this seat" />
+        )}
       </div>
       <InCallDeviceBar
         mics={media.devices.mics}

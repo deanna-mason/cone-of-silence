@@ -56,18 +56,26 @@ const ACTIONS = {
 const take = {
   panel: { kind: "armed", canSend: false, partnerCodename: null } as PodcastPanelState,
   faultedThisTake: false,
+  // Every args object the page has handed the hook this render pass. The mock
+  // makes the take a dial, but the ARGUMENTS are real page wiring, and one of
+  // them (audioDeviceId) becomes an `exact` constraint on the tape's own mic
+  // capture — previously unobserved by any test, on either side of the mock.
+  args: [] as { audioDeviceId?: string }[],
 };
 
 vi.mock("@/hooks/usePodcastTake", () => ({
-  usePodcastTake: () => ({
-    panel: take.panel,
-    faultedThisTake: take.faultedThisTake,
-    partnerCodename: null,
-    myCodename: "Nightingale",
-    bytes: BYTES,
-    lastTakeId: null,
-    actions: ACTIONS,
-  }),
+  usePodcastTake: (args: { audioDeviceId?: string }) => {
+    take.args.push(args);
+    return {
+      panel: take.panel,
+      faultedThisTake: take.faultedThisTake,
+      partnerCodename: null,
+      myCodename: "Nightingale",
+      bytes: BYTES,
+      lastTakeId: null,
+      actions: ACTIONS,
+    };
+  },
 }));
 
 const ID = "A".repeat(22);
@@ -119,6 +127,7 @@ beforeEach(() => {
   window.HTMLMediaElement.prototype.play = () => Promise.resolve();
   take.panel = { kind: "armed", canSend: false, partnerCodename: null };
   take.faultedThisTake = false;
+  take.args.length = 0;
   getUserMedia.mockReset();
   getUserMedia.mockImplementation(async () => new FakeMediaStream() as unknown as MediaStream);
   Object.defineProperty(navigator, "mediaDevices", {
@@ -203,4 +212,24 @@ test("acknowledging the alarm leaves the bar reachable for the rest of the take"
   // still a take — no cutting the mic behind the recorder's back.
   expect((screen.getByRole("button", { name: /mic live|mic cut/i }) as HTMLButtonElement).disabled)
     .toBe(true);
+});
+
+// The same truth rule as the pickers above, one layer deeper. commit fd3f186
+// moved every UI consumer off `choice` (stored intent, which can lie) and onto
+// `liveDeviceIds` — but the podcast hook's audioDeviceId was missed, and that
+// one is not cosmetic: it becomes an `exact` deviceId constraint on the tape's
+// OWN mic capture (lib/podcast/recordGraph.ts). A mic that was merely busy at
+// join (Zoom holding it) degrades the call to the default input while the
+// stored pick stays stale forever — so the tape would have recorded the wrong
+// microphone, with nothing faulted and nothing on screen to say so.
+test("the tape's mic follows the LIVE capture, never the stale stored pick", async () => {
+  // Asked for m0; the capture came up on m1 (the fake gUM honours no
+  // constraint — exactly what a busy mic leaves behind).
+  sessionStorage.setItem("cos-devices", JSON.stringify({ audioDeviceId: "m0", videoDeviceId: "c1" }));
+  await enterAndOpenEquipment();
+
+  expect(take.args.length).toBeGreaterThan(0);
+  expect(take.args[take.args.length - 1]!.audioDeviceId).toBe("m1");
+  // Not once, on any render, was the stale intent handed to the recorder.
+  expect(take.args.map((a) => a.audioDeviceId)).not.toContain("m0");
 });

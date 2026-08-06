@@ -279,8 +279,8 @@ async function mintToken() {
     await enterGreenRoomAndProceed(pageA, mainUrl);
     await pageA.getByRole("button", { name: "Burn & Leave" }).waitFor();
     const agents1 = await pageA.getByText("Agents present: 1").isVisible();
-    const awaiting1 = await figcaption(pageA, "Awaiting agent").isVisible();
-    check(agents1 && awaiting1, "A: room created — Agents present: 1, remote tile Awaiting agent");
+    const awaiting1 = await figcaption(pageA, "Copy Invite to fill this seat").isVisible();
+    check(agents1 && awaiting1, "A: room created — Agents present: 1, empty seat says Copy Invite to fill this seat");
 
     // ---- Check 2: A's status becomes waiting ----
     await pageA.waitForFunction(() => window.__cosCall && window.__cosCall.status === "waiting");
@@ -360,8 +360,8 @@ async function mintToken() {
       await p.waitForURL((u) => new URL(u).pathname === "/");
     }
     await pageD.getByText("Agents present: 1").waitFor();
-    await figcaption(pageD, "Awaiting agent").waitFor();
-    check(true, "B leaves — three intact; A and C leave too — D alone: Agents present: 1, Awaiting agent");
+    await figcaption(pageD, "Copy Invite to fill this seat").waitFor();
+    check(true, "B leaves — three intact; A and C leave too — D alone: Agents present: 1, empty seat says Copy Invite to fill this seat");
 
     // ---- Check 12: a fresh context on a different, never-created invite ----
     await enterGreenRoomAndProceed(pageF, inviteUrl(otherKeys));

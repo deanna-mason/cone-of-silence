@@ -1,30 +1,40 @@
-"use client"; // Error boundaries must be Client Components (Next 16.2.9).
+"use client"; // Error boundaries must be Client Components (Next 16.3.0).
 
 import { useEffect } from "react";
 
 // Route-segment error boundary. Wraps every page below the root layout, so the
 // NavBar and footer stay put while this fallback stands in for the blown page.
 //
-// Next 16.2.9 prop signature (node_modules/next/dist/docs/.../file-conventions/
-// error.md): the recover affordance is `unstable_retry` — it re-fetches and
-// re-renders the boundary's children. `reset` is still passed and documented as
-// the "clear state without re-fetch" escape hatch, so we accept both and prefer
-// the retry the docs recommend, falling back to reset on older runtimes.
+// Next 16.3.0 prop signature (node_modules/next/dist/docs/.../file-conventions/
+// error.md): the recover affordance is `retry`, stable as of this version and
+// typed required there — it "will try to re-fetch and re-render the error
+// boundary's children", which is the stronger behavior the copy below promises
+// ("The line is still open — retry to re-establish it"). `reset` is also passed
+// and documented as the narrower escape hatch: it clears the error state and
+// re-renders the children WITHOUT re-fetching. The docs are explicit that "In
+// most cases, you should use retry() instead", so retry wins and reset is the
+// fallback.
+//
+// That fallback is not dead code despite `retry` being required. This prop was
+// `unstable_retry` in 16.2.x and only stabilized under its current name in
+// 16.3.0 (error.md Version History) — the required type is a compile-time
+// promise an older runtime would not keep. If this app is ever run against one,
+// recovery degrades to a re-render instead of throwing on undefined.
 export default function Error({
   error,
   reset,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
-  unstable_retry?: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     // No telemetry sink in this app; the console is the field log.
     console.error(error);
   }, [error]);
 
-  const recover = unstable_retry ?? reset;
+  const recover = retry ?? reset;
 
   return (
     <section className="hairline border bg-inset p-8 text-center">

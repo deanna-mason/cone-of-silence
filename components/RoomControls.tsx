@@ -40,7 +40,15 @@ export default function RoomControls({ canCreate }: { canCreate: boolean }) {
       ) : (
         <div className="mt-6 border border-ink-faint/30 px-5 py-4">
           <p className="font-display text-3xl tracking-[0.06em] text-ink-faint">Initiate Contact</p>
-          <p className="kicker mt-2 text-ink-soft">🔒 creation requires an invitation</p>
+          {/* Locked is not a dead end: the only route forward is the paste
+              line directly below, so this says so instead of stopping at
+              "sealed" (8/5 copy pass). The kicker stays short — at 0.32em
+              tracking a sentence in it is unreadable — and the instruction
+              rides underneath in body text. */}
+          <p className="kicker mt-2 text-ink-soft">◈ Sealed — Invitation Required</p>
+          <p className="mt-2 font-body text-sm text-ink-soft">
+            Already hold an invite? Paste it in the line below to join.
+          </p>
         </div>
       )}
 

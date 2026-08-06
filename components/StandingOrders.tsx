@@ -168,11 +168,10 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
         </button>
       )}
 
+      {/* The lamp and "Line: quiet — standing by" were removed 8/5: both were
+          hardcoded, so the dot reported a line state nothing ever measured.
+          The two facts below are real reads. */}
       <dl className="mt-4 space-y-1 font-type text-sm text-ink-soft">
-        <div className="flex items-center gap-2">
-          <span aria-hidden className="inline-block h-2 w-2 rounded-full bg-brass/70" />
-          <span>Line: quiet — standing by</span>
-        </div>
         <div>Seats: room for 4</div>
         <div>Last convened: {formatConvened(convened)}</div>
       </dl>
@@ -194,7 +193,8 @@ export default function StandingOrders({ room }: { room: RoomKeys }) {
         {!handoffOpen ? (
           <>
             <p className="mt-2 font-body text-sm italic text-ink-soft">
-              Move your studio to another device. The link works until you close it.
+              This link is a bearer key — whoever holds it walks in, and closing this panel takes
+              nothing back. Hand it to your own other device, and to no one else.
             </p>
             <button
               type="button"

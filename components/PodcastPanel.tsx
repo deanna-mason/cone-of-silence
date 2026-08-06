@@ -164,10 +164,16 @@ function pctOf(current: number, total: number): number {
 function RollReminder({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-6">
+      {/* Escape cancels, and Roll It takes focus on open — without them the
+          dialog claimed aria-modal while leaving the keyboard behind it.
+          Focus lands INSIDE this div, so its keydown reaches this handler. */}
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="roll-reminder-title"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onCancel();
+        }}
         className="hairline w-full max-w-md border bg-inset p-6"
       >
         <p className="kicker text-sienna">Before You Roll</p>
@@ -190,7 +196,7 @@ function RollReminder({ onCancel, onConfirm }: { onCancel: () => void; onConfirm
         </ul>
 
         <div className="mt-6 flex flex-wrap gap-3">
-          <button type="button" onClick={onConfirm} className={`${CTA_BUTTON} shrink-0`}>
+          <button autoFocus type="button" onClick={onConfirm} className={`${CTA_BUTTON} shrink-0`}>
             Roll It
           </button>
           <button type="button" onClick={onCancel} className={GHOST_BUTTON}>
@@ -216,6 +222,24 @@ export default function PodcastPanel({
   // The documented exception to this component's props-only rule — see the
   // file header. Declared before the switch so it stays unconditional.
   const [rollReminderOpen, setRollReminderOpen] = useState(false);
+  // The reminder belongs to ONE armed moment, and only the armed branch can
+  // close it — so a reminder the operator never answered strands the flag.
+  // Nothing unmounts this panel mid-call (app/room/page.tsx renders it
+  // unconditionally under `authed`, which does not change during a call), and
+  // plenty pulls the panel out from under an open reminder: the other chair
+  // proposing a roll (countdown), the line dropping, the partner leaving, a
+  // transfer starting. Without this the flag survives all of it and the next
+  // return to armed paints the full-viewport overlay with nobody having asked
+  // for it — and a reflex "Roll It" starts a take the operator never called.
+  //
+  // Cleared here rather than lifted into the take state: the flag still has no
+  // meaning upstream (file header), and adjusting during render — the same
+  // idiom as usePodcastTake's codename retire and fault latch — drops the
+  // overlay in the SAME render as the state change, so an abandoned reminder
+  // is never painted over the new panel for a frame.
+  if (state.kind !== "armed" && rollReminderOpen) {
+    setRollReminderOpen(false);
+  }
   switch (state.kind) {
     case "unsupported":
       return (
@@ -235,7 +259,7 @@ export default function PodcastPanel({
         <div className={ROW_WRAP}>
           <p className="kicker shrink-0 text-sienna">◈ Two Chairs Only</p>
           <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
-            The reel rolls for exactly two agents. Presently: {state.count}.
+            The tape rolls for exactly two agents. Presently: {state.count}.
           </p>
         </div>
       );
@@ -245,7 +269,7 @@ export default function PodcastPanel({
         <div className={ROW_WRAP}>
           <p className="kicker shrink-0 text-sienna">◈ Tape Vault</p>
           <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
-            Choose where the reel is written before the tape can roll.
+            Choose where the take is written before the tape can roll.
           </p>
           <button
             type="button"
@@ -274,18 +298,31 @@ export default function PodcastPanel({
         // at max-w-3xl. (It carried the declaration pair too until 8/5, which
         // is what tipped it over in the first place.)
         <div className={ROW_WRAP}>
-          <p className="kicker shrink-0 text-sienna">◈ Ready to Roll</p>
+          {/* Cut returns here, and until 8/5 the row said only "Ready to Roll"
+              — identical to the pre-roll state, so a take that HAD been
+              secured read as "nothing happened". canSend is precisely "a
+              sendable take exists on disk", so it is what the kicker reports. */}
+          <p className="kicker shrink-0 text-sienna">
+            {state.canSend ? "◈ Take Secured — Ready to Roll" : "◈ Ready to Roll"}
+          </p>
           <span className="flex-1" aria-hidden />
           {/* Once this take has been delivered, a static in-theme marker
-              (text-brass = static positive) replaces Send Episode — a second
-              send of an all-committed episode is an instant "0.0 MB filed."
-              no-op. Roll Tape stays: record another take to send again. */}
+              (text-brass = static positive) replaces the send button — a
+              second send of an all-committed take is an instant "0.0 MB
+              filed." no-op. Roll Tape stays: record another take to send
+              again. */}
           {state.delivered ? (
-            <p className="kicker shrink-0 text-brass">◈ Episode Delivered</p>
+            <p className="kicker shrink-0 text-brass">◈ Take Delivered</p>
           ) : (
             state.canSend && (
               <button type="button" onClick={onSendEpisode} className={GHOST_BUTTON}>
-                {state.restoredTake ? "Send Last Take" : "Send Episode"}
+                {/* What crosses the wire is YOUR HALF — one take. The episode
+                    is what the darkroom makes out of both halves later, so
+                    this button must not promise one (episodeId === takeId,
+                    see hooks/useEpisodeExchange.ts). */}
+                {state.restoredTake
+                  ? "Send Last Take"
+                  : `Send Take to ${state.partnerCodename ?? "Partner"}`}
               </button>
             )
           )}
@@ -413,7 +450,7 @@ export default function PodcastPanel({
       return (
         <div className={ROW_BAR}>
           <div className="flex items-center gap-3">
-            <p className="kicker shrink-0 text-sienna">◈ Incoming Reel</p>
+            <p className="kicker shrink-0 text-sienna">◈ Incoming Take</p>
             {/* Same rule as xfer-sending: sender + progress numbers lead, the
                 part file name is dropped below sm and trails on desktop. */}
             <p className="min-w-0 flex-1 truncate font-body text-sm text-ink-soft">
@@ -439,7 +476,7 @@ export default function PodcastPanel({
           <p className="min-w-0 flex-1 font-body text-sm text-ink-soft">
             {held
               ? "The other chair is still rolling tape. Resume once they cut."
-              : "The line dropped mid-reel. Committed parts are safe in the vault."}
+              : "The line dropped mid-take. Committed parts are safe in the vault."}
           </p>
           {state.direction === "send" && state.canResend && (
             <button type="button" onClick={onResendEpisode} className={CTA_BUTTON}>
@@ -457,7 +494,7 @@ export default function PodcastPanel({
       return (
         <div className={ROW}>
           <p className="kicker shrink-0 text-sienna">
-            {state.direction === "send" ? "◈ Episode Delivered" : "◈ Episode Received"}
+            {state.direction === "send" ? "◈ Take Delivered" : "◈ Take Received"}
           </p>
           <p className="flex-1 truncate font-body text-sm text-ink-soft">{`${mbNum(state.totalBytes)} MB filed.`}</p>
           <button type="button" onClick={onDismissXfer} className={GHOST_BUTTON}>
@@ -468,7 +505,7 @@ export default function PodcastPanel({
 
     case "xfer-fault": {
       const body = state.reason.startsWith("hash-mismatch:")
-        ? "A reel arrived damaged and was burned. Resume to send it again."
+        ? "A take arrived damaged and was burned. Resume to send it again."
         : `The transmission broke down: ${state.reason}.`;
       return (
         <div
