@@ -152,6 +152,70 @@ missing-video-sender shape with no unplug involved.
 **Finding 1 is deliberately untouched** — still un-root-caused, pending the
 capture in `reconnect-desync-evidence.md`.
 
+## Re-drill of block F — 2026-08-05, ~6:30 pm. Both fixes PASS
+
+Bundle confirmed in-browser before the run (`faultedThisTake` present in the
+loaded scripts), after an earlier attempt was invalidated by a stale one — see
+"The stale-bundle lesson" below.
+
+| Fix | Result |
+|---|---|
+| 2 — device bar reachable for the rest of a faulted take | **PASS** |
+| 3 — a device swap adds a sender the link never had | **PASS** |
+
+**Fix 2** proved out by the *fault-cleared* route rather than the acknowledge
+route: the camera alarm cleared on its own when the MacBook camera came back,
+and the pickers stayed available **for the rest of the rolling take**, with no
+"Locked while rolling" notice. Both routes run through the same mechanism —
+dismissing sets `dismissedKey`, clearing empties `faults`, and either drops
+`faultShown` to false and the panel back to `rolling`. Pre-fix that re-locked
+the bar; it did not. The latch holds.
+
+**Fix 3** proved out end to end: with the camera unplugged, Lily dropped wifi
+and the call rebuilt the link; Deanna then replugged and picked the iPhone
+camera, and **Lily saw her on it with neither side rejoining**. A mic swap
+propagated too — Lily heard the change. That is `replaceStream` adding a
+sender to a live link and the far side decrypting it, which is exactly what
+the unit tests could not prove.
+
+Also of note: the wifi drop **self-healed fast this time**, where the night
+before it did not (finding 1 did not reproduce). A "partner went silent" tape
+fault appeared during the drop and self-healed. The take survived the whole
+sequence and never cut.
+
+### New finding 4 (minor): a replugged camera is auto-*shown* but not auto-*selected*
+
+The replugged iPhone appeared in the camera list and displayed as the selected
+option, but the video did not change — Deanna had to re-pick it manually
+before it took effect. Same shape as the night before ("it did say iPhone
+camera was the picked camera"). The picker's displayed value falls back to
+the first device in the list when the stored choice no longer resolves, so the
+UI claims a device is selected while the stream is still on another one.
+Cosmetic next to the rest, but it is a display that lies, and it cost real
+confusion twice.
+
+### The stale-bundle lesson
+
+The first attempt at this re-drill "failed" both fixes. It was run on a bundle
+deployed at 5:29 pm — which already carried the pre-roll reminder, so the
+obvious sanity check ("did you see the new reminder?") passed while the fixes,
+deployed at 5:56 pm, were absent. **A newer-looking UI is not proof of a
+current bundle.** Verify from inside the room, before drilling, with a marker
+belonging to the change under test:
+
+```js
+(async () => {
+  const js = performance.getEntriesByType('resource').map(r => r.name).filter(n => n.endsWith('.js'));
+  for (const u of js) if ((await (await fetch(u)).text()).includes('MARKER')) return console.log('✅ PRESENT');
+  console.log('❌ MISSING — checked ' + js.length + ' scripts');
+})()
+```
+
+Two further traps found the hard way: the room's code only loads once you are
+**in the room**, so the check reads false on the lobby; and DevTools records
+no network traffic from before it was opened, so a Network-panel check of the
+initial load is worthless unless it was open first.
+
 ## Owed
 
 1. Capture and root-cause finding 1 (`reconnect-desync-evidence.md`). No code
