@@ -243,7 +243,16 @@ rolling, which is exactly the distinction `xfr/busy` exists to draw.
    needed exporting. An earlier note in this file said otherwise and was
    wrong.)
 3. Finding 4 (a replugged camera shows as selected without being selected) —
-   cosmetic, unfixed, cost real confusion on two separate nights.
+   **FIXED `fd3f186`, not yet proven live.** The pickers now name the device
+   read off the live track rather than stored intent. Turned out to have three
+   routes, and the likeliest one was a stale-but-still-resolvable choice
+   surviving in `sessionStorage`, not the `?? devices[0]` fallback originally
+   suspected. Next drill: with the camera unplugged the picker should read
+   "No camera live — select one" rather than "iPhone", and after a replug
+   **one** pick should restore video both locally and for the partner.
+   Unverified without hardware: whether a Continuity Camera fires `ended` on
+   unplug, and whether Chrome's `getSettings().deviceId` for it matches what
+   `enumerateDevices()` lists.
 
 ## Block C vault verification — 2026-08-06. PASS, with the contract half-proven
 
