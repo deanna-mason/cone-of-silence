@@ -7,6 +7,15 @@ real ffmpeg darkroom develops the episode, and a **Studio** that enhances
 uploaded recordings (denoise → de-ess → compress → EQ → loudness) on a
 server I run.
 
+A session runs end to end without the server ever seeing content. An invite
+token gets you an account and a room; the room's encryption secret rides the
+URL fragment, so signaling and the TURN relay carry ciphertext only. In podcast
+mode each host records their own camera and mic locally at full quality and
+then ships the take over the call's data channel — the call is the sync signal,
+never the recording. Finished audio goes to the Studio, where a real ffmpeg
+chain denoises, de-esses, compresses, EQs, and normalizes it on hardware I
+control, so every listener gets the same result regardless of their browser.
+
 **Live:** https://www.coneofsilence.app · **Stack:** Next.js + Tailwind (Vercel),
 Express + WebSockets + ffmpeg (DigitalOcean), Supabase Postgres.
 
@@ -19,6 +28,21 @@ Express + WebSockets + ffmpeg (DigitalOcean), Supabase Postgres.
   fits serverless.
 - **Supabase Postgres** — managed SQL with migrations, locked down so only the
   server's service-role key can read anything.
+
+## Packages
+
+The frontend runs on Next, React, and Tailwind alone. Three npm packages do the
+load-bearing work on the server (`server/package.json`):
+
+- **[`ws`](https://github.com/websockets/ws)** — the signaling socket. Setting
+  up a call means trading SDP offers and ICE candidates over a long-lived
+  bidirectional channel, which is what `WS /ws` below is.
+- **[`multer`](https://github.com/expressjs/multer)** — multipart upload
+  parsing for Studio. The 1 GiB/file cap is enforced at the parser, so an
+  oversized upload is rejected mid-stream instead of after it lands on disk.
+- **[`bcryptjs`](https://github.com/dcodeIO/bcrypt.js)** — passphrase hashing.
+  An account is a codename and a bcrypt hash, which is the whole reason the
+  database holds no PII.
 
 ## Pages
 
@@ -74,8 +98,10 @@ policies, so only the server's service-role key can read anything.
   carry ciphertext only ([threat model](docs/security-model.md)).
 - **Fail closed.** Every endpoint validates before touching the database;
   store down means 503, never a silent grant.
-- **Theme follows the OS.** One set of semantic CSS variables flips light and
-  dark; no component ever branches on theme.
+- **Theme follows the OS, until you say otherwise.** One set of semantic CSS
+  variables flips light and dark, and a DAY / NIGHT toggle in the nav overrides
+  the OS in either direction. The choice is a `data-theme` attribute on `<html>`
+  restored before first paint; no component ever branches on theme.
 - **Enhancement is server-side.** The ffmpeg chain runs on hardware I control
   so every listener gets the same result, regardless of their browser.
 - **The room grid is a deliberate no-scroll 2×2.** Every face stays visible on
@@ -95,11 +121,15 @@ policies, so only the server's service-role key can read anything.
 
 ## Run locally
 
-**Prereqs:** Node 22; [ffmpeg](https://ffmpeg.org) built with the `arnndn`
-filter plus its RNNoise model, for Studio's noise-reduction pass; a Supabase
-project — the server refuses to start without `SUPABASE_URL` and
-`SUPABASE_SERVICE_ROLE_KEY`, so lobby, calls, accounts, and studio are all
-unavailable without one.
+**Required to start:** Node 22, and a Supabase project. The server exits on
+boot without `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, or without a
+16-char `ADMIN_SECRET` — [`server/env.example`](server/env.example) carries the
+one-liner that generates one. A fresh database is `supabase db push`.
+
+**Only for Studio's enhancement pass:** [ffmpeg](https://ffmpeg.org) built with
+the `arnndn` filter, plus its RNNoise model, and `RNNOISE_MODEL` + `UPLOAD_DIR`
+in `server/.env`. Everything else — lobby, calls, accounts, podcast mode — runs
+without ffmpeg; an upload just settles into its `FAILED` state.
 
 Copy the env examples and fill them in: [`env.example`](env.example)
 (frontend) and [`server/env.example`](server/env.example) (server).
@@ -111,9 +141,6 @@ cd server && cp env.example .env && npm i && npm run dev   # API + ws :8787
 # terminal 2 — web (repo root)
 npm i && npm run dev                                       # frontend :3000
 ```
-
-Studio processing needs `ffmpeg` (with `arnndn`) plus `RNNOISE_MODEL` and
-`UPLOAD_DIR` in `server/.env`. Fresh database: `supabase db push`.
 
 Darkroom (episode post): the podcast Mac needs node, ffmpeg with arnndn, and the rnnoise model at server/models/std.rnnn — `npm run darkroom -- --vault <Tape Vault>`.
 
