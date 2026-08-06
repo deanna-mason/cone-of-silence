@@ -53,7 +53,6 @@ load-bearing work on the server (`server/package.json`):
 | `/account` | Invite-only register / login (codename + passphrase only) |
 | `/studio` | Upload → watch it process → listen, download, or burn |
 | `/admin` | Operator console: mint / relabel / revoke / purge invite tokens |
-| `/brainstorm` | The original feature-plan dossier |
 
 ## Server API (`server/`)
 

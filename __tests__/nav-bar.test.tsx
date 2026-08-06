@@ -7,7 +7,7 @@ import NavBar from "@/components/NavBar";
 
 afterEach(cleanup);
 
-const DESTINATIONS = ["Lobby", "Dossier", "Studio", "Account"];
+const DESTINATIONS = ["Lobby", "Studio", "Account"];
 
 describe("NavBar", () => {
   test("desktop link row always renders all four destinations", () => {

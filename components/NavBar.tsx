@@ -6,16 +6,16 @@ import ThemeToggle from "@/components/ThemeToggle";
 
 const LINKS = [
   { href: "/", label: "Lobby" },
-  { href: "/brainstorm", label: "Dossier" },
   { href: "/studio", label: "Studio" },
   { href: "/account", label: "Account" },
 ];
 
-// The kicker links (Special_Elite at 0.32em tracking) are expensive: four of
-// them overran a 390px viewport as an inline row (7/30 testers), and adding
-// DAY / NIGHT pushed the row to 799px — wider than the max-w-3xl container's
-// 720px of inner width, which gave EVERY page a horizontal scrollbar from
-// 640px to ~838px (measured; iPad portrait clipped "NIGHT" mid-word).
+// The kicker links (Special_Elite at 0.32em tracking) are expensive: back when
+// there were four they overran a 390px viewport as an inline row (7/30
+// testers), and adding DAY / NIGHT pushed the row to 799px — wider than the
+// max-w-3xl container's 720px of inner width, which gave EVERY page a
+// horizontal scrollbar from 640px to ~838px (measured; iPad portrait clipped
+// "NIGHT" mid-word). Retiring /brainstorm bought that width back.
 //
 // So the collapse point is lg, not sm: below 1024px the whole set — links and
 // theme toggle — lives in a menu button + absolute dropdown, and the nav BAR
@@ -40,12 +40,12 @@ export default function NavBar() {
         </Link>
 
         {/* Desktop: the inline link row. */}
-        {/* gap-3, not gap-5: the container is max-w-3xl, so this row has a
-            FIXED 720px of inner width at EVERY viewport — raising the collapse
-            breakpoint can never buy it more. The row must simply fit in 720px,
-            with enough slack that a webfont fallback (Special Elite → Courier
-            New, appreciably wider) cannot push it over. */}
-        <div className="hidden items-center gap-3 text-ink-soft lg:flex">
+        {/* The container is max-w-3xl, so this row has a FIXED 720px of inner
+            width at EVERY viewport — raising the collapse breakpoint can never
+            buy it more. It must simply fit in 720px, with enough slack that a
+            webfont fallback (Special Elite → Courier New, appreciably wider)
+            cannot push it over. */}
+        <div className="hidden items-center gap-5 text-ink-soft lg:flex">
           {LINKS.map((l, i) => (
             <Fragment key={l.href}>
               {i > 0 && <span className="text-brass/40">/</span>}
@@ -54,10 +54,12 @@ export default function NavBar() {
               </Link>
             </Fragment>
           ))}
-          {/* A hairline rule, not a sixth "/": the toggle is a setting, not a
-              fifth destination, and the rule says so while costing ~20px less
-              than the glyph plus its 0.32em tracking. */}
-          <span aria-hidden className="h-3 w-px shrink-0 bg-brass/40" />
+          {/* A hairline rule, not another "/": the toggle is a setting, not a
+              fourth destination, and the rule says so. mx-2 on top of the row
+              gap widens the gutter on BOTH sides of the rule past the 20px
+              between links, so the toggle reads as its own group rather than
+              crowding the rule. */}
+          <span aria-hidden className="mx-2 h-3 w-px shrink-0 bg-brass/40" />
           <ThemeToggle />
         </div>
 
