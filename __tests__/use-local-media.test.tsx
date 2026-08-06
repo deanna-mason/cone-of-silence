@@ -31,14 +31,48 @@ vi.mock("@/lib/webrtc/media", () => ({
 
 import { useLocalMedia } from "@/hooks/useLocalMedia";
 
-function fakeStream() {
-  const tracks = [
-    { kind: "audio", enabled: true, stop: vi.fn() },
-    { kind: "video", enabled: true, stop: vi.fn() },
-  ];
+/** A track that can report which device it is on and can be killed the way an
+ *  unplugged camera kills one: readyState flips to "ended" and `ended` fires. */
+function fakeTrack(kind: "audio" | "video", deviceId: string) {
+  const listeners = new Map<string, Set<() => void>>();
+  return {
+    kind,
+    enabled: true,
+    readyState: "live" as MediaStreamTrackState,
+    deviceId,
+    stop: vi.fn(),
+    getSettings() {
+      return { deviceId: this.deviceId };
+    },
+    addEventListener(type: string, fn: () => void) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)!.add(fn);
+    },
+    removeEventListener(type: string, fn: () => void) {
+      listeners.get(type)?.delete(fn);
+    },
+    /** Unplug: the source went away. */
+    unplug(fireEnded = true) {
+      this.readyState = "ended";
+      if (fireEnded) listeners.get("ended")?.forEach((fn) => fn());
+    },
+  };
+}
+
+function fakeStream(ids: { audio?: string; video?: string } = {}) {
+  const tracks = [fakeTrack("audio", ids.audio ?? "m1"), fakeTrack("video", ids.video ?? "c1")];
   return {
     getAudioTracks: () => tracks.filter((t) => t.kind === "audio"),
     getVideoTracks: () => tracks.filter((t) => t.kind === "video"),
+    getTracks: () => tracks,
+  };
+}
+
+function audioOnlyStream() {
+  const tracks = [fakeTrack("audio", "m1")];
+  return {
+    getAudioTracks: () => tracks,
+    getVideoTracks: () => [],
     getTracks: () => tracks,
   };
 }
@@ -125,4 +159,73 @@ test("devicechange re-reads the device lists (8/5 drill: replugged camera must a
   unmount();
   expect(listeners.has("devicechange")).toBe(false);
   vi.unstubAllGlobals();
+});
+
+// 8/5 re-drill, finding 4. The pickers used to display stored *intent*
+// (`choice`, falling back to the first name in the list), which stays put when
+// a camera is unplugged and no re-acquire happens — so the UI named a camera
+// the capture was not on. liveDeviceIds is read off the tracks themselves.
+test("liveDeviceIds report the devices the tracks are actually on", async () => {
+  getLocalStream.mockImplementation(async () => fakeStream({ audio: "m9", video: "c9" }));
+  const { result } = await mountReady();
+  await waitFor(() =>
+    expect(result.current.liveDeviceIds).toEqual({ audioDeviceId: "m9", videoDeviceId: "c9" }),
+  );
+});
+
+test("a camera unplugged mid-call drops out of liveDeviceIds — the mic is untouched", async () => {
+  const stream = fakeStream();
+  getLocalStream.mockImplementation(async () => stream);
+  const { result } = await mountReady();
+  await waitFor(() => expect(result.current.liveDeviceIds.videoDeviceId).toBe("c1"));
+
+  act(() => stream.getVideoTracks()[0].unplug());
+
+  await waitFor(() => expect(result.current.liveDeviceIds.videoDeviceId).toBeUndefined());
+  expect(result.current.liveDeviceIds.audioDeviceId).toBe("m1");
+});
+
+// getLocalStream's audio-only degrade reaches the same shape with no unplug at
+// all: a stashed videoDeviceId, and no video track to honour it.
+test("an audio-only degrade reports no live camera", async () => {
+  getLocalStream.mockImplementation(async () => audioOnlyStream());
+  const { result } = await mountReady();
+  await waitFor(() => expect(result.current.liveDeviceIds.audioDeviceId).toBe("m1"));
+  expect(result.current.liveDeviceIds.videoDeviceId).toBeUndefined();
+});
+
+// Belt and braces for Deanna's rig: a Continuity Camera is not guaranteed to
+// fire `ended` on the track when the phone drops off. devicechange fires
+// regardless, so re-read the live tracks there too.
+test("devicechange re-reads the live tracks, even with no ended event", async () => {
+  const listeners = new Map<string, () => void>();
+  vi.stubGlobal("navigator", {
+    mediaDevices: {
+      addEventListener: (type: string, fn: () => void) => listeners.set(type, fn),
+      removeEventListener: (type: string) => listeners.delete(type),
+    },
+  });
+  const stream = fakeStream();
+  getLocalStream.mockImplementation(async () => stream);
+  const { result } = await mountReady();
+  await waitFor(() => expect(result.current.liveDeviceIds.videoDeviceId).toBe("c1"));
+
+  stream.getVideoTracks()[0].unplug(false); // no `ended` event
+  act(() => listeners.get("devicechange")!());
+
+  await waitFor(() => expect(result.current.liveDeviceIds.videoDeviceId).toBeUndefined());
+  vi.unstubAllGlobals();
+});
+
+test("switching cameras moves liveDeviceIds to the new device", async () => {
+  getLocalStream.mockImplementation(async () => fakeStream({ video: "c1" }));
+  const { result } = await mountReady();
+  await waitFor(() => expect(result.current.liveDeviceIds.videoDeviceId).toBe("c1"));
+
+  getLocalStream.mockImplementation(async () => fakeStream({ video: "c2" }));
+  await act(async () => {
+    await result.current.switchDevice("video", "c2");
+  });
+
+  await waitFor(() => expect(result.current.liveDeviceIds.videoDeviceId).toBe("c2"));
 });

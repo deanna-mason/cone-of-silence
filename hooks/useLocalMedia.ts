@@ -17,10 +17,36 @@ import {
   type MediaFailure,
 } from "@/lib/webrtc/media";
 
+/** The devices the capture is ACTUALLY on, read off the live tracks. Distinct
+ *  from `choice`, which is only what was asked for: an unplugged camera ends
+ *  its track without any re-acquire, and getLocalStream's audio-only degrade
+ *  can return a stream that honours no videoDeviceId at all. Undefined means
+ *  "cannot say" — never a guess. */
+export interface LiveDeviceIds {
+  audioDeviceId?: string;
+  videoDeviceId?: string;
+}
+
+function readLiveDeviceIds(stream: MediaStream | null): LiveDeviceIds {
+  const idOf = (track: MediaStreamTrack | undefined): string | undefined => {
+    if (!track || track.readyState !== "live") return undefined;
+    // Safari has shipped getSettings() without a deviceId; a blank id is
+    // "unknown", which the picker renders as nothing selected.
+    return track.getSettings?.().deviceId || undefined;
+  };
+  if (!stream) return {};
+  return {
+    audioDeviceId: idOf(stream.getAudioTracks()[0]),
+    videoDeviceId: idOf(stream.getVideoTracks()[0]),
+  };
+}
+
 export interface LocalMedia {
   stream: MediaStream | null;
   devices: DeviceLists;
+  /** What was *asked for*. For what is actually live, use liveDeviceIds. */
   choice: MediaDeviceChoice;
+  liveDeviceIds: LiveDeviceIds;
   micOn: boolean;
   camOn: boolean;
   hasCamera: boolean;
@@ -46,6 +72,7 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [failure, setFailure] = useState<MediaFailure | null>(null);
+  const [liveDeviceIds, setLiveDeviceIds] = useState<LiveDeviceIds>({});
 
   // Acquire when enabled (kept across green-room ⇄ in-room; `failure: null`
   // in the deps means retry() re-triggers acquisition by clearing it).
@@ -94,6 +121,10 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
     if (!md?.addEventListener) return;
     let cancelled = false;
     const refresh = () => {
+      // Belt and braces for finding 4: a Continuity Camera is not guaranteed
+      // to fire `ended` on its track when the phone drops off, but devicechange
+      // fires either way — so re-read what is live here too, not just the list.
+      setLiveDeviceIds(readLiveDeviceIds(streamRef.current));
       void listDevices().then((lists) => {
         if (!cancelled) setDevices(lists);
       });
@@ -104,6 +135,19 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
       md.removeEventListener("devicechange", refresh);
     };
   }, [enabled]);
+
+  // Track what the capture is actually on (8/5 re-drill, finding 4). A track
+  // that ends — camera unplugged mid-call — changes no React state of its own,
+  // so subscribe to `ended` and re-read; otherwise the pickers would go on
+  // naming a camera that stopped running.
+  useEffect(() => {
+    const read = () => setLiveDeviceIds(readLiveDeviceIds(stream));
+    read();
+    if (!stream) return;
+    const tracks = stream.getTracks();
+    tracks.forEach((t) => t.addEventListener?.("ended", read));
+    return () => tracks.forEach((t) => t.removeEventListener?.("ended", read));
+  }, [stream]);
 
   // Shared re-acquire behind switchDevice/flipCamera: swap to `next`, keep the
   // live mute state, release the old capture, and drop any stream a newer
@@ -190,6 +234,7 @@ export function useLocalMedia(enabled: boolean): LocalMedia {
     stream,
     devices,
     choice,
+    liveDeviceIds,
     micOn,
     camOn,
     hasCamera: stream !== null && stream.getVideoTracks().length > 0,

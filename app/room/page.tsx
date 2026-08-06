@@ -412,13 +412,13 @@ export default function RoomPage() {
           <DevicePicker
             label="Microphone"
             devices={media.devices.mics}
-            selectedId={media.choice.audioDeviceId ?? media.devices.mics[0]?.deviceId}
+            selectedId={media.liveDeviceIds.audioDeviceId}
             onSelect={(id) => void media.switchDevice("audio", id)}
           />
           <DevicePicker
             label="Camera"
             devices={media.devices.cameras}
-            selectedId={media.choice.videoDeviceId ?? media.devices.cameras[0]?.deviceId}
+            selectedId={media.liveDeviceIds.videoDeviceId}
             onSelect={(id) => void media.switchDevice("video", id)}
           />
         </div>
@@ -618,7 +618,8 @@ export default function RoomPage() {
       <InCallDeviceBar
         mics={media.devices.mics}
         cameras={media.devices.cameras}
-        choice={media.choice}
+        liveMicId={media.liveDeviceIds.audioDeviceId}
+        liveCameraId={media.liveDeviceIds.videoDeviceId}
         hasCamera={media.hasCamera}
         locked={deviceBarLocked}
         onSelectMic={(id) => void media.switchDevice("audio", id)}

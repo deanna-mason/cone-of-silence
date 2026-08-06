@@ -75,9 +75,28 @@ const SECRET = "B".repeat(22);
 const getUserMedia = vi.fn<() => Promise<MediaStream>>();
 
 class FakeMediaStream extends EventTarget {
+  // readyState/getSettings are what the pickers read to tell the truth about
+  // which device is live (8/5 finding 4) — the capture lands on m1/c1 here
+  // whatever was asked for.
   private tracks = [
-    { kind: "audio", enabled: true, stop() {} },
-    { kind: "video", enabled: true, stop() {} },
+    {
+      kind: "audio",
+      enabled: true,
+      readyState: "live",
+      stop() {},
+      getSettings: () => ({ deviceId: "m1" }),
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    {
+      kind: "video",
+      enabled: true,
+      readyState: "live",
+      stop() {},
+      getSettings: () => ({ deviceId: "c1" }),
+      addEventListener() {},
+      removeEventListener() {},
+    },
   ];
   getAudioTracks() {
     return this.tracks.filter((t) => t.kind === "audio");
@@ -123,6 +142,19 @@ async function enterAndOpenEquipment() {
   fireEvent.click(await screen.findByRole("button", { name: /enter the cone/i }));
   fireEvent.click(await screen.findByRole("button", { name: /equipment/i }));
 }
+
+// 8/5 re-drill, finding 4 — the page wiring, end to end. A stale iPhone pick
+// is stashed from a previous session but the capture came up on the MacBook
+// (exactly the shape an unplug leaves: the stored choice outlives the device).
+// The bar must name the camera that is live, not the one that was asked for —
+// a picker already displaying the wanted camera fires no change event when it
+// is picked again, which is why the swap needed two clicks on the drill.
+test("the device bar names the live camera, not the stale stashed choice", async () => {
+  sessionStorage.setItem("cos-devices", JSON.stringify({ audioDeviceId: "m1", videoDeviceId: "c2" }));
+  await enterAndOpenEquipment();
+
+  expect((screen.getByLabelText("Camera") as HTMLSelectElement).value).toBe("c1");
+});
 
 test("a clean rolling take locks the device bar — a swap would poison the tape", async () => {
   take.panel = {

@@ -12,7 +12,6 @@
 import { useState, useSyncExternalStore } from "react";
 import DevicePicker from "@/components/DevicePicker";
 import { LensIcon } from "@/components/icons";
-import type { MediaDeviceChoice } from "@/lib/webrtc/media";
 
 const COARSE_POINTER_QUERY = "(pointer: coarse)";
 
@@ -38,7 +37,11 @@ function getCoarsePointerServerSnapshot(): boolean {
 interface InCallDeviceBarProps {
   mics: MediaDeviceInfo[];
   cameras: MediaDeviceInfo[];
-  choice: MediaDeviceChoice;
+  /** The mic/camera the capture is ACTUALLY on (useLocalMedia.liveDeviceIds),
+   *  not the stored choice — see the truth rule in DevicePicker. Undefined
+   *  means nothing is live and the picker shows nothing selected. */
+  liveMicId?: string;
+  liveCameraId?: string;
   hasCamera: boolean;
   /** True while a podcast take is in progress — swaps disabled to protect the tape. */
   locked: boolean;
@@ -50,7 +53,8 @@ interface InCallDeviceBarProps {
 export default function InCallDeviceBar({
   mics,
   cameras,
-  choice,
+  liveMicId,
+  liveCameraId,
   hasCamera,
   locked,
   onSelectMic,
@@ -111,14 +115,14 @@ export default function InCallDeviceBar({
             <DevicePicker
               label="Microphone"
               devices={mics}
-              selectedId={choice.audioDeviceId ?? mics[0]?.deviceId}
+              selectedId={liveMicId}
               onSelect={onSelectMic}
               disabled={locked}
             />
             <DevicePicker
               label="Camera"
               devices={cameras}
-              selectedId={choice.videoDeviceId ?? cameras[0]?.deviceId}
+              selectedId={liveCameraId}
               onSelect={onSelectCamera}
               disabled={locked}
             />
