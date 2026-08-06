@@ -691,13 +691,15 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     await pageA.getByRole("button", { name: "Dismiss" }).click(); // dismiss A's xfer-done card (renamed from "File Away", 5fd9399)
     await waitPod(pageA, "armed", 5000);
     // 5fd9399's delivered state: after delivery the armed card shows a static
-    // Episode Delivered marker and deliberately does NOT re-offer Send — a
-    // fresh take (check 4's roll) is what re-arms it.
-    const deliveredMarker = await pageA.getByText("◈ Episode Delivered").isVisible();
+    // Take Delivered marker and deliberately does NOT re-offer Send — a
+    // fresh take (check 4's roll) is what re-arms it. ("Episode Delivered"
+    // until the 8/5 copy pass: what crosses the wire is one take, and the
+    // episode is what the darkroom makes of both halves later.)
+    const deliveredMarker = await pageA.getByText("◈ Take Delivered").isVisible();
     const sendGoneAfterDelivery = !(await pageA.getByRole("button", { name: SEND_TAKE_BUTTON }).isVisible());
     check(
       deliveredMarker && sendGoneAfterDelivery,
-      "A dismisses the delivered card — armed shows Episode Delivered; Send re-arms only with a fresh take",
+      "A dismisses the delivered card — armed shows Take Delivered; Send re-arms only with a fresh take",
     );
 
     // =====================================================================
@@ -706,7 +708,7 @@ async function waitForFirstCommittedPart(pageB, takeDir, maxMs) {
     // deviation note 1), whose disk content is then overwritten with the
     // synthetic fixture. A presses the send button -> sending begins.
     // =====================================================================
-    // B's "Episode Received" card is still up — dismiss it so B's armed panel
+    // B's "Take Received" card is still up — dismiss it so B's armed panel
     // is reachable before the next roll. (It also carried a headphones
     // declaration that had to be re-answered here, until 2026-08-05.)
     await pageB.getByRole("button", { name: "Dismiss" }).click();
