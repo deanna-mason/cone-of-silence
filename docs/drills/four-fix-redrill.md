@@ -1,9 +1,11 @@
 # Four-fix re-drill (2026-08-05 findings)
 
-> **Superseded for the next run — use `next-drill-runsheet.md`.** That sheet
-> covers what is actually owed (block F, plus the finding-1 capture) and is
-> current with the retired headphones declaration. This card is kept for the
-> blocks it already proved and for the record of what each block tests.
+> **Kept for the record — nothing on this card is owed.** It once pointed at
+> `next-drill-runsheet.md` as "what is actually owed"; that sheet is **closed
+> too** (marked 2026-08-06 — its block F re-drill passed at 18:29 and its
+> finding-1 capture was deferred at 19:43). Current state of every block lives
+> in `2026-08-05-four-fix-redrill-report.md`. This card is kept for the blocks
+> it proved and for the record of what each block tests.
 >
 > **Stale here:** ab051eb retired the per-take headphones declaration. Roll
 > Tape is ungated and now opens a pre-roll reminder (Confirm / Not Yet) that
@@ -16,7 +18,7 @@ has been proven live.** This card proves them, in one sitting, on the real
 site.
 
 Two Macs, two rigs, Deanna + Lily, headphones on both (the 8/4 rule — the
-declaration is a warning, not a remedy). Continuity Camera on at least
+app only reminds; nothing enforces it). Continuity Camera on at least
 Deanna's side, since two blocks unplug it.
 
 Each block names the **pre-fix symptom** as well as the expected result. A
@@ -143,15 +145,25 @@ camera until F5.
 ## Results
 
 **Run 2026-08-05 evening — see `2026-08-05-four-fix-redrill-report.md`.**
-Fixes 1a, 1b, 2a and 4 proved out; 2b unreachable by design; **fix 3 failed**,
-plus two new findings (a reconnect roster desync, and a link that can never
-regain a video sender).
+Fixes 1a, 1b, 2a and 4 proved out; 2b unreachable by design; **fix 3 failed on
+this run**, plus two new findings (a reconnect roster desync, and a link that
+can never regain a video sender).
+
+> **Superseded the same evening (noted 2026-08-06).** Both of those findings
+> were fixed and **proven live at ~6:30 pm** — `dc509d0` (device bar stays
+> reachable for the rest of a faulted take) and `d73d06a` (a device swap adds a
+> sender the link never had). **Fix 3 now PASSES**; the table's FAIL row is the
+> first run's record, not current state. Also closed since: D4 resume → deliver
+> **PASS**, and Block C's vault parts **verified**. Still open and deliberately
+> deferred: the **reconnect roster desync** — not fixed, not in this
+> submission.
 
 > **Card bug, found by the run:** F1 says "Acknowledge" the camera alarm.
 > Acknowledging drops the panel out of `fault` back to `rolling`, which
-> re-locks the device bar — so the step defeats the very thing F5 tests. Once
-> fix 3 is repaired, F5 must be run **both** ways: alarm acknowledged and
-> alarm still on screen.
+> re-locks the device bar — so the step defeats the very thing F5 tests. Fix 3
+> has since been repaired and proven, but by the *fault-cleared* route rather
+> than the acknowledge route, so F5 still wants a run **both** ways: alarm
+> acknowledged and alarm still on screen.
 
 | Fix | Block | Result |
 |---|---|---|
@@ -159,7 +171,7 @@ regain a video sender).
 | 1b — orphan self-cut on hello | C | PASS |
 | 2a — interrupted card reads in full | D | PASS |
 | 2b — "Transmission Held" | E | Not attempted — heals too fast; unreachable by design |
-| 3 — camera re-attach path | F5–F7 | **FAIL** (device bar stayed locked; video never reached the partner). Live device lists: PASS |
+| 3 — camera re-attach path | F5–F7 | **FAIL on the first run** (device bar stayed locked; video never reached the partner). Live device lists: PASS. **Since repaired and PROVEN LIVE 2026-08-05 ~6:30 pm** (`dc509d0` + `d73d06a`) — see the report's "Re-drill of block F" |
 | 4 — two-way audio after reconnect | F2–F3 | PASS |
 
 Anything that fails: capture the card verbatim (photo), note which side saw

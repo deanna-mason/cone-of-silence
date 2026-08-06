@@ -1,5 +1,35 @@
 # Runsheet — the drill owed as of 2026-08-05 evening
 
+> ## CLOSED — nothing on this sheet is owed. Written 17:57, overtaken by 20:05.
+>
+> **Marked 2026-08-06.** This sheet was written at 17:57 on 2026-08-05 and both
+> of its parts were settled later the same evening. It is kept as the record of
+> how that drill was to be run — **do not run it as written, and do not read it
+> as an outstanding obligation.**
+>
+> | This sheet's item | Actual outcome |
+> |---|---|
+> | **Part 1** — prove findings 2 and 3 live | **PASS, 18:29** (`befad8b`). Device bar stayed reachable for the rest of a faulted take; a device swap added a video sender the rebuilt link never had, and Lily saw it with neither side rejoining. See `2026-08-05-four-fix-redrill-report.md` → "Re-drill of block F". |
+> | **Part 2** — capture evidence for finding 1 (roster desync) | **DEFERRED by Deanna, 19:43** (`f56ff44`). Deliberately **not** in the final submission; still an open, un-root-caused bug — see "Known limitation" below. |
+> | "Still owed": Block C vault parts | **VERIFIED, 19:59** (`3661802`). Lily's tape whole — four parts, all SHA-256 matching, both tone marks. Deanna's side passes only vacuously (see that report's Block C section). |
+> | "Still owed": D4 (resume → deliver) | **PASS, 19:43** (`f56ff44`). Resume Transmission picked up the parked transfer and delivered the episode in full. |
+>
+> **Known limitation, still open and staying open:** the **reconnect roster
+> desync** (finding 1). Rare but severe — when it hits, the two sides disagree
+> about who is in the room and the call is dead until someone rejoins. It is
+> deferred by the project owner, excluded from this submission, and must not be
+> recorded as fixed. Capture playbook: `reconnect-desync-evidence.md`. Demo
+> workaround: the host who did **not** drop leaves and rejoins.
+>
+> **What is genuinely owed after all this** — nothing blocking, and no part of
+> it re-runs this sheet:
+> 1. Finding 4 (`fd3f186`, 20:05) — pickers now name the camera actually live —
+>    is **fixed but not proven live**; fold the check into the next drill.
+> 2. The force-quit contract's second half (everything *committed* before a
+>    force-quit survives) is still unproven — it needs a force-quit more than
+>    two part rotations (>2 min) into a take.
+> 3. The finding-1 evidence capture above, whenever Deanna picks it back up.
+
 One sitting, two parts. Deanna + Lily, two Macs, Continuity Camera on
 **Deanna's** side.
 
@@ -133,9 +163,13 @@ Leaving closes the connection and takes some of this with it.
 2. Part 2: what each side showed at step 7, and the starred times.
 3. That `~/Desktop/drill-evidence/` is populated.
 
-## Still owed after this (not tonight)
+## Still owed after this (not tonight) — BOTH CLOSED, see the banner at the top
 
-- Block C's vault parts were never verified — concatenate both sides' parts in
+- ~~Block C's vault parts were never verified — concatenate both sides' parts in
   sidecar order and confirm clean playback with both tone marks. Needs the
-  parts exported out of the OPFS vault to disk first.
-- D4 (resume → deliver) never ran.
+  parts exported out of the OPFS vault to disk first.~~ **DONE 2026-08-05 19:59
+  (`3661802`).** Lily's four parts hash-verify and concatenate clean with both
+  tone marks. (The "export out of OPFS first" note was wrong — that vault is a
+  real picked directory at `~/Documents/Podcast Reel/`.) One half of the
+  force-quit contract remains unproven; see the banner.
+- ~~D4 (resume → deliver) never ran.~~ **PASS 2026-08-05 19:43 (`f56ff44`).**

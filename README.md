@@ -78,6 +78,10 @@ policies, so only the server's service-role key can read anything.
   dark; no component ever branches on theme.
 - **Enhancement is server-side.** The ffmpeg chain runs on hardware I control
   so every listener gets the same result, regardless of their browser.
+- **The room grid is a deliberate no-scroll 2×2.** Every face stays visible on
+  a phone at once, tiles sized in `dvh` — chosen over a stacked scrolling
+  mobile layout. An intentional constraint the layout is built around, not a
+  missing breakpoint.
 
 ## Hardest parts
 
