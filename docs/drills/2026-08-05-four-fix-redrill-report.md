@@ -238,9 +238,56 @@ rolling, which is exactly the distinction `xfr/busy` exists to draw.
    downgraded to "works fine." No code until the evidence in
    `reconnect-desync-evidence.md` is captured. Workaround for the demo: the
    host who did **not** drop leaves and rejoins.
-2. Re-verify Block C's vault parts: concatenate Deanna's and Lily's parts in
-   sidecar order and confirm both play clean with both tone marks. Needs the
-   parts exported out of the OPFS vault to disk first. **The only drill item
-   still genuinely open.**
+2. ~~Re-verify Block C's vault parts.~~ **DONE — see below.** (The vault is a
+   real picked directory at `~/Documents/Podcast Reel/`, not OPFS; nothing
+   needed exporting. An earlier note in this file said otherwise and was
+   wrong.)
 3. Finding 4 (a replugged camera shows as selected without being selected) —
    cosmetic, unfixed, cost real confusion on two separate nights.
+
+## Block C vault verification — 2026-08-06. PASS, with the contract half-proven
+
+Block C is **`take-20260805-2303-fc01`** (vault = `~/Documents/Podcast Reel/`).
+Identified from file evidence, not timestamps alone: both local parts are
+**exactly 0 bytes** (the empty-string SHA), **neither local sidecar exists**,
+and `episode.json` carries `"local": null`. `vault.ts` explains that shape
+precisely — `getFileHandle(create:true)` makes the file on first append, but a
+`FileSystemWritableFileStream` only commits bytes at `close()`, so a force-quit
+leaves a created-but-empty file and no sidecar. That is a crash signature, not
+an empty take.
+
+The three sibling takes are each independently explained, which is what makes
+the identification safe: `2258-d527` is the Block A/B take (110.16 s, survived
+the server restart, cut cleanly both sides); `2306-af41` is the Block D
+wifi-kill (local complete with both sidecars, but `remote/` holds audio and no
+video and there is no `episode.json` — a transfer that died in flight);
+`2314-f0a6` is a complete 182.34 s take that was never sent.
+
+**Lily's side — unambiguous PASS.** Four parts, every SHA-256 matching the
+manifest, concatenating in manifest order into 64.14 s that decodes start to
+finish with **zero errors and zero warnings**, no PTS discontinuity across the
+part boundary, and **both tone marks present** — start onset 0.393 s, end
+63.555 s, span 63.163 s, with exactly four beep runs in the whole track and no
+spurious or echo beeps. Fix 1b's self-cut ended her reel and left her tape
+whole. (Independently re-checked in the parent session: the concatenation
+decodes at exit 0.)
+
+**Deanna's side — passes, but vacuously, and this is the part worth knowing.**
+Exactly one part per stream was lost and it was the in-flight one, which is the
+most the contract allows. But the take ran only ~64 s against a 60 s part
+rotation and she force-quit inside the first part, so **zero parts had ever
+been committed**. The other half of the contract — *everything committed before
+the force-quit survives* — was never exercised here and remains **unproven**.
+Proving it needs a force-quit at least two part rotations (>2 min) into a take.
+Worth folding into a future drill rather than re-running tonight.
+
+**Bonus finding — the 7/31 missing-start-mark defect does not reproduce.**
+Deanna's local audio in all three neighbouring takes carries both marks (starts
+at 0.065 s; ends at 109.596 / 69.159 / 181.798 s), each with exactly four
+correctly-paired beep runs. Her rig was emitting start marks on 8/5. That
+closes a doubt left open since the 7/31 dress rehearsal.
+
+**Housekeeping:** every part file across all four takes hash-verified — 24 of
+24, sizes and digests. No `.crswap` leftovers, no gaps in part numbering. One
+loose end: `2306-af41/remote/` holds a half-delivered episode (audio, no video,
+no manifest) still sitting in the vault.
