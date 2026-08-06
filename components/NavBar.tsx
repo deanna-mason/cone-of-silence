@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from "react";
 import Link from "next/link";
+import ThemeToggle from "@/components/ThemeToggle";
 
 const LINKS = [
   { href: "/", label: "Lobby" },
@@ -10,11 +11,16 @@ const LINKS = [
   { href: "/account", label: "Account" },
 ];
 
-// The four kicker links (Special_Elite at 0.32em tracking) overrun a 390px
-// viewport as an inline row (7/30 testers). Below sm they collapse into a
-// menu button + an absolute dropdown, so the nav BAR itself stays a single
-// row of the same height — the room no-scroll geometry (100svh − 7rem in
-// app/room/page.tsx) depends on the chrome height not growing on mobile.
+// The kicker links (Special_Elite at 0.32em tracking) are expensive: four of
+// them overran a 390px viewport as an inline row (7/30 testers), and adding
+// DAY / NIGHT pushed the row to 799px — wider than the max-w-3xl container's
+// 720px of inner width, which gave EVERY page a horizontal scrollbar from
+// 640px to ~838px (measured; iPad portrait clipped "NIGHT" mid-word).
+//
+// So the collapse point is lg, not sm: below 1024px the whole set — links and
+// theme toggle — lives in a menu button + absolute dropdown, and the nav BAR
+// stays a single row of the same height. The room no-scroll geometry
+// (100svh − 7rem in app/room/page.tsx) depends on that height not growing.
 export default function NavBar() {
   const [open, setOpen] = useState(false);
   return (
@@ -34,7 +40,12 @@ export default function NavBar() {
         </Link>
 
         {/* Desktop: the inline link row. */}
-        <div className="hidden items-center gap-5 text-ink-soft sm:flex">
+        {/* gap-3, not gap-5: the container is max-w-3xl, so this row has a
+            FIXED 720px of inner width at EVERY viewport — raising the collapse
+            breakpoint can never buy it more. The row must simply fit in 720px,
+            with enough slack that a webfont fallback (Special Elite → Courier
+            New, appreciably wider) cannot push it over. */}
+        <div className="hidden items-center gap-3 text-ink-soft lg:flex">
           {LINKS.map((l, i) => (
             <Fragment key={l.href}>
               {i > 0 && <span className="text-brass/40">/</span>}
@@ -43,6 +54,11 @@ export default function NavBar() {
               </Link>
             </Fragment>
           ))}
+          {/* A hairline rule, not a sixth "/": the toggle is a setting, not a
+              fifth destination, and the rule says so while costing ~20px less
+              than the glyph plus its 0.32em tracking. */}
+          <span aria-hidden className="h-3 w-px shrink-0 bg-brass/40" />
+          <ThemeToggle />
         </div>
 
         {/* Mobile: a compact toggle (kept shorter than the 24px logo so the
@@ -53,7 +69,7 @@ export default function NavBar() {
           aria-expanded={open}
           aria-controls="nav-menu"
           onClick={() => setOpen((v) => !v)}
-          className="kicker shrink-0 border border-ink-faint/30 px-2.5 py-1 text-ink-soft transition hover:border-brass hover:text-signal sm:hidden"
+          className="kicker shrink-0 border border-ink-faint/30 px-2.5 py-1 text-ink-soft transition hover:border-brass hover:text-signal lg:hidden"
         >
           {open ? "Close" : "Menu"}
         </button>
@@ -63,7 +79,7 @@ export default function NavBar() {
         {open && (
           <div
             id="nav-menu"
-            className="hairline absolute left-0 right-0 top-full flex flex-col border-b bg-field/95 text-ink-soft backdrop-blur-sm sm:hidden"
+            className="hairline absolute left-0 right-0 top-full flex flex-col border-b bg-field/95 text-ink-soft backdrop-blur-sm lg:hidden"
           >
             {LINKS.map((l) => (
               <Link
@@ -75,6 +91,12 @@ export default function NavBar() {
                 {l.label}
               </Link>
             ))}
+            {/* A dropdown row like the others — never beside the Menu button,
+                which would grow the bar itself. Choosing a theme leaves the
+                menu open so the palette change is visible behind it. */}
+            <div className="flex items-center border-t border-ink-faint/15 px-6 py-4">
+              <ThemeToggle />
+            </div>
           </div>
         )}
       </div>

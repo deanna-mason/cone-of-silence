@@ -4,6 +4,21 @@
  * Semantic palette. Light (aged-dossier paper) is the default; the
  * prefers-color-scheme block below resurrects the original spy-noir
  * palette as night ops. Components consume --color-* utilities only.
+ *
+ * Three states (see lib/theme.ts):
+ *   :root                                          — DAY, and the OS-follow default
+ *   @media (dark) :root:not([data-theme="light"])  — NIGHT when the OS says so
+ *   :root[data-theme="dark" | "light"]             — the nav toggle's override
+ *
+ * These do NOT resolve by specificity: :not() takes the specificity of its
+ * argument, so :root:not([data-theme="light"]) is (0,2,0) — exactly equal to
+ * :root[data-theme="dark"]. They never conflict anyway, by construction:
+ *   - forced DAY  — the :not() excludes it, so the media block cannot apply.
+ *   - forced NIGHT on a dark OS — both apply, but their declarations are
+ *     identical, so which one wins is unobservable.
+ * That second point is the one to preserve: the night palette is duplicated
+ * below, and the two copies MUST be edited together or forced-NIGHT and
+ * OS-NIGHT will drift apart. __tests__/theme-css.test.ts fails if they do.
  */
 :root {
   color-scheme: light dark;
@@ -30,11 +45,21 @@
   --grain-opacity: 0.06;
   --hairline-color: color-mix(in srgb, #c79a3b 55%, transparent);
   --cta-glow-shadow: 0 0 0 1px rgba(215, 57, 31, 0.30), 0 10px 30px -14px rgba(215, 57, 31, 0.55);
+
+  /* Which word the nav's DAY / NIGHT toggle lights up. A palette token rather
+     than a className because the server cannot know the viewer's OS: a
+     JS-computed class would render DAY lit, then snap to NIGHT at hydration
+     on every dark-OS load. As a variable the right word is lit in the first
+     paint, by the same rules that pick the palette itself. */
+  --theme-day: var(--signal);
+  --theme-night: var(--ink-faint);
 }
 
-/* Night ops: the original spy-noir palette (see the dark-mode spec) */
+/* Night ops: the original spy-noir palette (see the dark-mode spec).
+   :not([data-theme="light"]) is what lets the nav toggle force DAY on a
+   dark-OS machine — without it this block would still apply there. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --field: #14110f;
     --field-deep: #0c0a09;
     --inset: #1c1815;
@@ -52,7 +77,45 @@
     --grain-opacity: 0.05;
     --hairline-color: color-mix(in srgb, #c79a3b 45%, transparent);
     --cta-glow-shadow: 0 0 0 1px rgba(240, 73, 44, 0.35), 0 10px 40px -12px rgba(215, 57, 31, 0.7);
+
+    --theme-day: var(--ink-faint);
+    --theme-night: var(--signal);
   }
+}
+
+/* NIGHT chosen in the nav, whatever the OS says. Same night-ops palette as the
+   block above — only the trigger differs, so the two move together. */
+:root[data-theme="dark"] {
+  /* Resolve the `light dark` pair to one mode, or native controls and
+     scrollbars render for the mode the viewer just left. */
+  color-scheme: dark;
+
+  --field: #14110f;
+  --field-deep: #0c0a09;
+  --inset: #1c1815;
+  --ink: #ece1c9;
+  --ink-soft: #a99d81;
+  --ink-faint: #8f8265;
+  --sienna: #c79a3b;
+  --signal: #c79a3b;
+  --reveal: #0c0a09;
+
+  --atmosphere:
+    radial-gradient(ellipse 90% 60% at 50% -15%, rgba(199, 154, 59, 0.14), transparent 55%),
+    radial-gradient(ellipse 80% 50% at 50% 120%, rgba(215, 57, 31, 0.10), transparent 50%);
+  --grain-blend: overlay;
+  --grain-opacity: 0.05;
+  --hairline-color: color-mix(in srgb, #c79a3b 45%, transparent);
+  --cta-glow-shadow: 0 0 0 1px rgba(240, 73, 44, 0.35), 0 10px 40px -12px rgba(215, 57, 31, 0.7);
+
+  --theme-day: var(--ink-faint);
+  --theme-night: var(--signal);
+}
+
+/* DAY chosen in the nav. The :root paper palette already holds — the media
+   block above excludes this attribute — so only the mode hint needs pinning. */
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 @theme inline {
@@ -115,6 +178,20 @@ body::after {
   text-transform: uppercase;
   letter-spacing: 0.32em;
   font-size: 0.7rem;
+}
+
+/* Nav day/night toggle: the active word in --signal, the other in --ink-faint.
+   Inside @layer components, NOT unlayered — an unlayered declaration beats
+   every layered one in the same origin no matter its specificity, which
+   silently killed the shared `hover:text-signal` utility on these two words
+   (Tailwind emits it into @layer utilities, and utilities beat components). */
+@layer components {
+  .theme-day {
+    color: var(--theme-day);
+  }
+  .theme-night {
+    color: var(--theme-night);
+  }
 }
 
 /* Hairline divider in tarnished brass */
