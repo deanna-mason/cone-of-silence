@@ -42,6 +42,7 @@ vi.mock("@/hooks/useCallSession", () => ({
       },
     },
     xferKey: null,
+    screen: { share: () => {}, stop: () => {} },
   }),
 }));
 

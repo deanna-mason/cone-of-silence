@@ -14,6 +14,12 @@ interface CallControlsProps {
   /** Locks the mic/lens toggles only — a mid-take device change would poison
    *  the tape. Copy Invite and Burn & Leave stay live. */
   disabled?: boolean;
+  /** Screen sharing — the control renders only where the browser can capture
+   *  a screen at all (shareSupported; phones can't). Not caught in the
+   *  mid-take lock: the screen never enters the tape. */
+  shareSupported?: boolean;
+  sharing?: boolean;
+  onToggleShare?: () => void;
 }
 
 export default function CallControls({
@@ -25,6 +31,9 @@ export default function CallControls({
   onCopyInvite,
   onLeave,
   disabled = false,
+  shareSupported = false,
+  sharing = false,
+  onToggleShare,
 }: CallControlsProps) {
   const toggleClass = (on: boolean) =>
     `kicker inline-flex items-center gap-2 border px-4 py-3 transition disabled:cursor-not-allowed disabled:opacity-50 ${
@@ -53,6 +62,23 @@ export default function CallControls({
         <LensIcon on={camOn} />
         {camOn ? "Lens Open" : "Lens Capped"}
       </button>
+      {shareSupported && onToggleShare && (
+        // Not toggleClass: its off state is alarm-vermilion ("your mic is
+        // cut"), and an untabled screen is the neutral state, not a fault —
+        // idle wears Copy Invite's quiet dress, active wears brass.
+        <button
+          type="button"
+          aria-pressed={sharing}
+          onClick={onToggleShare}
+          className={`kicker border px-4 py-3 transition ${
+            sharing
+              ? "border-brass text-ink"
+              : "border-ink-faint/30 text-ink-soft hover:border-brass hover:text-signal"
+          }`}
+        >
+          {sharing ? "Screen on the Table" : "Table Your Screen"}
+        </button>
+      )}
       <button
         type="button"
         onClick={onCopyInvite}

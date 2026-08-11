@@ -30,11 +30,20 @@ export interface CallBus {
   xfer: XferPort;
 }
 
+/** The session half of screen sharing — useScreenShare drives it, CallSession
+ *  does the announcing/negotiating. Both calls are safe with no live session
+ *  (they no-op), same stance as the bus. */
+export interface ScreenPort {
+  share(stream: MediaStream): void;
+  stop(): void;
+}
+
 export interface CallState {
   status: CallStatus;
   peers: RemotePeer[];
   dcOpen: boolean;
   bus: CallBus;
+  screen: ScreenPort;
   // Task 6 (5D): the session's derived xfer key, for useEpisodeExchange to
   // thread into its engines — null until key derivation resolves (or if it
   // never does, e.g. "equipment-outdated"), same lifetime as the session
@@ -101,6 +110,13 @@ export function useCallSession(
       xfer,
     };
   });
+
+  // Same construct-once-per-mount identity as `bus`, for the same reason:
+  // useScreenShare keys its callbacks off this object.
+  const [screen] = useState<ScreenPort>(() => ({
+    share: (stream) => void sessionRef.current?.startScreenShare(stream),
+    stop: () => void sessionRef.current?.stopScreenShare(),
+  }));
 
   useEffect(() => {
     const local = streamRef.current;
@@ -175,5 +191,5 @@ export function useCallSession(
     if (stream) sessionRef.current?.setLocalStream(stream).catch(() => {});
   }, [stream]);
 
-  return { status, peers, dcOpen, bus, xferKey };
+  return { status, peers, dcOpen, bus, screen, xferKey };
 }

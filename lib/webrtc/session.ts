@@ -12,6 +12,7 @@ import { JoinProof, type ProofEvents } from "./joinProof";
 import { Mesh, type LinkEvents, type RemotePeer } from "./mesh";
 import { PeerLink } from "./peer";
 import type { IceServer } from "./protocol";
+import { buildScreenShareMsg, buildScreenStopMsg, parseScreenMsg } from "./screenShare";
 import { SignalingClient } from "./signaling";
 
 export type { RemotePeer } from "./mesh";
@@ -132,6 +133,13 @@ export class CallSession {
    */
   private joinedPopulatedRoom = false;
   private hasEnteredOnce = false;
+  /** The outgoing screen share, while one is on the table. Held here (not in
+   *  the hook) because links are born at unpredictable times — a newcomer's
+   *  stagger, a 4C rebuild, a reconnect's full re-bring-up — and every one
+   *  of them must inherit the active share at construction (buildLink) and
+   *  hear its announce the moment it proves (onProven). Deliberately
+   *  survives dropAll: a signaling blip must not silently end the share. */
+  private activeScreen: { track: MediaStreamTrack; stream: MediaStream } | null = null;
 
   constructor(
     roomId: string,
@@ -154,7 +162,19 @@ export class CallSession {
         },
         onChannelOpen: () => this.events.emit("channelOpen"),
         onChannelClosed: () => this.events.emit("channelClosed"),
-        onMessage: (peerId, text) => this.events.emit("message", peerId, text),
+        onMessage: (peerId, text) => {
+          // scr/* is session vocabulary, not app traffic: it mutates mesh
+          // roster state (which stream is the peer's screen) and is consumed
+          // here — same stance as prf/* being consumed at the link. Proof
+          // gating already happened upstream (buildLink's onMessage), so an
+          // unproven peer can never file a screen.
+          const scr = parseScreenMsg(text);
+          if (scr) {
+            this.mesh.setRemoteScreen(peerId, scr.t === "scr/share" ? scr.streamId : null);
+            return;
+          }
+          this.events.emit("message", peerId, text);
+        },
         // Forwarded to the session's own event surface, PROOF-GATED like
         // every other per-peer app signal (message/xferMessage/xferDrain).
         // Ordering vs. the aggregate `channelClosed` event is deliberately
@@ -295,7 +315,10 @@ export class CallSession {
     this.mesh.setProven(peerId, false);
 
     let link!: PeerLink;
-    let stashedStream: MediaStream | null = null;
+    // Keyed by stream id, not a single slot: with screen share a peer can
+    // surface TWO streams (face + screen) before its proof settles, and a
+    // one-slot stash would silently drop whichever arrived first.
+    const stashedStreams = new Map<string, MediaStream>();
     const proofEvents: ProofEvents = {
       onSend: (text) => {
         link.send(text);
@@ -303,10 +326,13 @@ export class CallSession {
       onProven: () => {
         this.mesh.setProven(peerId, true);
         this.everProvenAnyone = true; // see the field's doc — one-way, never cleared
-        if (stashedStream) {
-          const stream = stashedStream;
-          stashedStream = null;
-          ev.onRemoteStream(stream);
+        for (const stream of stashedStreams.values()) ev.onRemoteStream(stream);
+        stashedStreams.clear();
+        // A share already on the table is news this peer missed — announce it
+        // now that sendTo passes the proven gate. Covers newcomers AND a 4C
+        // rebuild's re-proof (the fresh link re-learns the screen id).
+        if (this.activeScreen) {
+          this.mesh.sendTo(peerId, buildScreenShareMsg(this.activeScreen.stream.id));
         }
         // Replay whatever is CURRENTLY open, read from MESH — the same flags
         // openChannels()/remove()/rebuildLink() act on — rather than from a
@@ -393,7 +419,8 @@ export class CallSession {
         e2ee: { mediaKey: this.crypto.keys.mediaKey, api: this.crypto.api },
         onRemoteStream: (stream) => {
           if (proof.phase === "proven") ev.onRemoteStream(stream);
-          else stashedStream = stream;
+          else if (stream) stashedStreams.set(stream.id, stream);
+          else stashedStreams.clear(); // "went away" clears the lot, like the old null stash
         },
         onConnectionState: ev.onConnectionState,
         onChannelOpen: () => {
@@ -433,7 +460,42 @@ export class CallSession {
       this.proofs.delete(peerId);
       throw err; // mesh.construct()'s own catch handles eviction/keep-failed
     }
+    // A link born mid-share inherits the screen track immediately — its
+    // addTrack lands in the same negotiation pass as the camera/mic tracks
+    // the constructor just added. Fire-and-forget like replaceStream's
+    // harmless-race stance: a link torn down this tick just refuses.
+    if (this.activeScreen) {
+      void link.startScreenShare(this.activeScreen.track, this.activeScreen.stream).catch(() => {});
+    }
     return link;
+  }
+
+  /** Puts a screen capture on the table: announces its stream id to every
+   *  proven peer (so the far side files the incoming stream under the screen
+   *  tile, not a face tile) and hands the track to every live link through
+   *  the same E2EE funnel as the camera. Links built later inherit it — see
+   *  buildLink and onProven. The capture's lifecycle (getDisplayMedia,
+   *  track.stop) belongs to the caller, mirroring localStream/useLocalMedia. */
+  async startScreenShare(stream: MediaStream): Promise<void> {
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    this.activeScreen = { track, stream };
+    // Announce BEFORE media: the cos message is a data-channel hop, the track
+    // needs a whole renegotiation — the id all but always arrives first, so
+    // the far side files the stream straight into the screen slot. (Either
+    // order is still correct — mesh reconciles both — this just avoids the
+    // one-frame face-slot flash.)
+    this.mesh.sendAll(buildScreenShareMsg(stream.id));
+    await this.mesh.screenShareAll(track, stream);
+  }
+
+  /** Clears the table: stop announce to every proven peer, screen senders
+   *  parked (track null — no teardown, no renegotiation). */
+  async stopScreenShare(): Promise<void> {
+    if (!this.activeScreen) return;
+    this.activeScreen = null;
+    this.mesh.sendAll(buildScreenStopMsg());
+    await this.mesh.stopScreenShareAll();
   }
 
   /**

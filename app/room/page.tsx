@@ -27,6 +27,7 @@ const PodcastPanel = dynamic(() => import("@/components/PodcastPanel"), {
 import { LensIcon, MicIcon } from "@/components/icons";
 import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useCallSession } from "@/hooks/useCallSession";
+import { useScreenShare } from "@/hooks/useScreenShare";
 import { usePodcastTake } from "@/hooks/usePodcastTake";
 import { useSpeaking } from "@/hooks/useSpeaking";
 import { SELF_SPEAKER, useSpeakerLatch } from "@/hooks/useSpeakerLatch";
@@ -165,6 +166,7 @@ export default function RoomPage() {
   const [forceRelay, setForceRelay] = useState(false);
   const media = useLocalMedia(stage === "green-room" || stage === "in-room");
   const call = useCallSession(keys, media.stream, stage === "in-room", forceRelay);
+  const screenShare = useScreenShare(call.screen, stage === "in-room");
   // The local speaking detector, run on the LOCAL stream. Unconditional
   // hook — safe to compute even before the room mounts (returns false with
   // no audio track). Its raw flicker never reaches a tile: the latch below
@@ -556,11 +558,23 @@ export default function RoomPage() {
   // (7/30 testers). svh is the stable chrome-visible height, so the grid
   // holds one size regardless of scroll. At a fixed 390×844 (headless e2e,
   // no retractable UA chrome) svh == dvh, so the pinned geometry is unchanged.
-  const tileCount = 1 + Math.max(call.peers.length, 1);
+  // Screen tiles ride the same one-view grid as the faces (no-scroll rule
+  // holds): documents append after the faces so nobody's face jumps cells
+  // when a share starts or stops.
+  const remoteScreenCount = call.peers.filter((p) => p.screenStream).length;
+  const tileCount =
+    1 + Math.max(call.peers.length, 1) + remoteScreenCount + (screenShare.sharing ? 1 : 0);
   const gridClass =
     tileCount <= 2
       ? "grid-cols-1 grid-rows-[repeat(2,minmax(0,1fr))] sm:grid-cols-2 sm:grid-rows-[minmax(0,1fr)]"
-      : "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]";
+      : tileCount <= 4
+        ? "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]"
+        : "grid-cols-2 grid-rows-[repeat(3,minmax(0,1fr))]";
+  // The codename only identifies the OTHER half of a podcast pair — with a
+  // fuller room it would label every tile the same. Shared by the face tile
+  // and its screen tile so a share is attributable at a glance.
+  const agentLabel = (i: number) =>
+    call.peers.length === 1 ? (podcast.partnerCodename ?? "Agent 2") : `Agent ${i + 2}`;
 
   return (
     <div className="flex h-[calc(100svh-7rem)] min-h-[20rem] flex-col gap-3">
@@ -606,13 +620,7 @@ export default function RoomPage() {
           <RemoteTile
             key={p.peerId}
             peer={p}
-            // The codename only identifies the OTHER half of a podcast pair —
-            // with a fuller room it would label every tile the same.
-            label={
-              call.peers.length === 1
-                ? (podcast.partnerCodename ?? "Agent 2")
-                : `Agent ${i + 2}`
-            }
+            label={agentLabel(i)}
             // While the tape rolls the composite crops both cameras — crop the
             // partner tile too so the preview is honest (CS-DR-04 2B).
             episodeFrame={podcastLocked}
@@ -625,6 +633,20 @@ export default function RoomPage() {
             names the Copy Invite button two rows below (8/5 copy pass). */}
         {call.peers.length === 0 && (
           <VideoTile fill stream={null} label="Copy Invite to fill this seat" />
+        )}
+        {call.peers.map((p, i) =>
+          p.screenStream ? (
+            <VideoTile
+              key={`${p.peerId}-screen`}
+              fill
+              stream={p.screenStream}
+              label={`${agentLabel(i)}'s Screen`}
+              screenShare
+            />
+          ) : null,
+        )}
+        {screenShare.sharing && (
+          <VideoTile fill stream={screenShare.stream} label="Your Screen" screenShare />
         )}
       </div>
       <InCallDeviceBar
@@ -647,6 +669,9 @@ export default function RoomPage() {
         onCopyInvite={() => void copyInvite()}
         onLeave={leave}
         disabled={podcastLocked}
+        shareSupported={screenShare.supported}
+        sharing={screenShare.sharing}
+        onToggleShare={() => (screenShare.sharing ? screenShare.stop() : void screenShare.start())}
       />
       {copyFailed && (
         <p role="alert" className="kicker text-vermilion">

@@ -82,7 +82,8 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   // Superseded by CSP frame-ancestors 'none'; kept for older browsers.
   { key: "X-Frame-Options", value: "DENY" },
-  // camera/microphone to self (the whole point of the app); autoplay + fullscreen
+  // camera/microphone to self (the whole point of the app); display-capture to
+  // self for in-call screen sharing (getDisplayMedia); autoplay + fullscreen
   // to self so live tiles play and native media controls work; everything else off.
   {
     key: "Permissions-Policy",
@@ -91,7 +92,7 @@ const securityHeaders = [
       "autoplay=(self)",
       "browsing-topics=()",
       "camera=(self)",
-      "display-capture=()",
+      "display-capture=(self)",
       "encrypted-media=()",
       "fullscreen=(self)",
       "geolocation=()",

@@ -14,6 +14,12 @@ export interface RemotePeer {
   peerId: string;
   stream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
+  /** The stream this peer announced (scr/share) as its shared screen — a
+   *  SECOND video stream alongside `stream`, filed apart so the UI can give
+   *  it a screen tile instead of a face tile. Optional so predating
+   *  RemotePeer literals (tests, fixtures) stay valid; the mesh itself
+   *  always emits it. */
+  screenStream?: MediaStream | null;
 }
 
 /** The slice of PeerLink the mesh drives — tests substitute fakes. */
@@ -25,6 +31,10 @@ export interface MeshLink {
   send(text: string): boolean;
   sendXfer(data: string | ArrayBuffer): boolean;
   xferBufferedAmount(): number;
+  /** Screen-share fan-out (both optional so predating fakes stay valid —
+   *  same additivity stance as RemotePeer.screenStream). */
+  startScreenShare?(track: MediaStreamTrack, stream: MediaStream): Promise<void>;
+  stopScreenShare?(): Promise<void>;
 }
 
 /** Per-link callbacks the factory must wire into the real PeerLink. */
@@ -100,6 +110,18 @@ interface Entry {
   /** Pending construction, cancelled on remove()/closeAll(). */
   timer: ReturnType<typeof setTimeout> | null;
   stream: MediaStream | null;
+  /** Every remote MediaStream this link has surfaced, by stream id — the
+   *  reconciliation surface for scr/share: the announce and the `track`
+   *  event can land in either order, so BOTH sides of the match are kept
+   *  and deriveStreams() re-files on every change. Cleared on rebuild (a
+   *  fresh pc surfaces fresh streams). */
+  streams: Map<string, MediaStream>;
+  /** The stream id this peer's scr/share announced, null when not sharing.
+   *  Survives a rebuild: the sharer re-announces on the fresh link's proof,
+   *  and the same MediaStream object keeps its id across re-adds. */
+  screenStreamId: string | null;
+  /** Derived: streams[screenStreamId] when both halves have arrived. */
+  screenStream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
   channelOpen: boolean;
   /** Xfer (cos-xfer) channel open state — tracked separately from cos:
@@ -174,6 +196,10 @@ export class Mesh {
       .map(([peerId, e]) => ({
         peerId,
         stream: e.stream,
+        // Present only while a screen is actually on the table — absent
+        // otherwise, so every predating exact-shape roster assertion (and
+        // consumer) sees the identical object it always did (additivity).
+        ...(e.screenStream ? { screenStream: e.screenStream } : {}),
         connectionState: e.connectionState,
       }));
   }
@@ -313,6 +339,38 @@ export class Mesh {
     await Promise.all(links.map((l) => l.replaceStream(stream)));
   }
 
+  /** Screen share: hand the screen track to every BUILT link. Links still
+   *  awaiting construction are skipped, same as replaceStreamAll — the
+   *  session gives a late-built link the active screen at construction. */
+  async screenShareAll(track: MediaStreamTrack, stream: MediaStream): Promise<void> {
+    const links = [...this.entries.values()].map((e) => e.link).filter((l) => l !== null);
+    await Promise.all(links.map((l) => l.startScreenShare?.(track, stream)));
+  }
+
+  async stopScreenShareAll(): Promise<void> {
+    const links = [...this.entries.values()].map((e) => e.link).filter((l) => l !== null);
+    await Promise.all(links.map((l) => l.stopScreenShare?.()));
+  }
+
+  /** Files (or un-files, streamId null) a peer's announced screen stream id
+   *  — the inbound half of scr/share, called by the session's message
+   *  interception. Order-proof against the media itself: deriveStreams
+   *  re-files whatever streams have already arrived, and a later `track`
+   *  event re-derives against this id. No-op on an unknown peer (already
+   *  torn down — its announce is a straggler). */
+  setRemoteScreen(peerId: string, streamId: string | null): void {
+    const entry = this.entries.get(peerId);
+    if (!entry) return;
+    if (streamId === null && entry.screenStreamId !== null) {
+      // A stopped share's stream must not fall back into the face slot as
+      // "the most recent stream" — it is not a face, it is a corpse.
+      entry.streams.delete(entry.screenStreamId);
+    }
+    entry.screenStreamId = streamId;
+    this.deriveStreams(entry);
+    this.emitRoster();
+  }
+
   /** Send to one peer. False if the peer is unknown, unproven, linkless, or
    *  channel-closed (Phase 5D, Task 5: an unproven peer is treated exactly
    *  like an unknown one — see roster()'s doc on the default-true additivity). */
@@ -396,6 +454,9 @@ export class Mesh {
       chain: Promise.resolve(),
       timer: null,
       stream: null,
+      streams: new Map(),
+      screenStreamId: null,
+      screenStream: null,
       connectionState: "new",
       channelOpen: false,
       xferOpen: false,
@@ -463,7 +524,9 @@ export class Mesh {
           // entry.link !== link: this link was superseded by a rebuild —
           // discarded links can still fire trailing events asynchronously.
           if (this.entries.get(peerId) !== entry || entry.link !== link) return;
-          entry.stream = stream;
+          if (stream) entry.streams.set(stream.id, stream);
+          else entry.streams.clear(); // "the stream went away" — same meaning null always had here
+          this.deriveStreams(entry);
           this.emitRoster();
         },
         onConnectionState: (state) => {
@@ -674,6 +737,11 @@ export class Mesh {
     entry.link?.close();
     entry.link = null;
     entry.stream = null;
+    // The dead pc's streams with it — the replacement surfaces fresh ones.
+    // screenStreamId stays: the sharer re-announces on the fresh link's
+    // proof, and until then a stale id merely matches nothing.
+    entry.streams.clear();
+    entry.screenStream = null;
     entry.chain = Promise.resolve();
     // connectionState is deliberately left alone here (typically "failed")
     // through the whole rebuild window — Task 4's badge reads this field
@@ -726,6 +794,19 @@ export class Mesh {
    */
   private feed(entry: Entry, link: MeshLink, payload: string): void {
     entry.chain = entry.chain.then(() => link.handleSignal(payload)).catch(() => {});
+  }
+
+  /** Re-files entry.stream/entry.screenStream from the streams this link has
+   *  surfaced and the announced screen id. The face slot keeps its old
+   *  "most recent stream wins" semantics — just with the screen stream
+   *  excluded once (or before) its announce lands. */
+  private deriveStreams(entry: Entry): void {
+    let primary: MediaStream | null = null;
+    for (const s of entry.streams.values()) {
+      if (s.id !== entry.screenStreamId) primary = s;
+    }
+    entry.stream = primary;
+    entry.screenStream = entry.screenStreamId !== null ? (entry.streams.get(entry.screenStreamId) ?? null) : null;
   }
 
   private cancelPending(entry: Entry): void {

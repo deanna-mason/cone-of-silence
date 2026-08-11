@@ -15,6 +15,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { CallSession, type CallStatus, type RemotePeer, type SessionCrypto } from "@/lib/webrtc/session";
 import { STAGGER_MS, RESTART_RECOVERY_MS } from "@/lib/webrtc/mesh";
 import { JoinProof } from "@/lib/webrtc/joinProof";
+import { buildScreenShareMsg, buildScreenStopMsg } from "@/lib/webrtc/screenShare";
 
 const FAKE_CRYPTO: SessionCrypto = {
   keys: {
@@ -83,7 +84,10 @@ class FakeChannel {
 class FakeSender {
   transform: unknown = null;
   createEncodedStreams = () => ({ readable: {} as ReadableStream, writable: {} as WritableStream });
-  constructor(public track: MediaStreamTrack) {}
+  replaceTrack = vi.fn(async (track: MediaStreamTrack | null) => {
+    this.track = track;
+  });
+  constructor(public track: MediaStreamTrack | null) {}
 }
 class FakeTransceiver {
   setCodecPreferences = vi.fn();
@@ -615,5 +619,98 @@ describe("Phase 5D join-proof gating on the real CallSession stack", () => {
     // card p2's genuine bad-mac failure should have raised.
     expect(statuses.at(-1)).toBe("countersign-failed");
     logged.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Screen share on the real CallSession stack: scr/* announces are consumed by
+// the session (mesh bookkeeping), never surfaced as app messages; the active
+// share reaches links built LATER (a newcomer mid-share) at construction and
+// is announced to them the moment they prove.
+// ---------------------------------------------------------------------------
+describe("screen share on the real CallSession stack", () => {
+  /** Drives the honest-pair setup from the gating suite to "proven". */
+  async function provenPair(): Promise<{ ws: FakeWS; pc: FakePC; cos: FakeChannel }> {
+    const ws = startAndOpen();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [{ peerId: "p1" }], ice: ICE_A });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const pc = FakePC.instances[0];
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, "p1", "me", cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+    return { ws, pc, cos };
+  }
+
+  const fakeReceiver = () => ({
+    createEncodedStreams: () => ({ readable: {} as ReadableStream, writable: {} as WritableStream }),
+  });
+
+  it("a peer's scr/share is consumed (never an app message) and files its stream as screenStream", async () => {
+    const { pc, cos } = await provenPair();
+    const messages: [string, string][] = [];
+    session.events.on("message", (peerId, text) => messages.push([peerId, text]));
+
+    cos.onmessage!({ data: buildScreenShareMsg("scr-1") });
+    const screen = { id: "scr-1", getTracks: () => [] } as unknown as MediaStream;
+    (pc.ontrack as (ev: unknown) => void)({ receiver: fakeReceiver(), streams: [screen] });
+
+    expect(messages).toEqual([]); // consumed, not surfaced
+    expect(rosters.at(-1)).toEqual([
+      { peerId: "p1", stream: null, screenStream: screen, connectionState: "new" },
+    ]);
+  });
+
+  it("a peer's scr/stop clears the screen tile", async () => {
+    const { pc, cos } = await provenPair();
+    cos.onmessage!({ data: buildScreenShareMsg("scr-1") });
+    const screen = { id: "scr-1", getTracks: () => [] } as unknown as MediaStream;
+    (pc.ontrack as (ev: unknown) => void)({ receiver: fakeReceiver(), streams: [screen] });
+
+    cos.onmessage!({ data: buildScreenStopMsg() });
+
+    expect(rosters.at(-1)).toEqual([{ peerId: "p1", stream: null, connectionState: "new" }]);
+  });
+
+  it("startScreenShare hands the track to live links and announces the stream id", async () => {
+    const { pc, cos } = await provenPair();
+    const screenTrack = { kind: "video" } as MediaStreamTrack;
+    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack] } as unknown as MediaStream;
+
+    await session.startScreenShare(screen);
+
+    expect(pc.addedTracks).toContain(screenTrack);
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-me"));
+  });
+
+  it("stopScreenShare announces the stop", async () => {
+    const { cos } = await provenPair();
+    const screenTrack = { kind: "video" } as MediaStreamTrack;
+    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack] } as unknown as MediaStream;
+    await session.startScreenShare(screen);
+
+    await session.stopScreenShare();
+
+    expect(cos.sent).toContain(buildScreenStopMsg());
+  });
+
+  it("a newcomer mid-share gets the screen track at construction and the announce on proving", async () => {
+    const ws = startAndOpen();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [] });
+    const screenTrack = { kind: "video" } as MediaStreamTrack;
+    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack] } as unknown as MediaStream;
+    await session.startScreenShare(screen); // sharing into an empty room — nobody to reach yet
+
+    ws.serverSays({ v: 1, t: "peer-joined", peerId: "p1" });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const pc = FakePC.instances.at(-1)!;
+    expect(pc.addedTracks).toContain(screenTrack); // the late link carries the share from birth
+
+    const cos = cosChannelOf(pc);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, "p1", "me", cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-me")); // announced the moment it proved
   });
 });

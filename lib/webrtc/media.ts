@@ -112,6 +112,29 @@ export async function getLocalStream(choice: MediaDeviceChoice = {}): Promise<Me
   }
 }
 
+/** Whether this browser can capture a screen at all (no mobile Safari/Chrome). */
+export function screenShareSupported(): boolean {
+  return typeof navigator.mediaDevices?.getDisplayMedia === "function";
+}
+
+/**
+ * Acquire a screen capture, or null. Unlike getUserMedia, a NotAllowedError
+ * here is the user closing the browser's picker — the normal way to change
+ * your mind — so nothing on this path is an error card: a stream, or null.
+ * Video only: screen audio would bypass the call's one-mic audio story.
+ */
+export async function getScreenStream(): Promise<MediaStream | null> {
+  if (!screenShareSupported()) return null;
+  try {
+    return await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === "NotAllowedError")) {
+      console.error("[cone] getDisplayMedia failed:", err);
+    }
+    return null;
+  }
+}
+
 export async function listDevices(): Promise<DeviceLists> {
   const all = await navigator.mediaDevices.enumerateDevices();
   return {

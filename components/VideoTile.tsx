@@ -27,6 +27,11 @@ interface VideoTileProps {
    *  Replaces the old object-contain letterbox monitor: the composite now
    *  cover-crops, so the honest preview is the crop. */
   episodeFrame?: boolean;
+  /** A shared screen, not a face: letterbox (object-contain — cover-cropping
+   *  a document amputates its edges), keep playback muted (the track carries
+   *  no audio, so there is nothing to restore), and offer no per-agent Mute
+   *  control. */
+  screenShare?: boolean;
 }
 
 /** The episode viewport's inline style (exported so the regression test can
@@ -66,6 +71,7 @@ export default function VideoTile({
   speaking = false,
   micCut = false,
   episodeFrame = false,
+  screenShare = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [, setTrackEpoch] = useState(0);
@@ -107,7 +113,7 @@ export default function VideoTile({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.muted = isSelf || audio !== "on";
+    video.muted = isSelf || screenShare || audio !== "on";
     if (stream && !video.muted) {
       video.play().catch((err: unknown) => {
         if ((err as DOMException)?.name !== "NotAllowedError") return;
@@ -119,7 +125,7 @@ export default function VideoTile({
         setAudio("blocked");
       });
     }
-  }, [stream, isSelf, audio]);
+  }, [stream, isSelf, screenShare, audio]);
 
   const hasVideoTrack = stream !== null && stream.getVideoTracks().length > 0;
   const covered = !hasVideoTrack || camOff;
@@ -165,7 +171,7 @@ export default function VideoTile({
               ref={videoRef}
               autoPlay
               playsInline
-              className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""} ${covered ? "invisible" : ""} ${audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""}`}
+              className={`h-full w-full ${screenShare ? "object-contain" : "object-cover"} ${mirrored ? "-scale-x-100" : ""} ${covered ? "invisible" : ""} ${audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""}`}
             />
           </div>
         </div>
@@ -197,7 +203,7 @@ export default function VideoTile({
           Your Mic Is Cut
         </p>
       )}
-      {!isSelf && stream && audio !== "blocked" && (
+      {!isSelf && !screenShare && stream && audio !== "blocked" && (
         <button
           type="button"
           onClick={() => setAudio(audio === "muted" ? "on" : "muted")}
@@ -213,7 +219,7 @@ export default function VideoTile({
           {audio === "muted" ? "◇ Muted — Unmute" : "Mute"}
         </button>
       )}
-      {!isSelf && stream && audio === "blocked" && (
+      {!isSelf && !screenShare && stream && audio === "blocked" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-reveal/30 p-3 text-center">
           <p className="kicker text-vermilion">◈ Audio Blocked by Browser</p>
           <button

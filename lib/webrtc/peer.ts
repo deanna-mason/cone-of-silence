@@ -104,6 +104,16 @@ export class PeerLink {
    *  sender whose kind is unknowable is a sender replaceStream can never
    *  re-populate. Recorded at addTrack time; survives the track going null. */
   private readonly senderKinds = new WeakMap<RTCRtpSender, string>();
+  /** The sender(s) carrying a shared SCREEN, not a camera. replaceStream —
+   *  the device-switch sweep — must never see them: swapping a camera onto
+   *  the screen sender would put a face in the far side's screen tile (the
+   *  msid/stream association is fixed at addTrack time), and letting one
+   *  "cover" the video kind would starve a re-plugged camera of its own
+   *  sender. Membership survives stopScreenShare (a cleared screen sender is
+   *  still not a camera slot) but is revoked if pc.addTrack ever hands the
+   *  same sender back for a NON-screen track (spec-allowed null-track sender
+   *  reuse) — see addLocalTrack. */
+  private readonly screenSenders = new Set<RTCRtpSender>();
   private makingOffer = false;
   private ignoreOffer = false;
 
@@ -258,13 +268,43 @@ export class PeerLink {
    *  no getTransceivers() call, no transform, no pin — so a pre-5D fake pc
    *  (no getTransceivers/setCodecPreferences) never sees these calls and
    *  every predating test stays green unchanged. */
-  private addLocalTrack(track: MediaStreamTrack, stream: MediaStream): void {
+  private addLocalTrack(track: MediaStreamTrack, stream: MediaStream): RTCRtpSender {
     const sender = this.pc.addTrack(track, stream);
+    // addTrack may REUSE a null-track sender (see attachedSenders' doc) — if
+    // it hands back a retired screen sender for a camera track, that sender
+    // is a screen sender no longer. startScreenShare re-adds it right after
+    // this returns, so the screen path is unaffected by the revocation.
+    this.screenSenders.delete(sender);
     this.senderKinds.set(sender, track.kind);
-    if (!this.opts.e2ee) return;
+    if (!this.opts.e2ee) return sender;
     this.attachSenderTransform(sender);
     const transceiver = this.pc.getTransceivers().find((t) => t.sender === sender);
     if (transceiver) this.applyVp9Pin(transceiver);
+    return sender;
+  }
+
+  /** Starts (or re-arms) the outgoing screen share. The first call creates
+   *  the screen's own sender through the addLocalTrack funnel — same E2EE
+   *  encrypt transform, same VP9 pin, and addTrack renegotiates through the
+   *  existing perfect-negotiation path exactly like replaceStream's
+   *  add-path. Later calls swap the track in place (replaceTrack never
+   *  touches sender.transform, so the pipe survives — same free ride device
+   *  switches get). The stream is the screen's OWN MediaStream, never the
+   *  camera/mic stream: its id is what scr/share announces, and the far side
+   *  files the incoming stream under the screen tile by that id. */
+  async startScreenShare(track: MediaStreamTrack, stream: MediaStream): Promise<void> {
+    for (const sender of this.screenSenders) {
+      await sender.replaceTrack(track);
+      return;
+    }
+    this.screenSenders.add(this.addLocalTrack(track, stream));
+  }
+
+  /** Ends the outgoing screen share: the sender's track goes null (media
+   *  stops, no renegotiation, no teardown — symmetric to replaceStream's
+   *  null-swap) and the sender stays parked for the next share. */
+  async stopScreenShare(): Promise<void> {
+    for (const sender of this.screenSenders) await sender.replaceTrack(null);
   }
 
   /** Device switch: swap sender tracks in place, and ADD a sender for any
@@ -288,6 +328,7 @@ export class PeerLink {
     const liveTrack = (kind: string) => tracks.find((t) => t.kind === kind && t.readyState !== "ended") ?? null;
     const covered = new Set<string>();
     for (const sender of this.pc.getSenders()) {
+      if (this.screenSenders.has(sender)) continue; // the screen's sender is not a device slot
       const kind = sender.track?.kind ?? this.senderKinds.get(sender);
       if (!kind) continue; // a receive-only transceiver's sender — not ours to fill
       covered.add(kind);
