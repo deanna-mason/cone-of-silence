@@ -646,7 +646,11 @@ export default function RoomPage() {
           </>
         );
         return screenTiles.length > 0 ? (
-          <>
+          // Phones: faces in a strip UNDER the screen. sm+: faces in a side
+          // column instead, so the screen area keeps the view's full height —
+          // the strip's ~9rem was the difference between squinting and
+          // reading (8/11 second live-test round).
+          <div className="flex min-h-0 flex-1 flex-col gap-3 sm:flex-row">
             <div
               className={`grid min-h-0 flex-1 gap-3 ${screenTiles.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
             >
@@ -654,8 +658,10 @@ export default function RoomPage() {
                 <VideoTile key={t.key} fill stream={t.stream} label={t.label} screenShare />
               ))}
             </div>
-            <div className="grid h-28 shrink-0 grid-flow-col auto-cols-fr gap-3">{faceTiles}</div>
-          </>
+            <div className="grid h-28 shrink-0 grid-flow-col auto-cols-fr gap-3 sm:h-auto sm:w-44 sm:grid-flow-row sm:auto-rows-fr">
+              {faceTiles}
+            </div>
+          </div>
         ) : (
           <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>{faceTiles}</div>
         );

@@ -74,7 +74,12 @@ export default function VideoTile({
   screenShare = false,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const figureRef = useRef<HTMLElement>(null);
   const [, setTrackEpoch] = useState(0);
+  // Screen tiles only: whether THIS tile currently owns the browser's
+  // fullscreen. Tracked off fullscreenchange (Esc exits without us) so the
+  // button's label never lies.
+  const [fullscreen, setFullscreen] = useState(false);
   // Remote audio is on from the first frame: by the time a remote tile
   // exists the user has clicked "Enter the Cone", which is the activation
   // browsers require for unmuted playback. "blocked" is the rare fallback
@@ -127,6 +132,24 @@ export default function VideoTile({
     }
   }, [stream, isSelf, screenShare, audio]);
 
+  useEffect(() => {
+    if (!screenShare) return;
+    const onChange = () => setFullscreen(document.fullscreenElement === figureRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, [screenShare]);
+
+  // The reading mode for a text-heavy share (8/11 live test: no in-call tile
+  // is big enough): native fullscreen on the whole figure, so the button and
+  // caption ride along for the exit path. Permissions-Policy already grants
+  // fullscreen=(self).
+  function toggleFullscreen() {
+    const node = figureRef.current;
+    if (!node) return;
+    if (document.fullscreenElement === node) void document.exitFullscreen();
+    else void node.requestFullscreen().catch(() => {}); // refused = stay a tile
+  }
+
   const hasVideoTrack = stream !== null && stream.getVideoTracks().length > 0;
   const covered = !hasVideoTrack || camOff;
   const reducedMotion = usePrefersReducedMotion();
@@ -142,6 +165,7 @@ export default function VideoTile({
 
   return (
     <figure
+      ref={figureRef}
       className={`hairline relative overflow-hidden border bg-inset ${
         fill ? "h-full min-h-0 w-full" : "aspect-video"
       } ${speakingClass}`}
@@ -202,6 +226,16 @@ export default function VideoTile({
           <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-cream" />
           Your Mic Is Cut
         </p>
+      )}
+      {screenShare && stream && (
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          aria-label={fullscreen ? "Exit full screen" : `View ${label} full screen`}
+          className="kicker absolute right-2 top-2 border border-brass bg-field/80 px-3 py-1.5 text-ink-soft transition hover:text-signal"
+        >
+          {fullscreen ? "✕ Exit Full Screen" : "⛶ Full Screen"}
+        </button>
       )}
       {!isSelf && !screenShare && stream && audio !== "blocked" && (
         <button

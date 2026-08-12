@@ -3,8 +3,9 @@
 // playback stays muted (a screen track carries no audio; the Restore Audio
 // machinery has nothing to restore), and the per-agent Mute control renders
 // only on face tiles.
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent } from "@testing-library/dom";
 import VideoTile from "@/components/VideoTile";
 
 afterEach(cleanup);
@@ -37,6 +38,24 @@ test("a screen tile letterboxes instead of cover-cropping", () => {
 test("a face tile still cover-crops", () => {
   const { container } = render(<VideoTile stream={fakeStream()} label="Agent 2" />);
   expect(container.querySelector("video")!.className).toContain("object-cover");
+});
+
+// 8/11 second live-test round: even the dominant tile is too small for a
+// text-heavy share. The reading mode is the browser's native fullscreen —
+// Permissions-Policy already grants fullscreen=(self) — toggled per tile.
+test("a screen tile offers Full Screen, and clicking it fullscreens the tile", () => {
+  const requestFullscreen = vi.fn(async () => {});
+  window.HTMLElement.prototype.requestFullscreen = requestFullscreen;
+  render(<VideoTile stream={fakeStream()} label="Agent 2's Screen" screenShare />);
+
+  fireEvent.click(screen.getByRole("button", { name: /full screen/i }));
+
+  expect(requestFullscreen).toHaveBeenCalledOnce();
+});
+
+test("a face tile offers no Full Screen control", () => {
+  render(<VideoTile stream={fakeStream()} label="Agent 2" />);
+  expect(screen.queryByRole("button", { name: /full screen/i })).toBeNull();
 });
 
 test("a remote screen tile stays muted and offers no Mute control", async () => {

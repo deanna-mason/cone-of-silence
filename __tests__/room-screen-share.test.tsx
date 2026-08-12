@@ -208,6 +208,21 @@ test("a tabled screen dominates the layout — faces drop to a strip", async () 
   expect(faceStrip.className).not.toContain("flex-1");
 });
 
+// 8/11 second round: on desktop the strip UNDER the screen still stole ~9rem
+// of height from a text-heavy share. At sm+ the faces ride a side column so
+// the screen area keeps the full height of the view.
+test("on desktop widths the faces ride a side column beside the screen", async () => {
+  call.peers = [
+    { peerId: "p1", stream: null, screenStream: remoteScreen(), connectionState: "connected" },
+  ];
+  await enterRoom();
+
+  const screenArea = screen.getByText("Agent 2's Screen").closest("figure")!.parentElement!;
+  expect(screenArea.parentElement!.className).toContain("sm:flex-row");
+  const faceStrip = screen.getByText("You").closest("figure")!.parentElement!;
+  expect(faceStrip.className).toContain("sm:grid-flow-row");
+});
+
 test("with nothing on the table, faces keep the full grid", async () => {
   call.peers = [{ peerId: "p1", stream: null, connectionState: "connected" }];
   await enterRoom();
