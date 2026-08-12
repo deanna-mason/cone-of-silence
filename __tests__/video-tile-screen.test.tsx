@@ -26,7 +26,15 @@ beforeEach(() => {
     mutedAtPlay.push(this.muted);
     return Promise.resolve();
   };
+  // jsdom never implements fullscreen — model "nothing is fullscreen".
+  Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => null });
 });
+
+/** Poses the fullscreen state jsdom can't produce natively. */
+function fullscreenIs(el: Element | null) {
+  Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => el });
+  fireEvent(document, new Event("fullscreenchange"));
+}
 
 test("a screen tile letterboxes instead of cover-cropping", () => {
   const { container } = render(<VideoTile stream={fakeStream()} label="Your Screen" screenShare />);
@@ -51,6 +59,26 @@ test("a screen tile offers Full Screen, and clicking it fullscreens the tile", (
   fireEvent.click(screen.getByRole("button", { name: /full screen/i }));
 
   expect(requestFullscreen).toHaveBeenCalledOnce();
+});
+
+// 8/11 third round: full screen should not mean losing sight of the faces.
+// The overlay renders INSIDE the figure (fullscreen shows only that
+// subtree) and ONLY while this tile owns fullscreen — in the tile view the
+// faces already have their own strip/column, and a duplicate would clutter.
+test("the fullscreen overlay renders only while the tile owns fullscreen", () => {
+  window.HTMLElement.prototype.requestFullscreen = vi.fn(async () => {});
+  const { container } = render(
+    <VideoTile stream={fakeStream()} label="Agent 2's Screen" screenShare fullscreenOverlay={<p>thumb-row</p>} />,
+  );
+  const figure = container.querySelector("figure")!;
+
+  expect(screen.queryByText("thumb-row")).toBeNull(); // tile view — no overlay
+
+  fullscreenIs(figure);
+  expect(screen.getByText("thumb-row")).toBeTruthy();
+
+  fullscreenIs(null); // Esc
+  expect(screen.queryByText("thumb-row")).toBeNull();
 });
 
 test("a face tile offers no Full Screen control", () => {

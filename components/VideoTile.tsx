@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 
@@ -32,6 +32,11 @@ interface VideoTileProps {
    *  no audio, so there is nothing to restore), and offer no per-agent Mute
    *  control. */
   screenShare?: boolean;
+  /** Rendered inside the figure ONLY while this tile owns the browser's
+   *  fullscreen (screen tiles only) — fullscreen shows just this subtree, so
+   *  anything that must stay visible (the room's faces) has to ride along
+   *  here. In the tile view the faces already have their own strip/column. */
+  fullscreenOverlay?: ReactNode;
 }
 
 /** The episode viewport's inline style (exported so the regression test can
@@ -72,6 +77,7 @@ export default function VideoTile({
   micCut = false,
   episodeFrame = false,
   screenShare = false,
+  fullscreenOverlay,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const figureRef = useRef<HTMLElement>(null);
@@ -280,6 +286,7 @@ export default function VideoTile({
           Rolling
         </p>
       )}
+      {screenShare && fullscreen && fullscreenOverlay}
       <figcaption className="kicker absolute bottom-2 left-2 bg-field/80 px-2 py-1 text-ink-soft">
         {label}
       </figcaption>

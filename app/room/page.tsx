@@ -7,6 +7,7 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import VideoTile from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
+import FaceThumb from "@/components/FaceThumb";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
 import InCallDeviceBar from "@/components/InCallDeviceBar";
@@ -645,6 +646,17 @@ export default function RoomPage() {
             )}
           </>
         );
+        // Rides along INTO fullscreen (Deanna's 8/11 ask: never lose the
+        // faces): muted picture-only thumbs — the real tiles keep playing
+        // the audio underneath the fullscreen layer.
+        const faceThumbs = (
+          <div className="absolute bottom-4 right-4 flex flex-wrap justify-end gap-2">
+            <FaceThumb stream={media.stream} label="You" mirrored />
+            {call.peers.map((p, i) => (
+              <FaceThumb key={p.peerId} stream={p.stream} label={agentLabel(i)} />
+            ))}
+          </div>
+        );
         return screenTiles.length > 0 ? (
           // Phones: faces in a strip UNDER the screen. sm+: faces in a side
           // column instead, so the screen area keeps the view's full height —
@@ -655,7 +667,14 @@ export default function RoomPage() {
               className={`grid min-h-0 flex-1 gap-3 ${screenTiles.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
             >
               {screenTiles.map((t) => (
-                <VideoTile key={t.key} fill stream={t.stream} label={t.label} screenShare />
+                <VideoTile
+                  key={t.key}
+                  fill
+                  stream={t.stream}
+                  label={t.label}
+                  screenShare
+                  fullscreenOverlay={faceThumbs}
+                />
               ))}
             </div>
             <div className="grid h-28 shrink-0 grid-flow-col auto-cols-fr gap-3 sm:h-auto sm:w-44 sm:grid-flow-row sm:auto-rows-fr">

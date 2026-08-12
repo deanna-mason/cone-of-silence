@@ -223,6 +223,23 @@ test("on desktop widths the faces ride a side column beside the screen", async (
   expect(faceStrip.className).toContain("sm:grid-flow-row");
 });
 
+// The fullscreen overlay carries every face — self and peers — so going full
+// screen never means losing sight of the room (8/11 third round).
+test("fullscreening a shared screen surfaces face thumbs for the whole room", async () => {
+  call.peers = [
+    { peerId: "p1", stream: null, screenStream: remoteScreen(), connectionState: "connected" },
+  ];
+  await enterRoom();
+  const figure = screen.getByText("Agent 2's Screen").closest("figure")!;
+
+  Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => figure });
+  fireEvent(document, new Event("fullscreenchange"));
+
+  expect(screen.getAllByText("You")).toHaveLength(2); // face strip + overlay thumb
+  expect(screen.getAllByText("Agent 2")).toHaveLength(2);
+  Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => null });
+});
+
 test("with nothing on the table, faces keep the full grid", async () => {
   call.peers = [{ peerId: "p1", stream: null, connectionState: "connected" }];
   await enterRoom();
