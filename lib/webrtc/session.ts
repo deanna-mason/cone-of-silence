@@ -138,8 +138,20 @@ export class CallSession {
    *  stagger, a 4C rebuild, a reconnect's full re-bring-up — and every one
    *  of them must inherit the active share at construction (buildLink) and
    *  hear its announce the moment it proves (onProven). Deliberately
-   *  survives dropAll: a signaling blip must not silently end the share. */
+   *  survives dropAll: a signaling blip must not silently end the share.
+   *  `stream` is always screenCarrier, never the raw capture — see below. */
   private activeScreen: { track: MediaStreamTrack; stream: MediaStream } | null = null;
+  /** The ONE stream identity every screen share this session ever rides —
+   *  latched to the first capture stream and never replaced (8/11 live-test
+   *  regression). The far side can only recognize the screen by stream id
+   *  (msid), and that id is frozen into the SDP at the sender's first
+   *  addTrack; a re-share reuses that sender via replaceTrack, which
+   *  renegotiates nothing — so announcing a fresh capture's id would point
+   *  the far side at a stream that never arrives, while the sharer's local
+   *  preview looks fine. Every share announces THIS id, every link's screen
+   *  sender is associated with THIS stream, and fresh capture tracks just
+   *  swap in underneath it. */
+  private screenCarrier: MediaStream | null = null;
 
   constructor(
     roomId: string,
@@ -479,14 +491,19 @@ export class CallSession {
   async startScreenShare(stream: MediaStream): Promise<void> {
     const track = stream.getVideoTracks()[0];
     if (!track) return;
-    this.activeScreen = { track, stream };
+    // Latched once — every later share rides the first stream's identity
+    // (see screenCarrier's doc). addTrack only reads the stream's id for the
+    // msid, so associating a later capture's track with the first capture's
+    // stream is legal and exactly the point.
+    this.screenCarrier ??= stream;
+    this.activeScreen = { track, stream: this.screenCarrier };
     // Announce BEFORE media: the cos message is a data-channel hop, the track
     // needs a whole renegotiation — the id all but always arrives first, so
     // the far side files the stream straight into the screen slot. (Either
     // order is still correct — mesh reconciles both — this just avoids the
     // one-frame face-slot flash.)
-    this.mesh.sendAll(buildScreenShareMsg(stream.id));
-    await this.mesh.screenShareAll(track, stream);
+    this.mesh.sendAll(buildScreenShareMsg(this.screenCarrier.id));
+    await this.mesh.screenShareAll(track, this.screenCarrier);
   }
 
   /** Clears the table: stop announce to every proven peer, screen senders

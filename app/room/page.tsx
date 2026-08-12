@@ -558,23 +558,30 @@ export default function RoomPage() {
   // (7/30 testers). svh is the stable chrome-visible height, so the grid
   // holds one size regardless of scroll. At a fixed 390×844 (headless e2e,
   // no retractable UA chrome) svh == dvh, so the pinned geometry is unchanged.
-  // Screen tiles ride the same one-view grid as the faces (no-scroll rule
-  // holds): documents append after the faces so nobody's face jumps cells
-  // when a share starts or stops.
-  const remoteScreenCount = call.peers.filter((p) => p.screenStream).length;
-  const tileCount =
-    1 + Math.max(call.peers.length, 1) + remoteScreenCount + (screenShare.sharing ? 1 : 0);
+  const tileCount = 1 + Math.max(call.peers.length, 1);
   const gridClass =
     tileCount <= 2
       ? "grid-cols-1 grid-rows-[repeat(2,minmax(0,1fr))] sm:grid-cols-2 sm:grid-rows-[minmax(0,1fr)]"
-      : tileCount <= 4
-        ? "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]"
-        : "grid-cols-2 grid-rows-[repeat(3,minmax(0,1fr))]";
+      : "grid-cols-2 grid-rows-[repeat(2,minmax(0,1fr))]";
   // The codename only identifies the OTHER half of a podcast pair — with a
   // fuller room it would label every tile the same. Shared by the face tile
   // and its screen tile so a share is attributable at a glance.
   const agentLabel = (i: number) =>
     call.peers.length === 1 ? (podcast.partnerCodename ?? "Agent 2") : `Agent ${i + 2}`;
+  // A tabled screen is the thing being discussed (8/11 live test: equal
+  // tiles made shared text unreadable) — screens take the dominant area and
+  // the faces drop to a fixed strip. Both areas still live inside the same
+  // 100svh budget, so the no-scroll rule holds.
+  const screenTiles = [
+    ...call.peers.flatMap((p, i) =>
+      p.screenStream
+        ? [{ key: `${p.peerId}-screen`, stream: p.screenStream, label: `${agentLabel(i)}'s Screen` }]
+        : [],
+    ),
+    ...(screenShare.sharing
+      ? [{ key: "your-screen", stream: screenShare.stream, label: "Your Screen" }]
+      : []),
+  ];
 
   return (
     <div className="flex h-[calc(100svh-7rem)] min-h-[20rem] flex-col gap-3">
@@ -604,51 +611,55 @@ export default function RoomPage() {
             : `Agents present: ${1 + call.peers.length}`}
         </p>
       </header>
-      <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>
-        <VideoTile
-          fill
-          stream={media.stream}
-          label="You"
-          mirrored
-          isSelf
-          speaking={lastSpeaker === SELF_SPEAKER}
-          camOff={!media.camOn}
-          micCut={!media.micOn}
-          episodeFrame={podcastLocked}
-        />
-        {call.peers.map((p, i) => (
-          <RemoteTile
-            key={p.peerId}
-            peer={p}
-            label={agentLabel(i)}
-            // While the tape rolls the composite crops both cameras — crop the
-            // partner tile too so the preview is honest (CS-DR-04 2B).
-            episodeFrame={podcastLocked}
-            speaking={lastSpeaker === p.peerId}
-            onSpeakingStart={noteSpeaker}
-          />
-        ))}
-        {/* The empty seat's centre overlay already says "Awaiting agent" — the
-            caption is the only line that can say what to DO about it, and it
-            names the Copy Invite button two rows below (8/5 copy pass). */}
-        {call.peers.length === 0 && (
-          <VideoTile fill stream={null} label="Copy Invite to fill this seat" />
-        )}
-        {call.peers.map((p, i) =>
-          p.screenStream ? (
+      {(() => {
+        const faceTiles = (
+          <>
             <VideoTile
-              key={`${p.peerId}-screen`}
               fill
-              stream={p.screenStream}
-              label={`${agentLabel(i)}'s Screen`}
-              screenShare
+              stream={media.stream}
+              label="You"
+              mirrored
+              isSelf
+              speaking={lastSpeaker === SELF_SPEAKER}
+              camOff={!media.camOn}
+              micCut={!media.micOn}
+              episodeFrame={podcastLocked}
             />
-          ) : null,
-        )}
-        {screenShare.sharing && (
-          <VideoTile fill stream={screenShare.stream} label="Your Screen" screenShare />
-        )}
-      </div>
+            {call.peers.map((p, i) => (
+              <RemoteTile
+                key={p.peerId}
+                peer={p}
+                label={agentLabel(i)}
+                // While the tape rolls the composite crops both cameras — crop the
+                // partner tile too so the preview is honest (CS-DR-04 2B).
+                episodeFrame={podcastLocked}
+                speaking={lastSpeaker === p.peerId}
+                onSpeakingStart={noteSpeaker}
+              />
+            ))}
+            {/* The empty seat's centre overlay already says "Awaiting agent" — the
+                caption is the only line that can say what to DO about it, and it
+                names the Copy Invite button two rows below (8/5 copy pass). */}
+            {call.peers.length === 0 && (
+              <VideoTile fill stream={null} label="Copy Invite to fill this seat" />
+            )}
+          </>
+        );
+        return screenTiles.length > 0 ? (
+          <>
+            <div
+              className={`grid min-h-0 flex-1 gap-3 ${screenTiles.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
+            >
+              {screenTiles.map((t) => (
+                <VideoTile key={t.key} fill stream={t.stream} label={t.label} screenShare />
+              ))}
+            </div>
+            <div className="grid h-28 shrink-0 grid-flow-col auto-cols-fr gap-3">{faceTiles}</div>
+          </>
+        ) : (
+          <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>{faceTiles}</div>
+        );
+      })()}
       <InCallDeviceBar
         mics={media.devices.mics}
         cameras={media.devices.cameras}

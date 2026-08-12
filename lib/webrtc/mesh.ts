@@ -120,6 +120,14 @@ interface Entry {
    *  Survives a rebuild: the sharer re-announces on the fresh link's proof,
    *  and the same MediaStream object keeps its id across re-adds. */
   screenStreamId: string | null;
+  /** Every id EVER announced as a screen. A stream doesn't change species:
+   *  once a screen, never the face — including after a stop, when the
+   *  retained stream would otherwise be "the most recent" and win the face
+   *  slot. Retention (not deletion) is load-bearing for RE-shares: they
+   *  reuse the negotiated sender (replaceTrack, no renegotiation), so no
+   *  fresh `track` event ever re-delivers the stream — re-filing what we
+   *  kept is the only way the tile comes back (8/11 live-test regression). */
+  screenIds: Set<string>;
   /** Derived: streams[screenStreamId] when both halves have arrived. */
   screenStream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
@@ -361,11 +369,10 @@ export class Mesh {
   setRemoteScreen(peerId: string, streamId: string | null): void {
     const entry = this.entries.get(peerId);
     if (!entry) return;
-    if (streamId === null && entry.screenStreamId !== null) {
-      // A stopped share's stream must not fall back into the face slot as
-      // "the most recent stream" — it is not a face, it is a corpse.
-      entry.streams.delete(entry.screenStreamId);
-    }
+    // The stream stays FILED on a stop (see screenIds' doc — a re-share
+    // re-points at it with no fresh track event); screenIds keeps it out of
+    // the face slot forever.
+    if (streamId !== null) entry.screenIds.add(streamId);
     entry.screenStreamId = streamId;
     this.deriveStreams(entry);
     this.emitRoster();
@@ -456,6 +463,7 @@ export class Mesh {
       stream: null,
       streams: new Map(),
       screenStreamId: null,
+      screenIds: new Set(),
       screenStream: null,
       connectionState: "new",
       channelOpen: false,
@@ -738,8 +746,8 @@ export class Mesh {
     entry.link = null;
     entry.stream = null;
     // The dead pc's streams with it — the replacement surfaces fresh ones.
-    // screenStreamId stays: the sharer re-announces on the fresh link's
-    // proof, and until then a stale id merely matches nothing.
+    // screenStreamId/screenIds stay: the sharer re-announces on the fresh
+    // link's proof, and until then a stale id merely matches nothing.
     entry.streams.clear();
     entry.screenStream = null;
     entry.chain = Promise.resolve();
@@ -798,12 +806,12 @@ export class Mesh {
 
   /** Re-files entry.stream/entry.screenStream from the streams this link has
    *  surfaced and the announced screen id. The face slot keeps its old
-   *  "most recent stream wins" semantics — just with the screen stream
-   *  excluded once (or before) its announce lands. */
+   *  "most recent stream wins" semantics — excluding anything ever announced
+   *  as a screen (screenIds), live share or not. */
   private deriveStreams(entry: Entry): void {
     let primary: MediaStream | null = null;
     for (const s of entry.streams.values()) {
-      if (s.id !== entry.screenStreamId) primary = s;
+      if (!entry.screenIds.has(s.id)) primary = s;
     }
     entry.stream = primary;
     entry.screenStream = entry.screenStreamId !== null ? (entry.streams.get(entry.screenStreamId) ?? null) : null;

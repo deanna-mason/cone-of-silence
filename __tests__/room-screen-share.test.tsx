@@ -191,3 +191,27 @@ test("a peer's announced screen gets its own tile, labeled off the agent", async
 
   expect(screen.getByText("Agent 2's Screen")).toBeTruthy();
 });
+
+// 8/11 live-test finding: equal tiles made shared text unreadable. A tabled
+// screen is the thing being discussed — it takes the dominant area and the
+// faces drop to a strip.
+test("a tabled screen dominates the layout — faces drop to a strip", async () => {
+  call.peers = [
+    { peerId: "p1", stream: null, screenStream: remoteScreen(), connectionState: "connected" },
+  ];
+  await enterRoom();
+
+  const screenArea = screen.getByText("Agent 2's Screen").closest("figure")!.parentElement!;
+  expect(screenArea.className).toContain("flex-1"); // the screen gets the room
+  const faceStrip = screen.getByText("You").closest("figure")!.parentElement!;
+  expect(faceStrip.className).toContain("grid-flow-col"); // faces ride the strip
+  expect(faceStrip.className).not.toContain("flex-1");
+});
+
+test("with nothing on the table, faces keep the full grid", async () => {
+  call.peers = [{ peerId: "p1", stream: null, connectionState: "connected" }];
+  await enterRoom();
+
+  const faceGrid = screen.getByText("You").closest("figure")!.parentElement!;
+  expect(faceGrid.className).toContain("flex-1");
+});

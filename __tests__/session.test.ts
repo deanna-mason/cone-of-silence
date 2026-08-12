@@ -694,6 +694,28 @@ describe("screen share on the real CallSession stack", () => {
     expect(cos.sent).toContain(buildScreenStopMsg());
   });
 
+  // The 8/11 live-test regression, sender side: a re-share reuses the parked
+  // sender (replaceTrack, no renegotiation), so the far side keeps receiving
+  // under the FIRST share's msid forever. Announcing the fresh capture's id
+  // pointed the far side at a stream that would never arrive — every share
+  // after a seat's first was invisible remotely while previewing fine locally.
+  it("a re-share announces the SAME carrier id and reuses the negotiated sender", async () => {
+    const { pc, cos } = await provenPair();
+    const track1 = { kind: "video" } as MediaStreamTrack;
+    const first = { id: "scr-first", getVideoTracks: () => [track1] } as unknown as MediaStream;
+    await session.startScreenShare(first);
+    await session.stopScreenShare();
+    const addsAfterFirst = pc.addedTracks.length;
+
+    const track2 = { kind: "video" } as MediaStreamTrack;
+    const second = { id: "scr-second", getVideoTracks: () => [track2] } as unknown as MediaStream;
+    await session.startScreenShare(second);
+
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-first"));
+    expect(cos.sent).not.toContain(buildScreenShareMsg("scr-second"));
+    expect(pc.addedTracks.length).toBe(addsAfterFirst); // replaceTrack reuse — no second m-line
+  });
+
   it("a newcomer mid-share gets the screen track at construction and the announce on proving", async () => {
     const ws = startAndOpen();
     ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [] });

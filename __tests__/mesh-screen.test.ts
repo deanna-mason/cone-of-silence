@@ -136,4 +136,47 @@ describe("remote screen bookkeeping", () => {
     const { mesh } = harness();
     expect(() => mesh.setRemoteScreen("ghost", "scr-1")).not.toThrow();
   });
+
+  // The 8/11 live-test regression: a RE-share reuses the already-negotiated
+  // sender (replaceTrack — no renegotiation), so NO fresh `track` event ever
+  // fires on this side. The only way the tile can come back is if the stream
+  // stayed filed across the stop — which is exactly what the first cut threw
+  // away (delete-on-stop). Each seat could share once; every later share was
+  // invisible to the far side.
+  it("a re-share after a stop re-files the retained stream — no fresh track event needed", () => {
+    const { mesh, made, lastRoster } = harness();
+    mesh.addExistingPeers(["p1"]);
+    vi.runAllTimers();
+
+    const camera = streamWithId("cam-1");
+    const screen = streamWithId("scr-1");
+    made[0].events.onRemoteStream(camera);
+    mesh.setRemoteScreen("p1", "scr-1");
+    made[0].events.onRemoteStream(screen);
+    mesh.setRemoteScreen("p1", null); // stop — tile down
+    mesh.setRemoteScreen("p1", "scr-1"); // re-share — same carrier id, no new ontrack
+
+    const [peer] = lastRoster();
+    expect(peer.screenStream).toBe(screen);
+    expect(peer.stream).toBe(camera);
+  });
+
+  it("a stream once announced as a screen never becomes the face, even after the share ends", () => {
+    const { mesh, made, lastRoster } = harness();
+    mesh.addExistingPeers(["p1"]);
+    vi.runAllTimers();
+
+    // Screen arrives LAST, then the share stops: "most recent stream wins"
+    // must not promote the retained screen stream into the face slot.
+    const camera = streamWithId("cam-1");
+    const screen = streamWithId("scr-1");
+    made[0].events.onRemoteStream(camera);
+    mesh.setRemoteScreen("p1", "scr-1");
+    made[0].events.onRemoteStream(screen);
+    mesh.setRemoteScreen("p1", null);
+
+    const [peer] = lastRoster();
+    expect(peer.screenStream).toBeUndefined();
+    expect(peer.stream).toBe(camera);
+  });
 });
