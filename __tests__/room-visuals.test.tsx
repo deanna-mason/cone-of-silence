@@ -7,14 +7,14 @@
 //      detector — RemoteTile only reports its detector's rising edge up.
 //      Brass only; vermilion stays reserved for danger.
 //   2B "Iris Pan" — roll-tape framing: while a take rolls, BOTH tiles crop to
-//      the 930:1008 episode pane, the viewport width AND height eased as plain
+//      the 958:1080 episode pane, the viewport width AND height eased as plain
 //      lengths (never aspect-ratio); a slate-stamp flashes on the roller's own
 //      tile. prefers-reduced-motion → hard cut (no ease, no flash).
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { cleanup, render, within } from "@testing-library/react";
-import VideoTile, { episodeViewportStyle } from "@/components/VideoTile";
+import VideoTile, { episodeVideoStyle, episodeViewportStyle } from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
-import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
+import { PANE } from "@/lib/podcast/episodeGeometry.mjs";
 
 // The live per-tile detector, controllable per test. RemoteTile must treat
 // it as report-only — the drawn outline comes from the latched `speaking`
@@ -118,10 +118,10 @@ test("RemoteTile reports its detector's rising edge up but draws only the latche
 test("2B: episodeViewportStyle pins BOTH width and height as cqw/cqh lengths (no aspect-ratio)", () => {
   const rolling = episodeViewportStyle(true);
   expect(rolling.width).toBe(
-    `min(100cqw, calc(100cqh * (${EPISODE_PANE_W} / ${EPISODE_PANE_H})))`,
+    `min(100cqw, calc(100cqh * (${PANE.w} / ${PANE.h})))`,
   );
   expect(rolling.height).toBe(
-    `min(100cqh, calc(100cqw * (${EPISODE_PANE_H} / ${EPISODE_PANE_W})))`,
+    `min(100cqh, calc(100cqw * (${PANE.h} / ${PANE.w})))`,
   );
   // NEVER animate aspect-ratio — it must not appear.
   expect("aspectRatio" in rolling).toBe(false);
@@ -145,6 +145,42 @@ test("2B: both self and remote tiles carry the episode crop viewport while rolli
   } as unknown as import("@/lib/webrtc/session").RemotePeer;
   const remote = render(<RemoteTile peer={peer} label="Agent 2" episodeFrame />);
   expect(within(remote.container).getByTestId("episode-viewport")).toBeDefined();
+});
+
+test("framing: the camera gets the darkroom crop box (1.08 zoom, top-anchored) — a screen never does", () => {
+  // Same numbers ffmpeg crops with (lib/podcast/episodeGeometry.mjs):
+  // 1035x1166 cover box over a 958x1080 pane, 38.5px off each side, 4px up.
+  const style = episodeVideoStyle(true)!;
+  expect(style.position).toBe("absolute");
+  expect(style.objectFit).toBe("cover");
+  expect(style.objectPosition).toBe("50% 0");
+  expect(parseFloat(String(style.width))).toBeCloseTo((1035 / 958) * 100, 3);
+  expect(parseFloat(String(style.height))).toBeCloseTo((1166 / 1080) * 100, 3);
+  expect(parseFloat(String(style.left))).toBeCloseTo((-38.5 / 958) * 100, 3);
+  expect(parseFloat(String(style.top))).toBeCloseTo((-4 / 1080) * 100, 3);
+  expect(episodeVideoStyle(false)).toBeUndefined();
+
+  const cam = render(<VideoTile stream={fakeStream()} label="You" isSelf episodeFrame />);
+  const camVideo = cam.container.querySelector("video")!;
+  expect(camVideo.style.position).toBe("absolute");
+  expect(camVideo.style.objectPosition).toBe("50% 0");
+  cleanup();
+
+  const screen = render(<VideoTile stream={fakeStream()} label="Screen" screenShare episodeFrame />);
+  expect(screen.container.querySelector("video")!.style.position).toBe("");
+});
+
+test("framing toggles on the SAME <video> node (no remount drops srcObject)", () => {
+  const stream = fakeStream();
+  const r = render(<VideoTile stream={stream} label="You" isSelf />);
+  const before = r.container.querySelector("video");
+  r.rerender(<VideoTile stream={stream} label="You" isSelf episodeFrame />);
+  const after = r.container.querySelector("video");
+  expect(after).toBe(before);
+  expect(after!.style.position).toBe("absolute");
+  r.rerender(<VideoTile stream={stream} label="You" isSelf />);
+  expect(r.container.querySelector("video")).toBe(before);
+  expect(before!.style.position).toBe("");
 });
 
 test("2B: the roller's own tile flashes a slate stamp; the partner tile does not", () => {

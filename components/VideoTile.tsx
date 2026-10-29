@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { EPISODE_PANE_H, EPISODE_PANE_W } from "@/lib/podcast/paneAspect";
+import { CAMERA_CROP, PANE, previewVideoBox } from "@/lib/podcast/episodeGeometry.mjs";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 
 interface VideoTileProps {
@@ -21,11 +21,12 @@ interface VideoTileProps {
    *  An overlay sibling, like signalLost/figcaption — the div>div>video tree
    *  is untouched, preserving the episodeFrame remount invariant. */
   micCut?: boolean;
-  /** Episode framing (design 2026-08-03): while the tape rolls, show exactly
-   *  the mp4's visible region — a centered viewport at the darkroom pane
-   *  aspect with the video cover-cropped inside it, letterbox around it.
-   *  Replaces the old object-contain letterbox monitor: the composite now
-   *  cover-crops, so the honest preview is the crop. */
+  /** Episode framing (design 2026-08-03, geometry 2026-10-29): while the tape
+   *  rolls, show exactly the mp4's visible region — a centered viewport at
+   *  the darkroom pane aspect (958:1080) with the camera cropped inside it by
+   *  the darkroom's own rule (1.08 zoom, top-anchored), letterbox around it.
+   *  Both come from lib/podcast/episodeGeometry.mjs, the module the darkroom
+   *  composites with, so the preview and the final cut cannot drift. */
   episodeFrame?: boolean;
   /** A shared screen, not a face: letterbox (object-contain — cover-cropping
    *  a document amputates its edges), keep playback muted (the track carries
@@ -51,7 +52,7 @@ interface VideoTileProps {
  *  the target:
  *    • rolling  → the pane-shaped crop: width = min(own width, own height x
  *      pane ratio); height = the inverse min. Whichever tile dimension binds,
- *      the box keeps the 930:1008 pane shape and centres, letterboxed.
+ *      the box keeps the 958:1080 pane shape and centres, letterboxed.
  *    • not rolling → a plain full fill (100cqw x 100cqh) — the same box the
  *      un-cropped tile always showed, but expressed in the same length family
  *      as the crop so the transition has two interpolable endpoints. */
@@ -60,8 +61,32 @@ export function episodeViewportStyle(rolling: boolean): CSSProperties {
     return { width: "100cqw", height: "100cqh" };
   }
   return {
-    width: `min(100cqw, calc(100cqh * (${EPISODE_PANE_W} / ${EPISODE_PANE_H})))`,
-    height: `min(100cqh, calc(100cqw * (${EPISODE_PANE_H} / ${EPISODE_PANE_W})))`,
+    width: `min(100cqw, calc(100cqh * (${PANE.w} / ${PANE.h})))`,
+    height: `min(100cqh, calc(100cqw * (${PANE.h} / ${PANE.w})))`,
+  };
+}
+
+/** The <video>'s inline style inside the episode viewport. While framing, a
+ *  camera (never a shared screen) gets the darkroom's crop rule as a CSS
+ *  box: the cover box 1.08x the pane, centred horizontally, raised so the
+ *  pane starts 4px below its top, with the picture object-fit: cover and
+ *  top-anchored inside it — the same scale, centring and anchor ffmpeg uses
+ *  (previewVideoBox / ffmpegPaneFilters share one definition). The viewport
+ *  clips it (overflow-hidden), so what shows is exactly the final pane.
+ *  Not framing: no inline style — the classes' plain full-size cover. */
+export function episodeVideoStyle(framing: boolean): CSSProperties | undefined {
+  if (!framing) return undefined;
+  const box = previewVideoBox(PANE, CAMERA_CROP);
+  return {
+    position: "absolute",
+    left: box.left,
+    top: box.top,
+    width: box.width,
+    height: box.height,
+    maxWidth: "none",
+    maxHeight: "none",
+    objectFit: "cover",
+    objectPosition: box.objectPosition,
   };
 }
 
@@ -184,7 +209,7 @@ export default function VideoTile({
           {/* Iris Pan (CS-DR-04 2B): the viewport is ALWAYS this same node with
               the SAME shape — a size container parent, one crop child, one
               <video>. Only the child's inline width/height change between the
-              full fill and the 930:1008 pane crop (episodeViewportStyle), and
+              full fill and the 958:1080 pane crop (episodeViewportStyle), and
               `iris-viewport` transitions those two cqw/cqh lengths over 420ms
               so the crop eases in and out on the persistent node. Never a
               branch/shape change: that would remount <video> and drop
@@ -201,6 +226,7 @@ export default function VideoTile({
               ref={videoRef}
               autoPlay
               playsInline
+              style={episodeVideoStyle(episodeFrame && !screenShare)}
               className={`h-full w-full ${screenShare ? "object-contain" : "object-cover"} ${mirrored ? "-scale-x-100" : ""} ${covered ? "invisible" : ""} ${audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""}`}
             />
           </div>

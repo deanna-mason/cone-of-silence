@@ -17,12 +17,14 @@ import { compositeArgs } from "../scripts/darkroom/composite.mjs";
 import { DarkroomError } from "../scripts/darkroom/errors.mjs";
 import { SAMPLE_RATE, synthesizeMark, findMarks } from "../scripts/darkroom/tone.mjs";
 import { driftRatio, alignment, episodeWindow, PAD_MS } from "../scripts/darkroom/drift.mjs";
-import { developEpisode } from "../scripts/darkroom/pipeline.mjs";
+import { developEpisode, DEFAULT_FRAME } from "../scripts/darkroom/pipeline.mjs";
+import { EDGE_TO_EDGE_LAYOUT, DIVIDER } from "../lib/podcast/episodeGeometry.mjs";
 import {
   pollOnce,
   isDeveloped,
   developedMarkerPath,
   parseArgs,
+  buildPipelineOpts,
   resolveChromePath,
   makeRefusalBackoff,
 } from "../scripts/darkroom/index.mjs";
@@ -345,6 +347,61 @@ describe("composite.mjs — compositeArgs", () => {
   });
 });
 
+describe("composite.mjs — compositeArgs, edge-to-edge frame (2026-10-29)", () => {
+  const edgeArgs = () =>
+    compositeArgs(
+      { color: DIVIDER.color },
+      "/tmp/local.webm",
+      "/tmp/remote.webm",
+      EDGE_TO_EDGE_LAYOUT,
+      { remoteSetpts: "setpts=PTS*1.000200000", delays: { local: 0, remote: 40 }, trim: TRIM },
+      "/tmp/episode.m4a",
+      "/tmp/out.mp4",
+    );
+
+  it("backdrop is an infinite lavfi colour source in the divider cream — no PNG, no -loop", () => {
+    const args = edgeArgs();
+    expect(args).not.toContain("-loop");
+    const i = args.indexOf("-f");
+    expect(args.slice(i, i + 4)).toEqual(["-f", "lavfi", "-i", "color=c=0xF7EED8:s=1920x1080:r=30"]);
+    // Still input 0, so local/remote/audio keep indices 1/2/3.
+    expect(inputIndexOf(args, "/tmp/local.webm")).toBe(1);
+    expect(inputIndexOf(args, "/tmp/remote.webm")).toBe(2);
+    expect(inputIndexOf(args, "/tmp/episode.m4a")).toBe(3);
+  });
+
+  it("both panes get the 1.08 top-anchored crop, then sit edge to edge around the 4px divider", () => {
+    const fc = filterComplexOf(edgeArgs());
+    for (const label of ["[1:v]", "[2:v]"]) {
+      const seg = segmentFor(fc, label);
+      expect(seg).toContain("scale=1035:1166:force_original_aspect_ratio=increase,crop=958:1080:(iw-958)/2:4[");
+    }
+    expect(fc).toContain("[0:v][rpad]overlay=962:0[bg1]");
+    expect(fc).toContain("[bg1][lpad]overlay=0:0:shortest=1[outv]");
+  });
+
+  it("privacy: every camera chain ENDS in a crop to exactly the pane size", () => {
+    const fc = filterComplexOf(edgeArgs());
+    for (const label of ["[1:v]", "[2:v]"]) {
+      expect(segmentFor(fc, label)).toMatch(/,crop=958:1080:[^,]*\[[lr]pad\]$/);
+    }
+  });
+
+  it("legacy (no crop rule) output is unchanged: plain centre cover-crop", () => {
+    const fc = filterComplexOf(
+      compositeArgs("/tmp/b.png", "/tmp/l.webm", "/tmp/r.webm", LAYOUT, { trim: TRIM }, "/tmp/a.m4a", "/tmp/o.mp4"),
+    );
+    expect(segmentFor(fc, "[1:v]")).toMatch(/,scale=820:615:force_original_aspect_ratio=increase,crop=820:615\[lpad\]$/);
+    expect(segmentFor(fc, "[2:v]")).toMatch(/,scale=800:600:force_original_aspect_ratio=increase,crop=800:600\[rpad\]$/);
+  });
+
+  it("refuses a malformed backdrop colour", () => {
+    expect(() =>
+      compositeArgs({ color: "cream" }, "/l", "/r", EDGE_TO_EDGE_LAYOUT, { trim: TRIM }, "/a", "/o"),
+    ).toThrow(/#RRGGBB/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Task 6: developEpisode orchestration + index.mjs CLI/watcher.
 //
@@ -570,9 +627,13 @@ describe("pipeline.mjs — developEpisode", () => {
       decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
       now: () => "2026-08-01T00:00:00.000Z",
     };
+    // The legacy template frame — the one that renders a backdrop (and so
+    // carries the D14 labels). The default edge-to-edge frame has its own
+    // cases in the "frames" describe below.
     const opts = {
       ownCodename: "CARDINAL",
       model: "server/models/std.rnnn",
+      frame: "humanym-badge",
       chromePath: "/fake/chrome",
       templatePath: "/fake/template.html",
     };
@@ -593,6 +654,7 @@ describe("pipeline.mjs — developEpisode", () => {
     // same two-pass mastering, no cut — the chimes and the dead air around
     // them survive in it, so nothing is lost by trimming the deliverable.
     expect(receipt.products).toEqual(["m4a", "m4a-full", "mp4"]);
+    expect(receipt.frame).toBe("humanym-badge");
     expect(receipt.toolVersions).toEqual({ node: process.version, ffmpeg: "8.1.2-static" });
 
     // --- labels (D14: local LEFT as --own-codename, remote RIGHT as receivedFrom) ---
@@ -722,6 +784,48 @@ describe("pipeline.mjs — developEpisode", () => {
     await expect(developEpisode(deps, manifestPath, { ownCodename: "CARDINAL" })).rejects.toMatchObject({
       code: "hash-mismatch",
     });
+    expect(fakeRunner.calls.length).toBe(0);
+  });
+
+  it("default frame is edge-to-edge: no Chrome render, lavfi cream backdrop, shared layout, receipt.frame", async () => {
+    expect(DEFAULT_FRAME).toBe("edge-to-edge");
+    const takeId = "take-20260101-0000-e2e0";
+    const { manifestPath } = await buildValidTake(takeId, { video: true, receivedFrom: "NIGHTINGALE" });
+    const localPcm = buildAudioTrack(10, [1.0, 7.0]);
+    const remotePcm = buildAudioTrack(9, [1.0, 6.9988]);
+    const fakeRunner = makeFakeRunner();
+    const receipt = await developEpisode(
+      {
+        runner: fakeRunner,
+        renderBackdrop: NEVER_CALLED, // no template, no Chrome
+        decodeMarkWindows: makeFakeDecodeMarkWindows(localPcm, remotePcm),
+        now: () => "2026-10-29T00:00:00.000Z",
+      },
+      manifestPath,
+      { ownCodename: "CARDINAL" },
+    );
+    expect(receipt.products).toEqual(["m4a", "m4a-full", "mp4"]);
+    expect(receipt.frame).toBe("edge-to-edge");
+    const composite = fakeRunner.calls[fakeRunner.calls.length - 1];
+    expect(composite).not.toContain("-loop");
+    expect(composite).toContain("color=c=0xF7EED8:s=1920x1080:r=30");
+    const fc = composite[composite.indexOf("-filter_complex") + 1];
+    expect(fc).toContain("crop=958:1080:(iw-958)/2:4");
+    expect(fc).toContain("overlay=962:0");
+    expect(fc).toContain("overlay=0:0:shortest=1");
+  }, 30000);
+
+  it("an unknown frame is refused before anything runs", async () => {
+    const takeId = "take-20260101-0000-bad0";
+    const { manifestPath } = await buildValidTake(takeId, { video: true, receivedFrom: "NIGHTINGALE" });
+    const fakeRunner = makeFakeRunner();
+    await expect(
+      developEpisode(
+        { runner: fakeRunner, renderBackdrop: NEVER_CALLED, decodeMarkWindows: NEVER_CALLED, now: () => "x" },
+        manifestPath,
+        { frame: "letterbox" },
+      ),
+    ).rejects.toThrow(/cli-invalid: unknown frame "letterbox"/);
     expect(fakeRunner.calls.length).toBe(0);
   });
 
@@ -983,6 +1087,7 @@ describe("index.mjs — CLI arg parsing", () => {
       model: "server/models/std.rnnn",
       develop: "/tmp/vault/take-x/episode.json",
       pollMs: 5000,
+      frame: "edge-to-edge",
     });
   });
 
@@ -996,6 +1101,8 @@ describe("index.mjs — CLI arg parsing", () => {
       "/models/custom.rnnn",
       "--poll-ms",
       "1500",
+      "--frame",
+      "humanym-badge",
     ]);
     expect(opts).toEqual({
       vault: "/tmp/vault",
@@ -1003,7 +1110,28 @@ describe("index.mjs — CLI arg parsing", () => {
       model: "/models/custom.rnnn",
       develop: null,
       pollMs: 1500,
+      frame: "humanym-badge",
     });
+  });
+
+  it("--frame accepts only the known frames", () => {
+    expect(() => parseArgs(["--vault", "/v", "--frame", "letterbox"])).toThrow(/cli-invalid: --frame must be one of/);
+    expect(() => parseArgs(["--vault", "/v", "--frame"])).toThrow(/cli-invalid/);
+  });
+
+  it("buildPipelineOpts resolves Chrome ONLY for the humanym-badge frame", () => {
+    const resolveChrome = () => {
+      throw new Error("should not resolve Chrome for edge-to-edge");
+    };
+    const edge = buildPipelineOpts({ ownCodename: "C", model: "m", frame: "edge-to-edge" }, { resolveChrome });
+    expect(edge).toEqual({ ownCodename: "C", model: "m", frame: "edge-to-edge" });
+
+    const badge = buildPipelineOpts(
+      { ownCodename: "C", model: "m", frame: "humanym-badge" },
+      { resolveChrome: () => "/fake/chrome" },
+    );
+    expect(badge.chromePath).toBe("/fake/chrome");
+    expect(badge.templatePath).toMatch(/scripts\/darkroom\/template\.html$/);
   });
 
   it("missing --vault is a cli-invalid refusal", () => {

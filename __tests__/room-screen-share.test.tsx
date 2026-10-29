@@ -48,9 +48,13 @@ const ACTIONS = {
   dismissFault: () => {},
 };
 
+const ARMED: PodcastPanelState = { kind: "armed", canSend: false, partnerCodename: null };
+const ROLLING: PodcastPanelState = { kind: "rolling", elapsedS: 3, localBytes: 1, partnerBytes: 1, partnerCodename: null };
+const take: { panel: PodcastPanelState } = { panel: ARMED };
+
 vi.mock("@/hooks/usePodcastTake", () => ({
   usePodcastTake: () => ({
-    panel: { kind: "armed", canSend: false, partnerCodename: null } as PodcastPanelState,
+    panel: take.panel,
     faultedThisTake: false,
     partnerCodename: null,
     myCodename: "Nightingale",
@@ -118,6 +122,7 @@ beforeEach(() => {
   sessionStorage.setItem("cos-room", JSON.stringify({ roomId: ID, secret: SECRET }));
   window.HTMLMediaElement.prototype.play = () => Promise.resolve();
   call.peers = [];
+  take.panel = ARMED;
   screenPort.share.mockReset();
   screenPort.stop.mockReset();
   getUserMedia.mockReset();
@@ -245,5 +250,42 @@ test("with nothing on the table, faces keep the full grid", async () => {
   await enterRoom();
 
   const faceGrid = screen.getByText("You").closest("figure")!.parentElement!;
-  expect(faceGrid.className).toContain("flex-1");
+  // The grid fills its size container (components/EpisodeStage.tsx), and
+  // THAT container takes the room's remaining height.
+  expect(faceGrid.className).toContain("gap-3");
+  expect(faceGrid.parentElement!.className).toContain("flex-1");
+  expect(screen.queryByTestId("episode-stage")).toBeNull(); // not rolling → not staged
+});
+
+// 2026-10-29: while a two-person take rolls, the faces become the final
+// cut's frame — side by side, you LEFT and partner RIGHT (darkroom D14).
+test("rolling with one partner stages the faces as the episode frame, you on the left", async () => {
+  take.panel = ROLLING;
+  call.peers = [{ peerId: "p1", stream: null, connectionState: "connected" }];
+  await enterRoom();
+
+  const stage = screen.getByTestId("episode-stage");
+  const figures = stage.querySelectorAll(":scope > figure");
+  expect(figures).toHaveLength(2);
+  expect(figures[0].textContent).toContain("You");
+  expect(figures[1].textContent).toContain("Agent 2");
+});
+
+test("rolling in a fuller room keeps per-tile framing (the darkroom composites pairs)", async () => {
+  take.panel = ROLLING;
+  call.peers = [
+    { peerId: "p1", stream: null, connectionState: "connected" },
+    { peerId: "p2", stream: null, connectionState: "connected" },
+  ];
+  await enterRoom();
+  expect(screen.queryByTestId("episode-stage")).toBeNull();
+});
+
+test("rolling while a screen is on the table keeps the screen layout", async () => {
+  take.panel = ROLLING;
+  call.peers = [
+    { peerId: "p1", stream: null, screenStream: remoteScreen(), connectionState: "connected" },
+  ];
+  await enterRoom();
+  expect(screen.queryByTestId("episode-stage")).toBeNull();
 });

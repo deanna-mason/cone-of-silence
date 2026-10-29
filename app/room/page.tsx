@@ -7,6 +7,7 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import VideoTile from "@/components/VideoTile";
 import RemoteTile from "@/components/RemoteTile";
+import EpisodeStage from "@/components/EpisodeStage";
 import FaceThumb from "@/components/FaceThumb";
 import CallControls from "@/components/CallControls";
 import DevicePicker from "@/components/DevicePicker";
@@ -682,7 +683,14 @@ export default function RoomPage() {
             </div>
           </div>
         ) : (
-          <div className={`grid min-h-0 flex-1 gap-3 ${gridClass}`}>{faceTiles}</div>
+          // While a two-person take rolls, the faces ARE the episode frame:
+          // side by side (you left, partner right — the darkroom's D14),
+          // edge to edge around the cream divider, each pane cropped as the
+          // darkroom will crop it (components/EpisodeStage.tsx). A fuller
+          // room keeps per-tile framing — the darkroom composites pairs.
+          <EpisodeStage staged={podcastLocked && call.peers.length === 1} gridClass={gridClass}>
+            {faceTiles}
+          </EpisodeStage>
         );
       })()}
       <InCallDeviceBar

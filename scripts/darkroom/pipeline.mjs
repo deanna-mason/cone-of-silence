@@ -27,8 +27,18 @@ import { findMarksWindowed, SEARCH_WINDOW_S, SAMPLE_RATE as TONE_SAMPLE_RATE } f
 import { driftRatio, remoteAudioFilter, remoteVideoSetpts, alignment, episodeWindow, PAD_MS } from "./drift.mjs";
 import { measureStem, applyStemArgs, mixMeasureArgs, mixApplyArgs } from "./chain.mjs";
 import { compositeArgs } from "./composite.mjs";
+import { DIVIDER, EDGE_TO_EDGE_LAYOUT } from "../../lib/podcast/episodeGeometry.mjs";
 
 export const DEFAULT_OWN_CODENAME = "HOST";
+
+/** The episode mp4's frame (2026-10-29). "edge-to-edge" (default): the
+ *  shared lib/podcast/episodeGeometry.mjs layout — two cropped panes and a
+ *  cream divider filling the frame, no badge, no Chrome render — the same
+ *  geometry the live room previews while the tape rolls. "humanym-badge":
+ *  the older template.html look (badge, inset panes, outlines), kept
+ *  selectable; its panes use the plain centre cover-crop. */
+export const FRAMES = Object.freeze(["edge-to-edge", "humanym-badge"]);
+export const DEFAULT_FRAME = "edge-to-edge";
 export const DEFAULT_MODEL = "server/models/std.rnnn";
 
 function findStream(streams, host, base) {
@@ -78,7 +88,8 @@ function parseFfmpegVersion(stdout) {
  * developEpisode(deps, manifestPath, opts) -> Promise<Receipt>
  *
  * deps = { runner, renderBackdrop, decodeMarkWindows, now } — every side effect.
- * opts = { ownCodename, model, chromePath, templatePath }.
+ * opts = { ownCodename, model, frame, chromePath, templatePath } —
+ * chromePath/templatePath are only used by frame "humanym-badge".
  *
  * Throws DarkroomError on any refusal (manifest-invalid, part-missing,
  * part-gap, size-mismatch, hash-mismatch, tone-*-missing, tone-one-beep,
@@ -90,9 +101,13 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
   const {
     ownCodename = DEFAULT_OWN_CODENAME,
     model = DEFAULT_MODEL,
+    frame = DEFAULT_FRAME,
     chromePath,
     templatePath,
   } = opts;
+  if (!FRAMES.includes(frame)) {
+    throw new DarkroomError("cli-invalid", `unknown frame "${frame}" (expected one of: ${FRAMES.join(", ")})`);
+  }
 
   const takeDir = path.dirname(manifestPath);
   const vaultDir = path.dirname(takeDir);
@@ -285,18 +300,28 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
     // nothing to composite a side-by-side frame from.
     let mp4Written = false;
     if (hasVideo) {
-      const remoteLabel = episode.manifest.receivedFrom ?? "PARTNER";
-      const backdropPng = path.join(workDir, "backdrop.png");
-      const layout = await deps.renderBackdrop(
-        chromePath,
-        templatePath,
-        { left: ownCodename, right: remoteLabel },
-        backdropPng,
-      );
+      let backdrop;
+      let layout;
+      if (frame === "edge-to-edge") {
+        // No Chrome, no badge: the backdrop is a colour source in the
+        // divider's cream, and the only frame pixels it ever shows ARE the
+        // divider — the two cropped panes cover everything else.
+        backdrop = { color: DIVIDER.color };
+        layout = EDGE_TO_EDGE_LAYOUT;
+      } else {
+        const remoteLabel = episode.manifest.receivedFrom ?? "PARTNER";
+        backdrop = path.join(workDir, "backdrop.png");
+        layout = await deps.renderBackdrop(
+          chromePath,
+          templatePath,
+          { left: ownCodename, right: remoteLabel },
+          backdrop,
+        );
+      }
 
       const workMp4 = path.join(workDir, "episode.mp4");
       const argv = compositeArgs(
-        backdropPng,
+        backdrop,
         rawPaths["local-video"],
         rawPaths["remote-video"],
         layout,
@@ -342,6 +367,8 @@ export async function developEpisode(deps, manifestPath, opts = {}) {
       // "m4a-full" is unconditional — it is an audio product, so unlike the
       // mp4 it rides along on an audio-only episode too.
       products: mp4Written ? ["m4a", "m4a-full", "mp4"] : ["m4a", "m4a-full"],
+      // Which frame the mp4 was composited in (absent with no mp4).
+      ...(mp4Written ? { frame } : {}),
       toolVersions: { node: process.version, ffmpeg: ffmpegVersion },
     };
     const workReceipt = path.join(workDir, "develop.json");

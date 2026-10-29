@@ -9,9 +9,14 @@
   never draws text or shapes itself — it reads pane geometry back from this
   live page (getBoundingClientRect on #pane-left / #pane-right), so a full
   redesign of this file never touches pipeline code. Since 2026-08-03 the
-  compositor COVER-CROPS each camera into its pane (composite.mjs videoChain),
-  and lib/podcast/paneAspect.ts mirrors the pane shape below for the live
-  preview — if the pane geometry changes, change that constant too.
+  compositor COVER-CROPS each camera into its pane (composite.mjs videoChain).
+
+  LEGACY FRAME (2026-10-29): this template is now the opt-in
+  "humanym-badge" frame (darkroom --frame humanym-badge). The default podcast
+  frame is edge-to-edge with no badge, defined in
+  lib/podcast/episodeGeometry.mjs — which is also what the live room
+  previews while the tape rolls. The live preview does NOT follow this
+  template's pane shape.
 
   GEOMETRY (the compositing contract, read back live):
     #pane-left   x=24   y=48  w=930  h=1008

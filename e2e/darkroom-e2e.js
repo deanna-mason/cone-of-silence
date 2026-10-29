@@ -498,6 +498,44 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
   );
   check(!!mp4Audio && mp4Audio.codec_name === "aac", `[${label}] episode.mp4 audio codec is aac (got ${mp4Audio && mp4Audio.codec_name})`);
 
+  // Edge-to-edge frame (2026-10-29, the default): sample one decoded frame
+  // of the SYNTHETIC fixture's composite (testsrc — never a real recording)
+  // and check the shared geometry landed: the divider columns are cream on
+  // every sampled row, and the pixels either side of it are camera, not
+  // backdrop (the panes reach the divider — no margin, no outline). Then
+  // the receipt names the frame.
+  {
+    const { FRAME, PANE, DIVIDER } = darkroom.geometry;
+    const raw = await new Promise((resolve, reject) => {
+      const child = spawn(
+        "ffmpeg",
+        ["-v", "error", "-ss", "1", "-i", mp4Path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const chunks = [];
+      child.stdout.on("data", (d) => chunks.push(d));
+      child.on("error", reject);
+      child.on("close", () => resolve(Buffer.concat(chunks)));
+    });
+    check(raw.length === FRAME.w * FRAME.h * 3, `[${label}] decoded one ${FRAME.w}x${FRAME.h} rgb frame (got ${raw.length} bytes)`);
+    const cream = [1, 3, 5].map((i) => parseInt(DIVIDER.color.slice(i, i + 2), 16));
+    const px = (x, y) => Array.from(raw.subarray((y * FRAME.w + x) * 3, (y * FRAME.w + x) * 3 + 3));
+    const near = (a, b, tol) => a.every((v, i) => Math.abs(v - b[i]) <= tol);
+    const rows = [40, 300, 540, 800, 1040];
+    // The two middle divider columns (the outer two can pick up chroma bleed
+    // from the neighbouring pane under yuv420p + h264).
+    const dividerOk = rows.every((y) => near(px(PANE.w + 1, y), cream, 14) && near(px(PANE.w + 2, y), cream, 14));
+    check(dividerOk, `[${label}] divider columns ${PANE.w + 1}-${PANE.w + 2} are cream ${DIVIDER.color} on rows ${rows.join(",")}`);
+    const paneEdges = rows.flatMap((y) => [px(PANE.w - 3, y), px(PANE.w + DIVIDER.w + 2, y), px(2, y), px(FRAME.w - 3, y)]);
+    const creamEdges = paneEdges.filter((p) => near(p, cream, 14)).length;
+    check(
+      creamEdges <= 2,
+      `[${label}] panes reach the divider and the frame edges — camera, not backdrop (${creamEdges}/${paneEdges.length} edge samples read as cream)`,
+    );
+    const developed = JSON.parse(await fsp.readFile(path.join(episodesDir, "develop.json"), "utf8"));
+    check(developed.frame === "edge-to-edge", `[${label}] develop.json.frame is edge-to-edge (got ${developed.frame})`);
+  }
+
   // The mp4's duration reference follows episode.m4a's onto the trimmed
   // window (episode chime trim, 2026-08-05). `[outv]` is still bound to
   // LOCAL's chain by the overlay graph's single `shortest=1` — that has not
@@ -595,6 +633,7 @@ async function runFixtureFlow(fixture, darkroom, tmpDirs, watchers) {
     ...(await import("../scripts/darkroom/tone.mjs")),
     ...(await import("../scripts/darkroom/decode.mjs")),
     ...(await import("../scripts/darkroom/runner.mjs")),
+    geometry: await import("../lib/podcast/episodeGeometry.mjs"),
   };
 
   const watchers = [];

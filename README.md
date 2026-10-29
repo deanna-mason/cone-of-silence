@@ -141,7 +141,7 @@ cd server && cp env.example .env && npm i && npm run dev   # API + ws :8787
 npm i && npm run dev                                       # frontend :3000
 ```
 
-Darkroom (episode post): the podcast Mac needs node, ffmpeg with arnndn, and the rnnoise model at server/models/std.rnnn — `npm run darkroom -- --vault <Tape Vault>`.
+Darkroom (episode post): the podcast Mac needs node, ffmpeg with arnndn, and the rnnoise model at server/models/std.rnnn — `npm run darkroom -- --vault <Tape Vault>`. The episode mp4 is edge to edge by default (two 958×1080 panes, 4px cream divider, no badge; geometry in `lib/podcast/episodeGeometry.mjs`, the same numbers the room previews while rolling); `--frame humanym-badge` restores the older badge template, which also needs the playwright headless Chrome.
 
 ## Tests
 
