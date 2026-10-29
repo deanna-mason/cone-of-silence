@@ -490,8 +490,8 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
     setRecordedTakeId(takeId);
     writeLastTakeId(takeId);
     if (stopError) {
-      // The sidecar/final part didn't land — the operator needs to know the
-      // tape may be short before they walk away from it.
+      // The final part or the sidecar (its hashes are taken at stop) didn't
+      // land — the operator needs to know before they walk away from it.
       setStartFault({ side: "local", cause: "disk-error" });
       goPhase("failed");
       alarm();
@@ -667,8 +667,11 @@ export function usePodcastTake(args: PodcastTakeArgs): PodcastTake {
       // Declaration removed 2026-08-05 — this used to also require
       // `phonesRef.current !== null`, which with the declaration gone would
       // be null forever and silently ignore EVERY inbound roll. A transfer
-      // in flight is now the only reason to refuse one.
-      canAcceptRoll: () => !holdRollsRef.current,
+      // in flight is now the only reason to refuse one — that, and this
+      // side still securing its last tape: recorder.stop() hashes every
+      // part before it returns (seconds on a long take), and a take acked
+      // in that window is released by the pending stopRecorders().
+      canAcceptRoll: () => !holdRollsRef.current && phaseRef.current !== "stopping",
       // Ghost-pin release (8/5): a pinned partner who has left the live
       // roster (server restart re-mints every peerId) must not hold the
       // mid-take pin — see TakeProtocolDeps.isPeerLive.

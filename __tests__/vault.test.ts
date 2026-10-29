@@ -79,6 +79,8 @@ class FakeWritable {
 class FakeFileHandle {
   committed = new Uint8Array(0);
   createWritableCallCount = 0;
+  getFileCallCount = 0;
+  failGetFile = false;
   constructor(
     public name: string,
     private readonly shouldFailWrite: () => boolean,
@@ -98,10 +100,9 @@ class FakeFileHandle {
     return new FakeWritable(this, this.shouldFailWrite, gate);
   }
 
-  getFileCallCount = 0;
-
   async getFile(): Promise<Blob> {
     this.getFileCallCount += 1;
+    if (this.failGetFile) throw new Error("disk error reading part");
     return new Blob([this.committed]);
   }
 
@@ -326,6 +327,20 @@ describe("PartWriter", () => {
       expect(e.size).toBe(bytes.length);
       expect(e.sha256).toBe(toHex(await crypto.subtle.digest("SHA-256", structuredClone(bytes.buffer))));
     }
+  });
+
+  it("a part that can't be read back at finish() rejects finish() and writes no sidecar", async () => {
+    // finish() is now the only place a part is read and hashed, so it is the
+    // only place a read error can surface — and a sidecar listing a part
+    // without its hash must never land.
+    const dir = new FakeDirHandle();
+    const writer = new PartWriter(asDir(dir), "video", 30_000); // 2 appends/part
+    for (let i = 0; i < 3; i++) await writer.append(new Blob([new Uint8Array([i])]));
+    dir.files.get("video.part000")!.failGetFile = true;
+
+    await expect(writer.finish()).rejects.toThrow("disk error reading part");
+    expect(dir.files.has("video.sidecar.json")).toBe(false);
+    expect(dir.files.get("video.part001")!.committed.length).toBe(1); // the tape itself is intact
   });
 
   it("finish() issued while an append is pending waits for it, and the sidecar includes its bytes", async () => {
