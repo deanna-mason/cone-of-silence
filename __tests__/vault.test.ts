@@ -98,7 +98,10 @@ class FakeFileHandle {
     return new FakeWritable(this, this.shouldFailWrite, gate);
   }
 
+  getFileCallCount = 0;
+
   async getFile(): Promise<Blob> {
+    this.getFileCallCount += 1;
     return new Blob([this.committed]);
   }
 
@@ -301,6 +304,28 @@ describe("PartWriter", () => {
 
     await writer.finish();
     expect(new TextDecoder().decode(dir.files.get("audio.part000")!.committed)).toBe("AAAAABB"); // call order preserved
+  });
+
+  it("never reads a closed part back while recording — hashing waits for finish()", async () => {
+    // Reading a whole ~60 MB part into memory to hash it at every rollover
+    // stalled camera capture for up to 0.33 s, once a minute, on the 10/28
+    // takes. The sidecar is only written at finish(), so that is where the
+    // hashing belongs.
+    const dir = new FakeDirHandle();
+    const writer = new PartWriter(asDir(dir), "video", 30_000); // 2 appends/part
+    for (let i = 0; i < 5; i++) await writer.append(new Blob([new Uint8Array([i, i])]));
+
+    const reads = () => [...dir.files.values()].reduce((n, f) => n + f.getFileCallCount, 0);
+    expect(dir.files.get("video.part001")!.committed.length).toBe(4); // two parts closed and durable...
+    expect(reads()).toBe(0); // ...and neither was read back
+
+    const entries = await writer.finish();
+    expect(entries.map((e) => e.name)).toEqual(["video.part000", "video.part001", "video.part002"]);
+    for (const e of entries) {
+      const bytes = dir.files.get(e.name)!.committed;
+      expect(e.size).toBe(bytes.length);
+      expect(e.sha256).toBe(toHex(await crypto.subtle.digest("SHA-256", structuredClone(bytes.buffer))));
+    }
   });
 
   it("finish() issued while an append is pending waits for it, and the sidecar includes its bytes", async () => {

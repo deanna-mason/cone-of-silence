@@ -94,6 +94,7 @@ export class PartWriter {
   bytesWritten = 0; // committed + in-flight, feeds a live UI gauge
 
   private readonly quota: number; // appends per part
+  private readonly closedParts: string[] = []; // committed, not yet hashed
   private readonly parts: SidecarEntry[] = [];
   private partIndex = 0;
   private appendsInPart = 0;
@@ -156,6 +157,17 @@ export class PartWriter {
 
   private async finishLocked(): Promise<SidecarEntry[]> {
     if (this.writable) await this.closeCurrentPart();
+    // Hashing happens HERE, after the recorders have stopped — never at a
+    // rollover. Reading a whole ~60 MB part back into memory mid-take
+    // stalled camera capture for up to 0.33 s once a minute (10/28 takes,
+    // Intel Mac). Nothing reads `parts` before the sidecar below, so moving
+    // the digest changes no durability guarantee: each part is still
+    // committed by its own close().
+    for (const name of this.closedParts.slice(this.parts.length)) {
+      const file = await (await this.dir.getFileHandle(name)).getFile();
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      this.parts.push({ name, size: file.size, sha256: toHex(digest) });
+    }
     const sidecar = await this.dir.getFileHandle(`${this.base}.sidecar.json`, { create: true });
     const writable = await sidecar.createWritable();
     await writable.write(JSON.stringify({ ...this.sidecarExtra, base: this.base, parts: this.parts }, null, 2));
@@ -167,10 +179,7 @@ export class PartWriter {
     const writable = this.writable!;
     const name = partName(this.base, this.partIndex);
     await writable.close(); // atomic swap: bytes are durable from this point on
-    const fh = await this.dir.getFileHandle(name, { create: true });
-    const file = await fh.getFile();
-    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-    this.parts.push({ name, size: file.size, sha256: toHex(digest) });
+    this.closedParts.push(name); // hashed in finishLocked(), not here
     this.writable = null;
     this.appendsInPart = 0;
     this.partIndex += 1;
