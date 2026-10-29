@@ -79,6 +79,8 @@ class FakeWritable {
 class FakeFileHandle {
   committed = new Uint8Array(0);
   createWritableCallCount = 0;
+  getFileCallCount = 0;
+  failGetFile = false;
   constructor(
     public name: string,
     private readonly shouldFailWrite: () => boolean,
@@ -99,6 +101,8 @@ class FakeFileHandle {
   }
 
   async getFile(): Promise<Blob> {
+    this.getFileCallCount += 1;
+    if (this.failGetFile) throw new Error("disk error reading part");
     return new Blob([this.committed]);
   }
 
@@ -301,6 +305,42 @@ describe("PartWriter", () => {
 
     await writer.finish();
     expect(new TextDecoder().decode(dir.files.get("audio.part000")!.committed)).toBe("AAAAABB"); // call order preserved
+  });
+
+  it("never reads a closed part back while recording — hashing waits for finish()", async () => {
+    // Reading a whole ~60 MB part into memory to hash it at every rollover
+    // stalled camera capture for up to 0.33 s, once a minute, on the 10/28
+    // takes. The sidecar is only written at finish(), so that is where the
+    // hashing belongs.
+    const dir = new FakeDirHandle();
+    const writer = new PartWriter(asDir(dir), "video", 30_000); // 2 appends/part
+    for (let i = 0; i < 5; i++) await writer.append(new Blob([new Uint8Array([i, i])]));
+
+    const reads = () => [...dir.files.values()].reduce((n, f) => n + f.getFileCallCount, 0);
+    expect(dir.files.get("video.part001")!.committed.length).toBe(4); // two parts closed and durable...
+    expect(reads()).toBe(0); // ...and neither was read back
+
+    const entries = await writer.finish();
+    expect(entries.map((e) => e.name)).toEqual(["video.part000", "video.part001", "video.part002"]);
+    for (const e of entries) {
+      const bytes = dir.files.get(e.name)!.committed;
+      expect(e.size).toBe(bytes.length);
+      expect(e.sha256).toBe(toHex(await crypto.subtle.digest("SHA-256", structuredClone(bytes.buffer))));
+    }
+  });
+
+  it("a part that can't be read back at finish() rejects finish() and writes no sidecar", async () => {
+    // finish() is now the only place a part is read and hashed, so it is the
+    // only place a read error can surface — and a sidecar listing a part
+    // without its hash must never land.
+    const dir = new FakeDirHandle();
+    const writer = new PartWriter(asDir(dir), "video", 30_000); // 2 appends/part
+    for (let i = 0; i < 3; i++) await writer.append(new Blob([new Uint8Array([i])]));
+    dir.files.get("video.part000")!.failGetFile = true;
+
+    await expect(writer.finish()).rejects.toThrow("disk error reading part");
+    expect(dir.files.has("video.sidecar.json")).toBe(false);
+    expect(dir.files.get("video.part001")!.committed.length).toBe(1); // the tape itself is intact
   });
 
   it("finish() issued while an append is pending waits for it, and the sidecar includes its bytes", async () => {

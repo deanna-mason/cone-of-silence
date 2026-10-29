@@ -50,6 +50,11 @@ const H = vi.hoisted(() => {
     // invisible.
     deferTakeDir: false,
     resolveDeferredTakeDir: null as (() => void) | null,
+    // Set true to make recorder.stop() hang until resolveDeferredStop() is
+    // called — the writers' finish-time hashing of a long take (seconds on
+    // an Intel Mac) keeps the host in "stopping" while the partner is done.
+    deferStop: false,
+    resolveDeferredStop: null as (() => void) | null,
   };
   return { log, state };
 });
@@ -156,6 +161,7 @@ vi.mock("@/lib/podcast/recorder", () => ({
     async stop() {
       this.state = "stopped";
       H.log.push("recorder:stop");
+      if (H.state.deferStop) await new Promise<void>((r) => (H.state.resolveDeferredStop = r));
       if (H.state.failRecorderStop) throw H.state.failRecorderStop;
       return { video: [], audio: [] };
     }
@@ -261,6 +267,8 @@ describe("usePodcastTake", () => {
     H.state.resolveDeferredBuild = null;
     H.state.deferTakeDir = false;
     H.state.resolveDeferredTakeDir = null;
+    H.state.deferStop = false;
+    H.state.resolveDeferredStop = null;
     localStorage.clear(); // isolate cos-last-take across tests
     vi.mocked(soundKlaxon).mockClear();
     // Testing Library sets this around its own wrappers and restores it after;
@@ -1122,6 +1130,33 @@ describe("usePodcastTake", () => {
     await tick(3_600);
     expect(pair.countSent(0, "pod/roll-ack")).toBe(1);
     expect(partnerCb.onAborted).not.toHaveBeenCalled();
+  });
+
+  it("an inbound proposal is quiet-ignored while this side is still stopping (finishing its tape)", async () => {
+    // The partner can finish stopping first and propose again while this
+    // side's recorder.stop() is still hashing parts. Acking then would start
+    // recorders that the pending stopRecorders() immediately releases — a
+    // take the partner thinks is rolling and this side never records.
+    const { pair, view, partner, partnerCb } = await setup();
+    await rollToRolling(view);
+    H.state.deferStop = true;
+    act(() => view.result.current.actions.stop());
+    await tick(3_100); // STOP_LEAD_MS + mark + tail: stopRecorders is now awaiting stop()
+    expect(view.result.current.panel).toEqual({ kind: "stopping" });
+
+    const takeId = partner.propose();
+    expect(takeId).not.toBeNull();
+    await tick(3_600);
+    expect(pair.countSent(0, "pod/roll-ack")).toBe(0);
+    expect(partnerCb.onAborted).toHaveBeenCalledWith(takeId);
+
+    // Once the tape is secured, proposals are accepted again.
+    await act(async () => H.state.resolveDeferredStop!());
+    await tick(1);
+    expect(view.result.current.panel).toMatchObject({ kind: "armed" });
+    partner.propose();
+    await tick(3_600);
+    expect(pair.countSent(0, "pod/roll-ack")).toBe(1);
   });
 
   it("a transfer in flight still quiet-ignores an inbound proposal (decision 8 survives)", async () => {
