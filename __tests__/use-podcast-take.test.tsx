@@ -1193,8 +1193,8 @@ describe("VideoTile episode framing", () => {
     // through element.style (it silently drops the whole declaration), so
     // the formulas are pinned against their source function instead —
     // the same one the JSX calls to build this element's style.
-    expect(episodeViewportStyle(true).width).toBe("min(100cqw, calc(100cqh * (930 / 1008)))");
-    expect(episodeViewportStyle(true).height).toBe("min(100cqh, calc(100cqw * (1008 / 930)))");
+    expect(episodeViewportStyle(true).width).toBe("min(100cqw, calc(100cqh * (958 / 1080)))");
+    expect(episodeViewportStyle(true).height).toBe("min(100cqh, calc(100cqw * (1080 / 958)))");
     const video = container.querySelector("video")!;
     expect(video.className).toContain("object-cover");
   });

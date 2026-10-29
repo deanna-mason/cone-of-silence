@@ -2,7 +2,8 @@
 // Darkroom CLI + vault watcher (D12). Flags: --vault <dir> (required),
 // --own-codename <name> (default HOST), --model <path> (default
 // server/models/std.rnnn), --develop <manifestPath> (one-shot), --poll-ms
-// <n> (default 5000). No config file.
+// <n> (default 5000), --frame <edge-to-edge|humanym-badge> (default
+// edge-to-edge — see pipeline.mjs's FRAMES). No config file.
 //
 // --develop runs developEpisode once and exits 0 / non-zero with
 // `darkroom: <code>: <detail>` on stderr. Otherwise this watches the vault:
@@ -23,7 +24,7 @@ import { fileURLToPath } from "node:url";
 
 import { DarkroomError } from "./errors.mjs";
 import { scanVault } from "./vault.mjs";
-import { developEpisode, DEFAULT_OWN_CODENAME, DEFAULT_MODEL } from "./pipeline.mjs";
+import { developEpisode, DEFAULT_OWN_CODENAME, DEFAULT_MODEL, DEFAULT_FRAME, FRAMES } from "./pipeline.mjs";
 import { makeRunner } from "./runner.mjs";
 import { decodeMarkWindows } from "./decode.mjs";
 import { renderBackdrop } from "./composite.mjs";
@@ -41,6 +42,7 @@ export function parseArgs(argv) {
     model: DEFAULT_MODEL,
     develop: null,
     pollMs: DEFAULT_POLL_MS,
+    frame: DEFAULT_FRAME,
   };
 
   const need = (i, flag) => {
@@ -70,6 +72,14 @@ export function parseArgs(argv) {
           throw new DarkroomError("cli-invalid", `--poll-ms must be a positive number, got "${raw}"`);
         }
         opts.pollMs = n;
+        break;
+      }
+      case "--frame": {
+        const raw = need(++i, flag);
+        if (!FRAMES.includes(raw)) {
+          throw new DarkroomError("cli-invalid", `--frame must be one of ${FRAMES.join(", ")}, got "${raw}"`);
+        }
+        opts.frame = raw;
         break;
       }
       default:
@@ -245,11 +255,18 @@ function buildPipelineDeps() {
   };
 }
 
-function buildPipelineOpts(opts) {
+/** Only the humanym-badge frame renders template.html in headless Chrome —
+ *  the default edge-to-edge frame needs no browser, so a machine without
+ *  the playwright Chrome cache can still develop episodes. Deps injectable
+ *  for tests.
+ *  @returns {{ownCodename: string, model: string, frame: string, chromePath?: string, templatePath?: string}} */
+export function buildPipelineOpts(opts, { resolveChrome = resolveChromePath } = {}) {
+  const frame = opts.frame ?? DEFAULT_FRAME;
+  const base = { ownCodename: opts.ownCodename, model: opts.model, frame };
+  if (frame !== "humanym-badge") return base;
   return {
-    ownCodename: opts.ownCodename,
-    model: opts.model,
-    chromePath: resolveChromePath(),
+    ...base,
+    chromePath: resolveChrome(),
     templatePath: path.join(SCRIPT_DIR, "template.html"),
   };
 }

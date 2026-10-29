@@ -8,7 +8,15 @@
 // here — a redesign of template.html never touches this file.
 //
 // D14: local host renders in the LEFT pane, remote in the RIGHT.
+//
+// Frames (2026-10-29): the DEFAULT podcast frame is edge-to-edge — two
+// 958x1080 panes and a 4px cream divider filling the whole frame, no badge
+// — defined once in lib/podcast/episodeGeometry.mjs (which the live room
+// preview reads too). Its backdrop is a plain ffmpeg colour source, so it
+// needs no Chrome render. template.html + renderBackdrop below are the older
+// "humanym-badge" frame, still selectable (darkroom --frame humanym-badge).
 import { DarkroomError } from "./errors.mjs";
+import { FRAME, ffmpegPaneFilters } from "../../lib/podcast/episodeGeometry.mjs";
 
 /**
  * renderBackdrop(chromePath, templatePath, {left, right}, outPng) → Promise<Layout>
@@ -113,18 +121,32 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs, trim }) {
   const startS = trim.startS.toFixed(3);
   filters.push(`trim=start=${startS}:end=${trim.endS.toFixed(3)}`);
   filters.push(`setpts=PTS-${startS}/TB`);
-  filters.push(`scale=${pane.w}:${pane.h}:force_original_aspect_ratio=increase`);
-  filters.push(`crop=${pane.w}:${pane.h}`);
+  // The pane's own crop rule (edge-to-edge: 1.08 zoom, top-anchored) or,
+  // with none, the legacy centre cover-crop. Either way the chain ENDS in
+  // crop=<pane w>:<pane h> — no uncropped raw frame reaches the overlay.
+  filters.push(...ffmpegPaneFilters(pane, pane.crop));
   return `[${inputIdx}:v]${filters.join(",")}[${sinkLabel}]`;
 }
 
+/** "#F7EED8" -> "F7EED8"; anything else is a programming error. */
+function hexColor(color) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(String(color));
+  if (!m) throw new Error(`backdrop color must be #RRGGBB, got "${color}"`);
+  return m[1].toUpperCase();
+}
+
+/** @typedef {{x: number, y: number, w: number, h: number, crop?: {zoom: number, topPx: number}}} Pane */
+
 /**
- * compositeArgs(backdropPng, localWebm, remoteWebm, layout, {remoteSetpts, delays, trim}, audioM4a, outMp4) → string[]
+ * compositeArgs(backdrop, localWebm, remoteWebm, layout, {remoteSetpts, delays, trim}, audioM4a, outMp4) → string[]
  *
  * Argv for the final side-by-side composite:
- * - backdrop: `-loop 1` still-image input (the Humanym paper field + seal
- *   and wordmark plaque + wells + invisible labels, already rendered by
- *   renderBackdrop).
+ * - backdrop: EITHER a PNG path — `-loop 1` still-image input (the
+ *   humanym-badge frame's paper field + plaque + wells, rendered by
+ *   renderBackdrop) — OR `{ color: "#RRGGBB" }`, an infinite lavfi colour
+ *   source at the frame size (the edge-to-edge frame: the colour is the
+ *   divider's, and the only place it shows IS the divider). Both inputs are
+ *   infinite, so the duration-pin reasoning below holds for either.
  * - local (LEFT pane, D14): cover scale+crop, optional tpad delay if IT is
  *   the earlier side. Never RATE-corrected (no `setpts=PTS*`) — local is the
  *   reference timeline; it does carry the trim's own re-zeroing setpts,
@@ -201,17 +223,17 @@ function videoChain(inputIdx, sinkLabel, pane, { setpts, delayMs, trim }) {
  * what the mix no longer contains), and TS infers a destructured JS
  * parameter's shape from its defaults alone.
  *
- * @param {string} backdropPng
+ * @param {string | {color: string}} backdrop
  * @param {string} localWebm
  * @param {string} remoteWebm
- * @param {{left: {x: number, y: number, w: number, h: number}, right: {x: number, y: number, w: number, h: number}}} layout
+ * @param {{left: Pane, right: Pane}} layout  (Pane = {x, y, w, h, crop?: {zoom, topPx}})
  * @param {{remoteSetpts?: string, delays?: {local?: number, remote?: number}, trim: {startS: number, endS: number}}} opts
  * @param {string} audioM4a
  * @param {string} outMp4
  * @returns {string[]}
  */
 export function compositeArgs(
-  backdropPng,
+  backdrop,
   localWebm,
   remoteWebm,
   layout,
@@ -222,7 +244,11 @@ export function compositeArgs(
   const localDelay = delays.local || 0;
   const remoteDelay = delays.remote || 0;
 
-  const inputs = ["-loop", "1", "-framerate", "30", "-i", backdropPng, "-i", localWebm, "-i", remoteWebm, "-i", audioM4a];
+  const backdropInput =
+    typeof backdrop === "string"
+      ? ["-loop", "1", "-framerate", "30", "-i", backdrop]
+      : ["-f", "lavfi", "-i", `color=c=0x${hexColor(backdrop.color)}:s=${FRAME.w}x${FRAME.h}:r=30`];
+  const inputs = [...backdropInput, "-i", localWebm, "-i", remoteWebm, "-i", audioM4a];
   const localIdx = 1;
   const remoteIdx = 2;
   const audioIdx = 3;
