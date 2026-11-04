@@ -6,6 +6,7 @@
 // announce-then-track and track-then-announce are both legal orders).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Mesh, type LinkEvents, type MeshLink, type RemotePeer } from "@/lib/webrtc/mesh";
+import type { ScreenTracks } from "@/lib/webrtc/screenShare";
 
 class FakeLink implements MeshLink {
   handleSignal = vi.fn(async (_payload: string) => {});
@@ -15,7 +16,7 @@ class FakeLink implements MeshLink {
   send = vi.fn(() => true);
   sendXfer = vi.fn(() => true);
   xferBufferedAmount = vi.fn(() => 0);
-  startScreenShare = vi.fn(async (_track: MediaStreamTrack, _stream: MediaStream) => {});
+  startScreenShare = vi.fn(async (_tracks: ScreenTracks, _stream: MediaStream) => {});
   stopScreenShare = vi.fn(async () => {});
 }
 
@@ -48,6 +49,7 @@ function harness() {
 
 const streamWithId = (id: string): MediaStream => ({ id }) as unknown as MediaStream;
 const fakeTrack = {} as MediaStreamTrack;
+const fakeAudio = { kind: "audio" } as MediaStreamTrack;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -65,10 +67,10 @@ describe("screenShareAll / stopScreenShareAll", () => {
     mesh.addNewcomer("p3"); // timer NOT run — link is null
 
     const screen = streamWithId("scr-1");
-    await mesh.screenShareAll(fakeTrack, screen);
+    await mesh.screenShareAll({ video: fakeTrack, audio: fakeAudio }, screen);
 
     expect(made).toHaveLength(2);
-    for (const m of made) expect(m.link.startScreenShare).toHaveBeenCalledWith(fakeTrack, screen);
+    for (const m of made) expect(m.link.startScreenShare).toHaveBeenCalledWith({ video: fakeTrack, audio: fakeAudio }, screen);
   });
 
   it("stop forwards the same way", async () => {
@@ -95,6 +97,36 @@ describe("remote screen bookkeeping", () => {
     const [peer] = lastRoster();
     expect(peer.screenStream).toBe(screen);
     expect(peer.stream).toBeNull();
+  });
+
+  // The phantom-Mute fix: a silent re-share reuses the stream (and its now
+  // carry-nothing audio track), so the announced flag is the only truth.
+  it("the announced audio flag rides the roster beside screenStream and follows each share", () => {
+    const { mesh, made, lastRoster } = harness();
+    mesh.addExistingPeers(["p1"]);
+    vi.runAllTimers();
+    const screen = streamWithId("scr-1");
+    made[0].events.onRemoteStream(screen);
+
+    mesh.setRemoteScreen("p1", "scr-1", true);
+    expect(lastRoster()[0]).toMatchObject({ screenStream: screen, screenAudio: true });
+
+    mesh.setRemoteScreen("p1", null);
+    expect(lastRoster()[0].screenAudio).toBeUndefined(); // no screen, no flag
+
+    mesh.setRemoteScreen("p1", "scr-1", false); // silent re-share, same stream
+    expect(lastRoster()[0]).toMatchObject({ screenStream: screen, screenAudio: false });
+  });
+
+  it("an announce without the flag (older peer) leaves screenAudio absent", () => {
+    const { mesh, made, lastRoster } = harness();
+    mesh.addExistingPeers(["p1"]);
+    vi.runAllTimers();
+    made[0].events.onRemoteStream(streamWithId("scr-1"));
+
+    mesh.setRemoteScreen("p1", "scr-1");
+
+    expect("screenAudio" in lastRoster()[0]).toBe(false);
   });
 
   it("stream first, announce second: the camera keeps the face slot once the announce lands", () => {

@@ -8,6 +8,7 @@
 // glare; it carries the Phase 5/6 protocols later.
 
 import { vp9Preferences, type E2eeApi } from "./e2eeSupport";
+import type { ScreenTracks } from "./screenShare";
 import { STUN_URL } from "../config";
 
 export const ICE_SERVERS: RTCIceServer[] = [{ urls: STUN_URL }];
@@ -104,7 +105,8 @@ export class PeerLink {
    *  sender whose kind is unknowable is a sender replaceStream can never
    *  re-populate. Recorded at addTrack time; survives the track going null. */
   private readonly senderKinds = new WeakMap<RTCRtpSender, string>();
-  /** The sender(s) carrying a shared SCREEN, not a camera. replaceStream —
+  /** The sender(s) carrying a shared SCREEN (its video, and its tab/system
+   *  audio when shared — at most one per kind), not a camera/mic. replaceStream —
    *  the device-switch sweep — must never see them: swapping a camera onto
    *  the screen sender would put a face in the far side's screen tile (the
    *  msid/stream association is fixed at addTrack time), and letting one
@@ -291,20 +293,45 @@ export class PeerLink {
    *  touches sender.transform, so the pipe survives — same free ride device
    *  switches get). The stream is the screen's OWN MediaStream, never the
    *  camera/mic stream: its id is what scr/share announces, and the far side
-   *  files the incoming stream under the screen tile by that id. */
-  async startScreenShare(track: MediaStreamTrack, stream: MediaStream): Promise<void> {
-    for (const sender of this.screenSenders) {
-      await sender.replaceTrack(track);
-      return;
+   *  files the incoming stream under the screen tile by that id.
+   *
+   *  Screen AUDIO (tab/system sound) gets its own screen sender of kind
+   *  "audio" on the same stream, by the same rules: born through
+   *  addLocalTrack (so it is encrypted exactly like the mic — the worker's
+   *  frame transform is kind-agnostic, and the VP9 pin skips audio), re-armed
+   *  in place on later shares, parked (track null) by a share that came back
+   *  silent and by stop. Its first appearance mid-call is an addTrack, which
+   *  renegotiates through perfect negotiation like any other add. */
+  async startScreenShare(tracks: ScreenTracks, stream: MediaStream): Promise<void> {
+    // Adds happen synchronously, before any await, so a link built mid-share
+    // (session.buildLink's fire-and-forget call) gets both screen m-lines in
+    // the same negotiation pass as its camera/mic. Only the in-place swaps
+    // onto parked senders are awaited.
+    const swaps: Promise<void>[] = [];
+    const wanted: [string, MediaStreamTrack | null][] = [
+      ["video", tracks.video],
+      ["audio", tracks.audio],
+    ];
+    for (const [kind, track] of wanted) {
+      const parked = [...this.screenSenders].find((s) => this.senderKinds.get(s) === kind);
+      if (parked) swaps.push(parked.replaceTrack(track));
+      else if (track) this.screenSenders.add(this.addLocalTrack(track, stream)); // never a sender for nothing
     }
-    this.screenSenders.add(this.addLocalTrack(track, stream));
+    await Promise.all(swaps);
   }
 
-  /** Ends the outgoing screen share: the sender's track goes null (media
-   *  stops, no renegotiation, no teardown — symmetric to replaceStream's
-   *  null-swap) and the sender stays parked for the next share. */
+  /** Ends the outgoing screen share: every screen sender's track goes null
+   *  (media stops, no renegotiation, no teardown — symmetric to
+   *  replaceStream's null-swap) and the senders stay parked for the next
+   *  share. */
   async stopScreenShare(): Promise<void> {
-    for (const sender of this.screenSenders) await sender.replaceTrack(null);
+    // All swaps issue in ONE synchronous pass, never awaited one by one: a
+    // start arriving mid-stop would otherwise re-arm the video, then have
+    // its fresh audio parked by stop's second, late swap. replaceTrack runs
+    // in call order on the pc, so whichever of start/stop was called last
+    // wins on every sender — the same synchronous-issue rule startScreenShare
+    // follows.
+    await Promise.all([...this.screenSenders].map((sender) => sender.replaceTrack(null)));
   }
 
   /** Device switch: swap sender tracks in place, and ADD a sender for any

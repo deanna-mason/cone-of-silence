@@ -12,7 +12,7 @@ import { JoinProof, type ProofEvents } from "./joinProof";
 import { Mesh, type LinkEvents, type RemotePeer } from "./mesh";
 import { PeerLink } from "./peer";
 import type { IceServer } from "./protocol";
-import { buildScreenShareMsg, buildScreenStopMsg, parseScreenMsg } from "./screenShare";
+import { buildScreenShareMsg, buildScreenStopMsg, parseScreenMsg, type ScreenTracks } from "./screenShare";
 import { SignalingClient } from "./signaling";
 
 export type { RemotePeer } from "./mesh";
@@ -140,7 +140,7 @@ export class CallSession {
    *  hear its announce the moment it proves (onProven). Deliberately
    *  survives dropAll: a signaling blip must not silently end the share.
    *  `stream` is always screenCarrier, never the raw capture — see below. */
-  private activeScreen: { track: MediaStreamTrack; stream: MediaStream } | null = null;
+  private activeScreen: { tracks: ScreenTracks; stream: MediaStream } | null = null;
   /** The ONE stream identity every screen share this session ever rides —
    *  latched to the first capture stream and never replaced (8/11 live-test
    *  regression). The far side can only recognize the screen by stream id
@@ -182,7 +182,8 @@ export class CallSession {
           // unproven peer can never file a screen.
           const scr = parseScreenMsg(text);
           if (scr) {
-            this.mesh.setRemoteScreen(peerId, scr.t === "scr/share" ? scr.streamId : null);
+            if (scr.t === "scr/share") this.mesh.setRemoteScreen(peerId, scr.streamId, scr.audio);
+            else this.mesh.setRemoteScreen(peerId, null);
             return;
           }
           this.events.emit("message", peerId, text);
@@ -344,7 +345,10 @@ export class CallSession {
         // now that sendTo passes the proven gate. Covers newcomers AND a 4C
         // rebuild's re-proof (the fresh link re-learns the screen id).
         if (this.activeScreen) {
-          this.mesh.sendTo(peerId, buildScreenShareMsg(this.activeScreen.stream.id));
+          this.mesh.sendTo(
+            peerId,
+            buildScreenShareMsg(this.activeScreen.stream.id, this.activeScreen.tracks.audio !== null),
+          );
         }
         // Replay whatever is CURRENTLY open, read from MESH — the same flags
         // openChannels()/remove()/rebuildLink() act on — rather than from a
@@ -477,7 +481,7 @@ export class CallSession {
     // the constructor just added. Fire-and-forget like replaceStream's
     // harmless-race stance: a link torn down this tick just refuses.
     if (this.activeScreen) {
-      void link.startScreenShare(this.activeScreen.track, this.activeScreen.stream).catch(() => {});
+      void link.startScreenShare(this.activeScreen.tracks, this.activeScreen.stream).catch(() => {});
     }
     return link;
   }
@@ -489,21 +493,31 @@ export class CallSession {
    *  buildLink and onProven. The capture's lifecycle (getDisplayMedia,
    *  track.stop) belongs to the caller, mirroring localStream/useLocalMedia. */
   async startScreenShare(stream: MediaStream): Promise<void> {
-    const track = stream.getVideoTracks()[0];
-    if (!track) return;
+    const video = stream.getVideoTracks()[0];
+    if (!video) return;
+    // The tab/system audio the sharer ticked in the browser's picker, if any
+    // came back. It rides the SAME carrier as the picture — so the far side
+    // files and plays it on the screen tile — and through the same sender
+    // funnel, so it is E2EE-encrypted like every other track. Live only: it
+    // never touches localStream, which is all the podcast tape reads.
+    const audio = stream.getAudioTracks()[0] ?? null;
     // Latched once — every later share rides the first stream's identity
     // (see screenCarrier's doc). addTrack only reads the stream's id for the
     // msid, so associating a later capture's track with the first capture's
     // stream is legal and exactly the point.
     this.screenCarrier ??= stream;
-    this.activeScreen = { track, stream: this.screenCarrier };
+    const tracks: ScreenTracks = { video, audio };
+    this.activeScreen = { tracks, stream: this.screenCarrier };
     // Announce BEFORE media: the cos message is a data-channel hop, the track
     // needs a whole renegotiation — the id all but always arrives first, so
     // the far side files the stream straight into the screen slot. (Either
     // order is still correct — mesh reconciles both — this just avoids the
     // one-frame face-slot flash.)
-    this.mesh.sendAll(buildScreenShareMsg(this.screenCarrier.id));
-    await this.mesh.screenShareAll(track, this.screenCarrier);
+    // The audio flag is the far side's only truth about sound: a silent
+    // re-share parks (not removes) the audio sender, so the remote stream
+    // keeps a carry-nothing audio track that must not earn a Mute button.
+    this.mesh.sendAll(buildScreenShareMsg(this.screenCarrier.id, audio !== null));
+    await this.mesh.screenShareAll(tracks, this.screenCarrier);
   }
 
   /** Clears the table: stop announce to every proven peer, screen senders

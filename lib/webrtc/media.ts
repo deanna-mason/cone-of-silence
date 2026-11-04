@@ -117,16 +117,80 @@ export function screenShareSupported(): boolean {
   return typeof navigator.mediaDevices?.getDisplayMedia === "function";
 }
 
+/** Screen Capture spec members TypeScript's DOM lib doesn't declare yet.
+ *  Browsers ignore dictionary members and constraints they don't know, so
+ *  each one is a no-op where unsupported, never a failure. */
+interface ScreenAudioConstraints extends MediaTrackConstraints {
+  suppressLocalAudioPlayback?: boolean;
+  restrictOwnAudio?: boolean;
+}
+interface ScreenCaptureOptions extends DisplayMediaStreamOptions {
+  audio?: boolean | ScreenAudioConstraints;
+  systemAudio?: "include" | "exclude";
+  selfBrowserSurface?: "include" | "exclude";
+}
+
+/** Audio is ALWAYS requested — whether it actually comes back is the user's
+ *  call, made in the browser's own picker ("Share tab audio" / "Share system
+ *  audio"), and the platform's (Safari/Firefox and macOS whole-screen offer
+ *  none). The caller reads the result off the stream's audio tracks.
+ *
+ *  - Voice DSP off: echo cancellation, noise suppression and gain control are
+ *    tuned for speech and mangle music/video soundtracks.
+ *  - suppressLocalAudioPlayback false (the spec default, stated): the sharer
+ *    keeps hearing their own tab.
+ *  - The call's own audio stays out: restrictOwnAudio drops this document's
+ *    playback (every remote voice) from a system-audio capture, and
+ *    selfBrowserSurface excludes the Cone tab from the picker — either leak
+ *    would send each agent's voice straight back to them. */
+export const SCREEN_CAPTURE_OPTIONS: ScreenCaptureOptions = {
+  video: true,
+  audio: {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    suppressLocalAudioPlayback: false,
+    restrictOwnAudio: true,
+  },
+  systemAudio: "include",
+  selfBrowserSurface: "exclude",
+};
+
+/**
+ * Whether a capture's audio could carry the call itself back out. A tab
+ * capture ("browser" surface) records only that tab — never this one,
+ * selfBrowserSurface keeps the Cone tab out of the picker. A whole-screen or
+ * window capture's audio is SYSTEM audio: everything the machine plays,
+ * including this tab's playback of every remote voice, unless the browser
+ * honored restrictOwnAudio — and the only proof of that is the track's own
+ * settings reporting it true (an unsupporting browser silently ignores the
+ * constraint). Sending such audio would echo each agent back to themselves.
+ *
+ * A capture whose video reports no displaySurface at all (a synthetic
+ * stream; every browser that can capture screen audio reports it) is not
+ * flagged — there is no system mix to loop.
+ */
+export function screenAudioLoopbackRisk(stream: MediaStream): boolean {
+  const audio = stream.getAudioTracks()[0];
+  if (!audio) return false;
+  const surface = (stream.getVideoTracks()[0]?.getSettings() as { displaySurface?: string } | undefined)
+    ?.displaySurface;
+  if (surface !== "monitor" && surface !== "window") return false;
+  return (audio.getSettings() as { restrictOwnAudio?: boolean }).restrictOwnAudio !== true;
+}
+
 /**
  * Acquire a screen capture, or null. Unlike getUserMedia, a NotAllowedError
  * here is the user closing the browser's picker — the normal way to change
  * your mind — so nothing on this path is an error card: a stream, or null.
- * Video only: screen audio would bypass the call's one-mic audio story.
+ * The stream may or may not carry an audio track — see SCREEN_CAPTURE_OPTIONS.
+ * Screen audio is live-only: it rides the screen's own stream, never the
+ * mic/camera stream the podcast tape is built from.
  */
 export async function getScreenStream(): Promise<MediaStream | null> {
   if (!screenShareSupported()) return null;
   try {
-    return await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    return await navigator.mediaDevices.getDisplayMedia(SCREEN_CAPTURE_OPTIONS);
   } catch (err) {
     if (!(err instanceof DOMException && err.name === "NotAllowedError")) {
       console.error("[cone] getDisplayMedia failed:", err);

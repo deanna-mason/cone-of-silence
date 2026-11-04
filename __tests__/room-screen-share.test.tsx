@@ -52,16 +52,23 @@ const ARMED: PodcastPanelState = { kind: "armed", canSend: false, partnerCodenam
 const ROLLING: PodcastPanelState = { kind: "rolling", elapsedS: 3, localBytes: 1, partnerBytes: 1, partnerCodename: null };
 const take: { panel: PodcastPanelState } = { panel: ARMED };
 
+// Every args object the page handed the take hook — the recording-exclusion
+// test reads which video track the tape would record.
+const takeArgs: { videoTrack: unknown }[] = [];
+
 vi.mock("@/hooks/usePodcastTake", () => ({
-  usePodcastTake: () => ({
-    panel: take.panel,
-    faultedThisTake: false,
-    partnerCodename: null,
-    myCodename: "Nightingale",
-    bytes: BYTES,
-    lastTakeId: null,
-    actions: ACTIONS,
-  }),
+  usePodcastTake: (args: { videoTrack: unknown }) => {
+    takeArgs.push(args);
+    return {
+      panel: take.panel,
+      faultedThisTake: false,
+      partnerCodename: null,
+      myCodename: "Nightingale",
+      bytes: BYTES,
+      lastTakeId: null,
+      actions: ACTIONS,
+    };
+  },
 }));
 
 const ID = "A".repeat(22);
@@ -89,28 +96,45 @@ class FakeScreenTrack extends EventTarget {
   kind = "video";
   readyState = "live";
   stop = vi.fn();
+  settings: Record<string, unknown> = {};
+  getSettings() {
+    return this.settings;
+  }
 }
 
 class FakeScreenStream {
   id = "scr-me";
   private track = new FakeScreenTrack();
+  audio: FakeScreenTrack | null;
+  /** surface: the video's displaySurface ("monitor" = whole screen). */
+  constructor(withAudio = false, surface?: string) {
+    this.audio = withAudio ? Object.assign(new FakeScreenTrack(), { kind: "audio" }) : null;
+    if (surface) this.track.settings = { displaySurface: surface };
+  }
   addEventListener() {}
   removeEventListener() {}
   getTracks() {
-    return [this.track];
+    return this.audio ? [this.track, this.audio] : [this.track];
   }
   getVideoTracks() {
     return [this.track];
   }
+  getAudioTracks() {
+    return this.audio ? [this.audio] : [];
+  }
+  removeTrack(t: FakeScreenTrack) {
+    if (t === this.audio) this.audio = null;
+  }
 }
 
-const remoteScreen = () =>
+const remoteScreen = (audioTracks: unknown[] = []) =>
   ({
     id: "scr-p1",
     addEventListener() {},
     removeEventListener() {},
     getVideoTracks: () => [{}],
-    getTracks: () => [{}],
+    getAudioTracks: () => audioTracks,
+    getTracks: () => [{}, ...audioTracks],
   }) as unknown as MediaStream;
 
 afterEach(cleanup);
@@ -123,6 +147,7 @@ beforeEach(() => {
   window.HTMLMediaElement.prototype.play = () => Promise.resolve();
   call.peers = [];
   take.panel = ARMED;
+  takeArgs.length = 0;
   screenPort.share.mockReset();
   screenPort.stop.mockReset();
   getUserMedia.mockReset();
@@ -156,9 +181,136 @@ test("sharing a screen: click → capture → session handoff → own document t
   fireEvent.click(await screen.findByRole("button", { name: /table your screen/i }));
 
   await waitFor(() => expect(screenPort.share).toHaveBeenCalledTimes(1));
-  expect(getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: false });
+  expect(getDisplayMedia).toHaveBeenCalledWith(expect.objectContaining({ video: true, systemAudio: "include" }));
   expect(await screen.findByRole("button", { name: /screen on the table/i })).toBeTruthy();
   expect(screen.getByText("Your Screen")).toBeTruthy();
+});
+
+// The browser decides whether sound comes along (the picker's checkbox, or
+// no support at all — Safari/Firefox, macOS whole-screen). When it didn't,
+// the sharer is told why the room can't hear it, quietly.
+test("a share that came back without audio tells the sharer why nobody hears it", async () => {
+  await enterRoom();
+  fireEvent.click(await screen.findByRole("button", { name: /table your screen/i }));
+  await waitFor(() => expect(screenPort.share).toHaveBeenCalled());
+
+  const note = await screen.findByText(/no audio shared/i);
+  expect(note.textContent).toMatch(/share tab audio/i);
+
+  fireEvent.click(screen.getByRole("button", { name: /screen on the table/i }));
+  await waitFor(() => expect(screen.queryByText(/no audio shared/i)).toBeNull());
+});
+
+test("a share WITH audio shows no note, and the sharer's own preview stays muted", async () => {
+  getDisplayMedia.mockImplementation(async () => new FakeScreenStream(true) as unknown as MediaStream);
+  await enterRoom();
+  fireEvent.click(await screen.findByRole("button", { name: /table your screen/i }));
+  await waitFor(() => expect(screenPort.share).toHaveBeenCalled());
+  await screen.findByText("Your Screen");
+
+  expect(screen.queryByText(/no audio shared/i)).toBeNull();
+  const preview = screen.getByText("Your Screen").closest("figure")!.querySelector("video")!;
+  expect(preview.muted).toBe(true);
+  expect(screen.queryByRole("button", { name: /mute your screen/i })).toBeNull();
+});
+
+test("a whole-screen capture whose system audio could loop the call back tells the sharer it was dropped", async () => {
+  getDisplayMedia.mockImplementation(async () => new FakeScreenStream(true, "monitor") as unknown as MediaStream);
+  await enterRoom();
+  fireEvent.click(await screen.findByRole("button", { name: /table your screen/i }));
+  await waitFor(() => expect(screenPort.share).toHaveBeenCalled());
+
+  const note = await screen.findByText(/screen audio not shared/i);
+  expect(note.textContent).toMatch(/echo/i);
+  expect(screen.queryByText(/no audio shared/i)).toBeNull(); // one explanation, not two
+});
+
+// Digital isolation keeps screen audio off the tape, but the tape mic has
+// echo cancellation OFF — speakers playing a shared video bleed straight in.
+const HEADPHONES = /use headphones so it doesn.t bleed into the tape/i;
+
+test("rolling while your own share has audio shows the headphones note", async () => {
+  take.panel = ROLLING;
+  getDisplayMedia.mockImplementation(async () => new FakeScreenStream(true) as unknown as MediaStream);
+  await enterRoom();
+  expect(screen.queryByText(HEADPHONES)).toBeNull(); // nothing playing yet
+
+  fireEvent.click(await screen.findByRole("button", { name: /table your screen/i }));
+
+  expect(await screen.findByText(HEADPHONES)).toBeTruthy();
+});
+
+test("rolling while a peer's screen is announced audible shows the headphones note", async () => {
+  take.panel = ROLLING;
+  call.peers = [
+    {
+      peerId: "p1",
+      stream: null,
+      screenStream: remoteScreen([{ kind: "audio" }]),
+      screenAudio: true,
+      connectionState: "connected",
+    },
+  ];
+  await enterRoom();
+
+  expect(screen.getByText(HEADPHONES)).toBeTruthy();
+});
+
+test("no headphones note when nothing audible plays, or when no take is rolling", async () => {
+  take.panel = ROLLING;
+  call.peers = [
+    {
+      peerId: "p1",
+      stream: null,
+      // the phantom case: a parked audio track on a SILENT re-share
+      screenStream: remoteScreen([{ kind: "audio" }]),
+      screenAudio: false,
+      connectionState: "connected",
+    },
+  ];
+  await enterRoom();
+  expect(screen.queryByText(HEADPHONES)).toBeNull();
+  cleanup();
+
+  take.panel = ARMED;
+  call.peers = [
+    { peerId: "p1", stream: null, screenStream: remoteScreen([{ kind: "audio" }]), screenAudio: true, connectionState: "connected" },
+  ];
+  await enterRoom();
+  expect(screen.queryByText(HEADPHONES)).toBeNull();
+});
+
+test("a peer's silent re-share renders a muted screen tile with no Mute control", async () => {
+  call.peers = [
+    {
+      peerId: "p1",
+      stream: null,
+      screenStream: remoteScreen([{ kind: "audio" }]), // parked track still on the stream
+      screenAudio: false,
+      connectionState: "connected",
+    },
+  ];
+  await enterRoom();
+
+  const video = screen.getByText("Agent 2's Screen").closest("figure")!.querySelector("video")!;
+  expect(video.muted).toBe(true);
+  expect(screen.queryByRole("button", { name: /mute agent 2's screen/i })).toBeNull();
+});
+
+// Live only: the tape records the camera + its own mic capture, never the
+// screen. Sharing (with audio) must not change what the take hook is given.
+test("sharing a screen with audio never changes what the tape records", async () => {
+  getDisplayMedia.mockImplementation(async () => new FakeScreenStream(true) as unknown as MediaStream);
+  await enterRoom();
+  const cameraTrack = takeArgs.at(-1)!.videoTrack;
+  expect((cameraTrack as { kind: string }).kind).toBe("video");
+
+  fireEvent.click(await screen.findByRole("button", { name: /table your screen/i }));
+  await waitFor(() => expect(screenPort.share).toHaveBeenCalled());
+  await screen.findByText("Your Screen");
+
+  expect(takeArgs.at(-1)!.videoTrack).toBe(cameraTrack);
+  expect(Object.keys(takeArgs.at(-1)!)).not.toContain("screenStream");
 });
 
 test("clearing the table stops the capture and the tile", async () => {

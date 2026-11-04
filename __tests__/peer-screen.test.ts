@@ -96,7 +96,7 @@ describe("startScreenShare", () => {
     const track = screenTrack();
     const stream = screenStreamOf(track);
 
-    await link.startScreenShare(track as unknown as MediaStreamTrack, stream);
+    await link.startScreenShare({ video: track as unknown as MediaStreamTrack, audio: null }, stream);
 
     expect(pc.addTrack).toHaveBeenCalledOnce();
     expect(pc.addTrack).toHaveBeenCalledWith(track, stream);
@@ -109,7 +109,7 @@ describe("startScreenShare", () => {
     worker.postMessage.mockClear();
     const track = screenTrack();
 
-    await link.startScreenShare(track as unknown as MediaStreamTrack, screenStreamOf(track));
+    await link.startScreenShare({ video: track as unknown as MediaStreamTrack, audio: null }, screenStreamOf(track));
 
     const screenSender = pc.senders[pc.senders.length - 1];
     expect(screenSender.createEncodedStreams).toHaveBeenCalledOnce();
@@ -127,12 +127,12 @@ describe("startScreenShare", () => {
   it("re-arms the existing screen sender on a second share instead of adding another", async () => {
     const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
     const first = screenTrack();
-    await link.startScreenShare(first as unknown as MediaStreamTrack, screenStreamOf(first));
+    await link.startScreenShare({ video: first as unknown as MediaStreamTrack, audio: null }, screenStreamOf(first));
     const screenSender = pc.senders[pc.senders.length - 1];
     pc.addTrack.mockClear();
 
     const second = screenTrack();
-    await link.startScreenShare(second as unknown as MediaStreamTrack, screenStreamOf(second));
+    await link.startScreenShare({ video: second as unknown as MediaStreamTrack, audio: null }, screenStreamOf(second));
 
     expect(pc.addTrack).not.toHaveBeenCalled();
     expect(screenSender.replaceTrack).toHaveBeenLastCalledWith(second);
@@ -145,7 +145,7 @@ describe("stopScreenShare", () => {
   it("clears the screen sender's track (no teardown, no renegotiation)", async () => {
     const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
     const track = screenTrack();
-    await link.startScreenShare(track as unknown as MediaStreamTrack, screenStreamOf(track));
+    await link.startScreenShare({ video: track as unknown as MediaStreamTrack, audio: null }, screenStreamOf(track));
     const screenSender = pc.senders[pc.senders.length - 1];
 
     await link.stopScreenShare();
@@ -161,7 +161,7 @@ describe("replaceStream never touches the screen sender", () => {
     const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
     const cameraSender = pc.senders[1];
     const track = screenTrack();
-    await link.startScreenShare(track as unknown as MediaStreamTrack, screenStreamOf(track));
+    await link.startScreenShare({ video: track as unknown as MediaStreamTrack, audio: null }, screenStreamOf(track));
     const screenSender = pc.senders[pc.senders.length - 1];
     pc.addTrack.mockClear();
 
@@ -177,7 +177,7 @@ describe("replaceStream never touches the screen sender", () => {
     // Built with the camera unplugged: audio sender only.
     const { link, pc } = buildLink(streamOf([live("audio"), ended("video")]));
     const track = screenTrack();
-    await link.startScreenShare(track as unknown as MediaStreamTrack, screenStreamOf(track));
+    await link.startScreenShare({ video: track as unknown as MediaStreamTrack, audio: null }, screenStreamOf(track));
     const screenSender = pc.senders[pc.senders.length - 1];
     pc.addTrack.mockClear();
 
@@ -193,7 +193,7 @@ describe("replaceStream never touches the screen sender", () => {
     const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
     const cameraSender = pc.senders[1];
     const track = screenTrack();
-    await link.startScreenShare(track as unknown as MediaStreamTrack, screenStreamOf(track));
+    await link.startScreenShare({ video: track as unknown as MediaStreamTrack, audio: null }, screenStreamOf(track));
     const screenSender = pc.senders[pc.senders.length - 1];
     await link.stopScreenShare();
     screenSender.replaceTrack.mockClear();
@@ -205,5 +205,209 @@ describe("replaceStream never touches the screen sender", () => {
     expect(screenSender.replaceTrack).not.toHaveBeenCalled(); // null-track + kind "video", still not a camera slot
     expect(cameraSender.replaceTrack).toHaveBeenLastCalledWith(nextCamera);
     expect(pc.addTrack).not.toHaveBeenCalled();
+  });
+});
+
+// Screen-share AUDIO (tab/system sound the sharer ticked in the browser's
+// picker): a second screen sender of kind "audio", associated with the SAME
+// screen stream so the far side files it under the screen tile — never with
+// the mic/camera stream, and never a device slot. Through the same funnel,
+// so it is encrypted exactly like the mic.
+describe("screen-share audio", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const share = (link: PeerLink, video: Track, audio: Track | null, stream: MediaStream) =>
+    link.startScreenShare(
+      { video: video as unknown as MediaStreamTrack, audio: audio as unknown as MediaStreamTrack | null },
+      stream,
+    );
+
+  it("adds the screen audio track as its own sender on the screen's stream", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    pc.addTrack.mockClear();
+    const video = screenTrack();
+    const audio = live("audio");
+    const stream = streamOf([video, audio]);
+
+    await share(link, video, audio, stream);
+
+    expect(pc.addTrack).toHaveBeenCalledTimes(2);
+    expect(pc.addTrack).toHaveBeenCalledWith(video, stream);
+    expect(pc.addTrack).toHaveBeenCalledWith(audio, stream);
+  });
+
+  it("the screen audio sender gets the E2EE encrypt transform and no VP9 pin", async () => {
+    vi.stubGlobal("RTCRtpSender", { getCapabilities: vi.fn(() => vp9Caps) });
+    const { link, pc } = buildLink(streamOf([live("audio")]), { mediaKey: {} as CryptoKey, api: "encoded-streams" });
+    const worker = FakeWorker.instances[0];
+    worker.postMessage.mockClear();
+    const video = screenTrack();
+    const audio = live("audio");
+
+    await share(link, video, audio, streamOf([video, audio]));
+
+    const audioSender = pc.senders.find((s) => s.track === audio)!;
+    expect(audioSender.createEncodedStreams).toHaveBeenCalledOnce();
+    expect(worker.postMessage).toHaveBeenCalledTimes(2); // one encrypt pipe per screen sender
+    for (const call of worker.postMessage.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({ op: "pipe", side: "encrypt" }));
+    }
+    const transceiver = pc.transceivers.find((t) => t.sender === audioSender)!;
+    expect(transceiver.setCodecPreferences).not.toHaveBeenCalled();
+  });
+
+  it("a share without audio adds no audio sender", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    pc.addTrack.mockClear();
+    const video = screenTrack();
+
+    await share(link, video, null, streamOf([video]));
+
+    expect(pc.addTrack).toHaveBeenCalledOnce();
+    expect(pc.addTrack).toHaveBeenCalledWith(video, expect.anything());
+  });
+
+  it("a re-share re-arms BOTH parked screen senders in place", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const v1 = screenTrack();
+    const a1 = live("audio");
+    const carrier = streamOf([v1, a1]);
+    await share(link, v1, a1, carrier);
+    const videoSender = pc.senders.find((s) => s.track === v1)!;
+    const audioSender = pc.senders.find((s) => s.track === a1)!;
+    await link.stopScreenShare();
+    pc.addTrack.mockClear();
+
+    const v2 = screenTrack();
+    const a2 = live("audio");
+    await share(link, v2, a2, carrier);
+
+    expect(pc.addTrack).not.toHaveBeenCalled();
+    expect(videoSender.replaceTrack).toHaveBeenLastCalledWith(v2);
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(a2);
+  });
+
+  it("a silent share after an audible one keeps the old audio sender null (no stale sound)", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const v1 = screenTrack();
+    const a1 = live("audio");
+    const carrier = streamOf([v1, a1]);
+    await share(link, v1, a1, carrier);
+    const audioSender = pc.senders.find((s) => s.track === a1)!;
+
+    await share(link, screenTrack(), null, carrier);
+
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(null);
+  });
+
+  it("an audible re-share after a silent first share adds the audio sender on the carrier stream", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const v1 = screenTrack();
+    const carrier = streamOf([v1]);
+    await share(link, v1, null, carrier);
+    pc.addTrack.mockClear();
+
+    const audio = live("audio");
+    await share(link, screenTrack(), audio, carrier);
+
+    expect(pc.addTrack).toHaveBeenCalledOnce();
+    expect(pc.addTrack).toHaveBeenCalledWith(audio, carrier);
+  });
+
+  it("stop clears the audio sender too", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const video = screenTrack();
+    const audio = live("audio");
+    await share(link, video, audio, streamOf([video, audio]));
+    const audioSender = pc.senders.find((s) => s.track === audio)!;
+
+    await link.stopScreenShare();
+
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(null);
+  });
+
+  // Race fix: stop used to await each replaceTrack(null) in turn, so a start
+  // landing between them re-armed video, then had its fresh audio parked by
+  // stop's second, late swap. Every swap now issues in one synchronous pass,
+  // and replaceTrack runs in call order on the pc — so the later start wins.
+  it("a start racing a stop is never half-parked: the stop's swaps all issue before the start's", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const v1 = screenTrack();
+    const a1 = live("audio");
+    const carrier = streamOf([v1, a1]);
+    await share(link, v1, a1, carrier);
+    const videoSender = pc.senders.find((s) => s.track === v1)!;
+    const audioSender = pc.senders.find((s) => s.track === a1)!;
+    // Swaps that settle only when released, so the two calls overlap.
+    const order: [string, unknown][] = [];
+    const gates: (() => void)[] = [];
+    for (const [name, sender] of [
+      ["video", videoSender],
+      ["audio", audioSender],
+    ] as const) {
+      sender.replaceTrack.mockImplementation((track: Track | null) => {
+        order.push([name, track]);
+        return new Promise<void>((resolve) =>
+          gates.push(() => {
+            sender.track = track;
+            resolve();
+          }),
+        );
+      });
+    }
+
+    const stopping = link.stopScreenShare();
+    const v2 = screenTrack();
+    const a2 = live("audio");
+    const starting = share(link, v2, a2, carrier);
+    for (let i = 0; i < 20; i++) {
+      while (gates.length) gates.shift()!();
+      await Promise.resolve(); // let any late (serially-awaited) swap issue
+    }
+    await Promise.all([stopping, starting]);
+
+    expect(order).toEqual([
+      ["video", null],
+      ["audio", null],
+      ["video", v2],
+      ["audio", a2],
+    ]);
+    expect(audioSender.track).toBe(a2);
+    expect(videoSender.track).toBe(v2);
+  });
+
+  it("a mic switch never lands on the screen audio sender, live or stopped", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const micSender = pc.senders[0];
+    const video = screenTrack();
+    const audio = live("audio");
+    await share(link, video, audio, streamOf([video, audio]));
+    const audioSender = pc.senders.find((s) => s.track === audio)!;
+    pc.addTrack.mockClear();
+
+    await link.replaceStream(streamOf([live("audio"), live("video")]));
+    expect(audioSender.replaceTrack).not.toHaveBeenCalled(); // live share: untouched
+    await link.stopScreenShare();
+    audioSender.replaceTrack.mockClear();
+    const thirdMic = live("audio");
+    await link.replaceStream(streamOf([thirdMic, live("video")]));
+
+    expect(audioSender.replaceTrack).not.toHaveBeenCalled();
+    expect(micSender.replaceTrack).toHaveBeenLastCalledWith(thirdMic);
+    expect(pc.addTrack).not.toHaveBeenCalled();
+  });
+
+  it("the screen audio sender does not count as covering 'audio' — a link built mic-less still gets a mic sender", async () => {
+    const { link, pc } = buildLink(streamOf([ended("audio"), live("video")]));
+    const video = screenTrack();
+    const audio = live("audio");
+    await share(link, video, audio, streamOf([video, audio]));
+    pc.addTrack.mockClear();
+
+    const mic = live("audio");
+    await link.replaceStream(streamOf([mic, live("video")]));
+
+    expect(pc.addTrack).toHaveBeenCalledOnce();
+    expect(pc.addTrack.mock.calls[0][0]).toBe(mic);
   });
 });
