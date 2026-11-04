@@ -6,8 +6,11 @@
 // flowing. Then: a fourth agent joining MID-share inherits it; per-tile Mute
 // works; stopping ends the capture and the far tiles; a share WITHOUT audio
 // (C) shows the sharer the "No audio shared" note and a silent, Mute-less
-// tile remotely; and B's re-share (the parked-sender replaceTrack path)
-// flows audio again.
+// tile remotely; B's re-share (the parked-sender replaceTrack path) flows
+// audio again; a SILENT re-share after an audible one shows no phantom Mute
+// (the scr/share audio flag, not the parked track, decides) and flipping
+// back to audible plays again; and a whole-screen capture whose system audio
+// can't prove restrictOwnAudio has that audio dropped before sending.
 //
 // Harness-only stubs (no production file is touched): getDisplayMedia is
 // replaced in-page by a canvas picture + a 440 Hz WebAudio oscillator (the
@@ -144,8 +147,11 @@ async function newAgent(browser) {
       };
     }
     // The picker stand-in: canvas picture, plus a 440 Hz tone unless
-    // __gdmNoAudio (the "didn't tick Share tab audio" case).
+    // __gdmNoAudio (the "didn't tick Share tab audio" case). __gdmSurface
+    // poses the video's displaySurface (a canvas track reports none, which
+    // the loopback guard treats as "not whole-screen").
     window.__gdmNoAudio = false;
+    window.__gdmSurface = null;
     navigator.mediaDevices.getDisplayMedia = async (opts) => {
       window.__gdmOpts = JSON.parse(JSON.stringify(opts));
       const canvas = document.createElement("canvas");
@@ -159,7 +165,13 @@ async function newAgent(browser) {
       };
       paint();
       setInterval(paint, 33);
-      const tracks = [canvas.captureStream(30).getVideoTracks()[0]];
+      const video = canvas.captureStream(30).getVideoTracks()[0];
+      if (window.__gdmSurface) {
+        const realSettings = video.getSettings.bind(video);
+        const surfaceKind = window.__gdmSurface;
+        video.getSettings = () => ({ ...realSettings(), displaySurface: surfaceKind });
+      }
+      const tracks = [video];
       if (!window.__gdmNoAudio) {
         const ctx = new AudioContext();
         const osc = ctx.createOscillator();
@@ -380,6 +392,68 @@ async function noRemoteScreen(page, timeoutMs = 10000) {
     await waitScreenTile(A.page);
     const flowRe = await audioFlowing(A.page);
     check(flowRe.ok && flowRe.b.muted === false, `check 6: B's re-share is audible on A again (${JSON.stringify(flowRe.b)})`);
+
+    // ---- Check 7: B re-shares SILENTLY after an audible share (phantom-Mute path) ----
+    // The parked audio sender leaves an audio track on every receiver's
+    // stream; only the scr/share audio flag says this share is silent.
+    await B.page.getByRole("button", { name: "Screen on the Table" }).click();
+    await noRemoteScreen(A.page);
+    await B.page.evaluate(() => (window.__gdmNoAudio = true));
+    await B.page.getByRole("button", { name: "Table Your Screen" }).click();
+    await B.page.getByText("No audio shared", { exact: false }).waitFor({ timeout: 10000 });
+    for (const [name, agent] of [
+      ["A", A],
+      ["C", C],
+      ["D", D],
+    ]) {
+      await waitScreenTile(agent.page);
+      const s = await screenTileState(agent.page);
+      check(
+        s.audioTracks === 1 && s.muted === true && !s.muteButton,
+        `check 7: ${name}'s tile for B's SILENT re-share is muted with no Mute, despite the parked audio track (${JSON.stringify(s)})`,
+      );
+    }
+
+    // ---- Check 8: and back to audible — the flag flips the tile back on ----
+    await B.page.getByRole("button", { name: "Screen on the Table" }).click();
+    await noRemoteScreen(A.page);
+    await B.page.evaluate(() => (window.__gdmNoAudio = false));
+    await B.page.getByRole("button", { name: "Table Your Screen" }).click();
+    await waitScreenTile(A.page);
+    await A.page.waitForFunction(
+      () =>
+        [...document.querySelectorAll("button")].some((b) => {
+          const l = b.getAttribute("aria-label") || "";
+          return l.startsWith("Mute ") && l.endsWith("'s Screen");
+        }),
+      null,
+      { timeout: 10000 },
+    );
+    const flowBack = await audioFlowing(A.page);
+    check(
+      flowBack.ok && flowBack.b.muted === false && flowBack.b.muteButton,
+      `check 8: B's audible share after a silent one plays on A again (${JSON.stringify(flowBack.b)})`,
+    );
+    await B.page.getByRole("button", { name: "Screen on the Table" }).click();
+    await noRemoteScreen(A.page);
+
+    // ---- Check 9: loopback guard — whole-screen system audio without a
+    // confirmed restrictOwnAudio is dropped before it reaches anyone ----
+    await C.page.evaluate(() => {
+      window.__gdmNoAudio = false;
+      window.__gdmSurface = "monitor";
+    });
+    await C.page.getByRole("button", { name: "Table Your Screen" }).click();
+    await C.page.getByText("Screen audio not shared", { exact: false }).waitFor({ timeout: 10000 });
+    const cLocal = await C.page.evaluate(() => ({ audioLeft: window.__gdmStream.getAudioTracks().length }));
+    check(cLocal.audioLeft === 0, `check 9: C's whole-screen system audio was removed from the capture (${JSON.stringify(cLocal)})`);
+    await waitScreenTile(A.page);
+    const looped = await screenTileState(A.page);
+    check(
+      looped.muted === true && !looped.muteButton && looped.bytes === 0,
+      `check 9: A receives C's picture but no sound (${JSON.stringify(looped)})`,
+    );
+    await C.page.getByRole("button", { name: "Screen on the Table" }).click();
   } catch (err) {
     console.error(err);
     failures++;

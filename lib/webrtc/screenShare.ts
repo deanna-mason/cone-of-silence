@@ -8,21 +8,37 @@
 // stream under the screen tile instead of a face tile. React-free, DOM-free.
 // Wire frames are JSON with a "t" field prefixed "scr/", mirroring
 // takeProtocol/xferProtocol; foreign `t` / unparseable JSON parse to null.
+//
+// Transport: these ride the PEER-TO-PEER `cos` data channel (DTLS, proof-
+// gated in CallSession), never the signaling server — lib/webrtc/protocol.ts
+// is the server-validated vocabulary, this file is not. Adding a field here
+// needs no server change or deploy.
 
 /** The tracks of one screen share. `audio` is the tab/system sound the
  *  sharer opted into in the browser's picker — null when none came back.
  *  Both ride the screen's one carrier stream (see CallSession.screenCarrier),
- *  so the far side files them together under the screen tile; the scr/*
- *  announce below needs no audio field. */
+ *  so the far side files them together under the screen tile. */
 export interface ScreenTracks {
   video: MediaStreamTrack;
   audio: MediaStreamTrack | null;
 }
 
-export type ScreenMsg = { t: "scr/share"; streamId: string } | { t: "scr/stop" };
+/** `audio` on scr/share: whether THIS share carries sound. Needed because a
+ *  re-share re-arms parked senders in place — the far side's stream keeps
+ *  the audio track from an earlier audible share even when this one is
+ *  silent, so track presence there can't tell. Absent = a peer that
+ *  predates the flag (the receiver falls back to track presence). */
+export type ScreenMsg = { t: "scr/share"; streamId: string; audio?: boolean } | { t: "scr/stop" };
 
-export function buildScreenShareMsg(streamId: string): string {
-  return JSON.stringify({ t: "scr/share", v: 1, streamId });
+export function buildScreenShareMsg(streamId: string, audio?: boolean): string {
+  return JSON.stringify({ t: "scr/share", v: 1, streamId, ...(audio !== undefined ? { audio } : {}) });
+}
+
+/** Whether a remote screen should be treated as audible: the sharer's
+ *  announce when it gave one, track presence for a peer that predates it. */
+export function screenHasAudio(stream: MediaStream | null, announced: boolean | undefined): boolean {
+  if (!stream || stream.getAudioTracks().length === 0) return false;
+  return announced ?? true;
 }
 
 export function buildScreenStopMsg(): string {
@@ -42,7 +58,10 @@ export function parseScreenMsg(text: string): ScreenMsg | null {
   if (typeof t !== "string" || !t.startsWith("scr/")) return null;
   switch (t) {
     case "scr/share":
-      return typeof m.streamId === "string" ? { t: "scr/share", streamId: m.streamId } : null;
+      if (typeof m.streamId !== "string") return null;
+      return typeof m.audio === "boolean"
+        ? { t: "scr/share", streamId: m.streamId, audio: m.audio }
+        : { t: "scr/share", streamId: m.streamId };
     case "scr/stop":
       return { t: "scr/stop" };
     default:

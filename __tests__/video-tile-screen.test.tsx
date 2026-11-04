@@ -127,6 +127,38 @@ test("your own screen tile stays muted even when the capture has audio", async (
   expect(screen.queryByRole("button", { name: /mute/i })).toBeNull();
 });
 
+// The phantom-Mute fix: after an audible share is stopped and the screen is
+// re-shared SILENTLY, the parked sender leaves an audio track on the far
+// side's stream that carries nothing. The sharer's announce (screenAudio)
+// outranks track presence.
+test("a screen tile announced silent stays muted with no Mute control, even with an audio track present", async () => {
+  const { container } = render(
+    <VideoTile stream={fakeStream(true)} label="Agent 2's Screen" screenShare screenAudio={false} />,
+  );
+  const video = container.querySelector("video")!;
+
+  await waitFor(() => expect(mutedAtPlay.length).toBeGreaterThan(0));
+  expect(video.muted).toBe(true);
+  expect(mutedAtPlay).not.toContain(false);
+  expect(screen.queryByRole("button", { name: /^mute/i })).toBeNull();
+});
+
+test("a screen tile announced audible plays once its audio track is there", async () => {
+  const { container } = render(
+    <VideoTile stream={fakeStream(true)} label="Agent 2's Screen" screenShare screenAudio />,
+  );
+  await waitFor(() => expect(mutedAtPlay).toContain(false));
+  expect(container.querySelector("video")!.muted).toBe(false);
+});
+
+test("an audible announce with no audio track yet stays muted (nothing to play)", async () => {
+  const { container } = render(
+    <VideoTile stream={fakeStream(false)} label="Agent 2's Screen" screenShare screenAudio />,
+  );
+  await waitFor(() => expect(mutedAtPlay.length).toBeGreaterThan(0));
+  expect(container.querySelector("video")!.muted).toBe(true);
+});
+
 test("a remote screen tile without audio stays muted and offers no Mute control", async () => {
   const { container } = render(<VideoTile stream={fakeStream()} label="Agent 2's Screen" screenShare />);
   const video = container.querySelector("video")!;

@@ -99,6 +99,36 @@ describe("remote screen bookkeeping", () => {
     expect(peer.stream).toBeNull();
   });
 
+  // The phantom-Mute fix: a silent re-share reuses the stream (and its now
+  // carry-nothing audio track), so the announced flag is the only truth.
+  it("the announced audio flag rides the roster beside screenStream and follows each share", () => {
+    const { mesh, made, lastRoster } = harness();
+    mesh.addExistingPeers(["p1"]);
+    vi.runAllTimers();
+    const screen = streamWithId("scr-1");
+    made[0].events.onRemoteStream(screen);
+
+    mesh.setRemoteScreen("p1", "scr-1", true);
+    expect(lastRoster()[0]).toMatchObject({ screenStream: screen, screenAudio: true });
+
+    mesh.setRemoteScreen("p1", null);
+    expect(lastRoster()[0].screenAudio).toBeUndefined(); // no screen, no flag
+
+    mesh.setRemoteScreen("p1", "scr-1", false); // silent re-share, same stream
+    expect(lastRoster()[0]).toMatchObject({ screenStream: screen, screenAudio: false });
+  });
+
+  it("an announce without the flag (older peer) leaves screenAudio absent", () => {
+    const { mesh, made, lastRoster } = harness();
+    mesh.addExistingPeers(["p1"]);
+    vi.runAllTimers();
+    made[0].events.onRemoteStream(streamWithId("scr-1"));
+
+    mesh.setRemoteScreen("p1", "scr-1");
+
+    expect("screenAudio" in lastRoster()[0]).toBe(false);
+  });
+
   it("stream first, announce second: the camera keeps the face slot once the announce lands", () => {
     const { mesh, made, lastRoster } = harness();
     mesh.addExistingPeers(["p1"]);

@@ -680,7 +680,7 @@ describe("screen share on the real CallSession stack", () => {
     await session.startScreenShare(screen);
 
     expect(pc.addedTracks).toContain(screenTrack);
-    expect(cos.sent).toContain(buildScreenShareMsg("scr-me"));
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-me", false));
   });
 
   it("stopScreenShare announces the stop", async () => {
@@ -711,8 +711,8 @@ describe("screen share on the real CallSession stack", () => {
     const second = { id: "scr-second", getVideoTracks: () => [track2], getAudioTracks: () => [] } as unknown as MediaStream;
     await session.startScreenShare(second);
 
-    expect(cos.sent).toContain(buildScreenShareMsg("scr-first"));
-    expect(cos.sent).not.toContain(buildScreenShareMsg("scr-second"));
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-first", false));
+    expect(cos.sent).not.toContain(buildScreenShareMsg("scr-second", false));
     expect(pc.addedTracks.length).toBe(addsAfterFirst); // replaceTrack reuse — no second m-line
   });
 
@@ -733,7 +733,7 @@ describe("screen share on the real CallSession stack", () => {
     cos.onopen!();
     await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
 
-    expect(cos.sent).toContain(buildScreenShareMsg("scr-me")); // announced the moment it proved
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-me", false)); // announced the moment it proved
   });
 
   // Screen-share audio rides the SAME carrier stream as the screen video, so
@@ -789,7 +789,58 @@ describe("screen share on the real CallSession stack", () => {
     await session.startScreenShare(second);
 
     expect(pc.addedTracks).toContain(tabAudio);
-    expect(cos.sent).not.toContain(buildScreenShareMsg("scr-second"));
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-first", true));
+    expect(cos.sent).not.toContain(buildScreenShareMsg("scr-second", true));
+  });
+
+  // Phantom-Mute fix, sender side: every announce says whether THIS share
+  // carries sound — including a silent re-share riding a parked audio sender.
+  it("announces audio:true for an audible share and audio:false for a silent re-share", async () => {
+    const { cos } = await provenPair();
+    const tabAudio = { kind: "audio" } as MediaStreamTrack;
+    const audible = {
+      id: "scr-me",
+      getVideoTracks: () => [{ kind: "video" }],
+      getAudioTracks: () => [tabAudio],
+    } as unknown as MediaStream;
+    await session.startScreenShare(audible);
+    expect(cos.sent.at(-1)).toBe(buildScreenShareMsg("scr-me", true));
+    await session.stopScreenShare();
+
+    const silent = { id: "scr-2", getVideoTracks: () => [{ kind: "video" }], getAudioTracks: () => [] } as unknown as MediaStream;
+    await session.startScreenShare(silent);
+
+    expect(cos.sent.at(-1)).toBe(buildScreenShareMsg("scr-me", false));
+  });
+
+  it("a peer that proves mid-share hears the audio flag in its catch-up announce", async () => {
+    const ws = startAndOpen();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [] });
+    const screen = {
+      id: "scr-me",
+      getVideoTracks: () => [{ kind: "video" }],
+      getAudioTracks: () => [{ kind: "audio" }],
+    } as unknown as MediaStream;
+    await session.startScreenShare(screen);
+    ws.serverSays({ v: 1, t: "peer-joined", peerId: "p1" });
+    vi.advanceTimersByTime(STAGGER_MS);
+    const cos = cosChannelOf(FakePC.instances.at(-1)!);
+    wireHonestPeer(FAKE_CRYPTO.keys.proofKey, "p1", "me", cos);
+    cos.onopen!();
+    await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
+
+    expect(cos.sent).toContain(buildScreenShareMsg("scr-me", true));
+  });
+
+  it("a peer's announced audio flag reaches the roster", async () => {
+    const { pc, cos } = await provenPair();
+    cos.onmessage!({ data: buildScreenShareMsg("scr-1", false) });
+    const screen = { id: "scr-1", getTracks: () => [] } as unknown as MediaStream;
+    (pc.ontrack as (ev: unknown) => void)({ receiver: fakeReceiver(), streams: [screen] });
+
+    expect(rosters.at(-1)).toEqual([
+      { peerId: "p1", stream: null, screenStream: screen, screenAudio: false, connectionState: "new" },
+    ]);
   });
 
   it("the face stream never picks up the screen's audio: a remote screen with audio still files as screenStream", async () => {

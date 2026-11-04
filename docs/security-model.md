@@ -93,8 +93,23 @@ shared screen alike. Screen sharing adds up to two senders per link: the
 screen's video and, when the sharer ticks the browser's "Share tab/system
 audio" box, its audio. Both go through that funnel and every receiver gets the
 decrypt transform in `ontrack`, so screen audio is encrypted exactly like the
-mic. Screen audio is live-only: it rides the screen's own stream, and the
-podcast tape records only the camera track plus its own separate mic capture.
+mic.
+
+Screen audio is "live-only" in the **digital** sense only: it rides the screen's
+own stream, and the podcast tape records just the camera track plus its own
+separate mic capture, so no screen-audio sample is ever written into a take.
+That is not acoustic isolation. The tape mic runs with echo cancellation off
+(`lib/podcast/recordGraph.ts`), so screen audio playing through **speakers**
+— your own shared tab, or a peer's share — can bleed into the tape through the
+air. The room shows a headphones note while a take is in progress and screen
+audio is audible.
+
+Two capture-side guards keep the call's own audio from being re-broadcast:
+the Cone tab is excluded from the picker (`selfBrowserSurface: "exclude"`),
+and a whole-screen or window capture's system audio is dropped before sending
+unless the browser confirms `restrictOwnAudio` in the track's settings
+(otherwise that mix would include every remote voice this tab plays). Tab-audio
+captures are unaffected.
 
 ### Mutual join-proof gates all trust (`lib/webrtc/joinProof.ts`)
 

@@ -36,6 +36,7 @@ import { SELF_SPEAKER, useSpeakerLatch } from "@/hooks/useSpeakerLatch";
 import { mergePanel, useEpisodeExchange } from "@/hooks/useEpisodeExchange";
 import { getSessionSnapshot } from "@/lib/authApi";
 import type { CallStatus } from "@/lib/webrtc/session";
+import { screenHasAudio } from "@/lib/webrtc/screenShare";
 import {
   buildInviteLink,
   clearStashedRoomKeys,
@@ -577,15 +578,41 @@ export default function RoomPage() {
   const screenTiles = [
     ...call.peers.flatMap((p, i) =>
       p.screenStream
-        ? [{ key: `${p.peerId}-screen`, stream: p.screenStream, label: `${agentLabel(i)}'s Screen`, isSelf: false }]
+        ? [
+            {
+              key: `${p.peerId}-screen`,
+              stream: p.screenStream,
+              label: `${agentLabel(i)}'s Screen`,
+              isSelf: false,
+              screenAudio: p.screenAudio,
+            },
+          ]
         : [],
     ),
     // isSelf: the sharer already hears their own tab — the preview must never
     // play the shared audio back (a doubled, delayed copy and an echo source).
     ...(screenShare.sharing
-      ? [{ key: "your-screen", stream: screenShare.stream, label: "Your Screen", isSelf: true }]
+      ? [
+          {
+            key: "your-screen",
+            stream: screenShare.stream,
+            label: "Your Screen",
+            isSelf: true,
+            screenAudio: screenShare.audioShared,
+          },
+        ]
       : []),
   ];
+  // "Live only" is DIGITAL isolation — screen audio never enters the tape's
+  // tracks. Acoustics are another matter: the tape mic runs with echo
+  // cancellation off (lib/podcast/recordGraph.ts), so screen audio playing
+  // through speakers lands on the tape. Warn while that can actually happen:
+  // a take in progress AND audible screen sound in the room (your own share's,
+  // which you hear from the tab, or any peer's announced-audible share).
+  const screenAudioPlaying =
+    (screenShare.sharing && screenShare.audioShared) ||
+    call.peers.some((p) => screenHasAudio(p.screenStream ?? null, p.screenAudio));
+  const headphonesNote = takeInProgress && screenAudioPlaying;
 
   return (
     <div className="flex h-[calc(100svh-7rem)] min-h-[20rem] flex-col gap-3">
@@ -676,6 +703,7 @@ export default function RoomPage() {
                   stream={t.stream}
                   label={t.label}
                   isSelf={t.isSelf}
+                  screenAudio={t.screenAudio}
                   screenShare
                   fullscreenOverlay={faceThumbs}
                 />
@@ -720,13 +748,27 @@ export default function RoomPage() {
         sharing={screenShare.sharing}
         onToggleShare={() => (screenShare.sharing ? screenShare.stop() : void screenShare.start())}
       />
-      {screenShare.sharing && !screenShare.audioShared && (
+      {screenShare.sharing && screenShare.audioDropped && (
+        // The capture had system audio we refused to send (loopback guard,
+        // useScreenShare) — a different reason than "none came back", so a
+        // different note, never both.
+        <p role="status" className="font-body text-sm text-ink-soft">
+          ◇ Screen audio not shared — whole-screen sound would include the call itself and echo everyone
+          back to the room. To share sound, share a tab and tick &ldquo;Share tab audio&rdquo;.
+        </p>
+      )}
+      {screenShare.sharing && !screenShare.audioShared && !screenShare.audioDropped && (
         // Whether sound comes along is the browser's call (its picker's
         // checkbox; Safari/Firefox and macOS whole-screen offer none), so
         // the only honest move is to say so — quietly, body text not alarm.
         <p role="status" className="font-body text-sm text-ink-soft">
           ◇ No audio shared — the room sees your screen but can&apos;t hear it. In Chrome, share a tab and
           tick &ldquo;Share tab audio&rdquo;.
+        </p>
+      )}
+      {headphonesNote && (
+        <p role="status" className="font-body text-sm text-ink-soft">
+          ◇ Screen audio is playing — use headphones so it doesn&apos;t bleed into the tape.
         </p>
       )}
       {copyFailed && (

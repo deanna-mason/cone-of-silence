@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ScreenPort } from "@/hooks/useCallSession";
-import { getScreenStream, screenShareSupported } from "@/lib/webrtc/media";
+import { getScreenStream, screenAudioLoopbackRisk, screenShareSupported } from "@/lib/webrtc/media";
 
 export interface ScreenShareState {
   /** getDisplayMedia exists on this browser (it doesn't on phones). */
@@ -19,6 +19,11 @@ export interface ScreenShareState {
    *  checkbox, where the platform offers one). False while not sharing. The
    *  room page uses it to tell the sharer why nobody can hear the share. */
   audioShared: boolean;
+  /** The capture DID come back with audio, but it was dropped before
+   *  reaching anyone: whole-screen/window system audio without a confirmed
+   *  restrictOwnAudio would loop the call's own voices back to the room
+   *  (screenAudioLoopbackRisk). The room page explains it to the sharer. */
+  audioDropped: boolean;
   /** The live capture, for the local preview tile. */
   stream: MediaStream | null;
   start(): Promise<void>;
@@ -35,6 +40,7 @@ export function useScreenShare(screen: ScreenPort, active: boolean): ScreenShare
   const supported = useSyncExternalStore(noopSubscribe, screenShareSupported, () => false);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const [audioDropped, setAudioDropped] = useState(false);
 
   const stop = useCallback(() => {
     const s = streamRef.current;
@@ -45,12 +51,24 @@ export function useScreenShare(screen: ScreenPort, active: boolean): ScreenShare
     for (const track of s.getTracks()) track.stop(); // no-op on an already-ended track
     screen.stop();
     setStream(null);
+    setAudioDropped(false);
   }, [screen]);
 
   const start = useCallback(async () => {
     if (streamRef.current) return;
     const s = await getScreenStream();
     if (!s) return; // cancelled picker or unsupported — nothing to change
+    // Loopback guard: drop (stop + remove) system audio that could carry the
+    // call itself, BEFORE the session ever sees the stream — the picture
+    // still goes. Tab-audio captures are never at risk and pass untouched.
+    const dropAudio = screenAudioLoopbackRisk(s);
+    if (dropAudio) {
+      for (const track of s.getAudioTracks()) {
+        s.removeTrack(track);
+        track.stop();
+      }
+    }
+    setAudioDropped(dropAudio);
     streamRef.current = s;
     s.getVideoTracks()[0]?.addEventListener("ended", stop, { once: true });
     setStream(s);
@@ -66,5 +84,5 @@ export function useScreenShare(screen: ScreenPort, active: boolean): ScreenShare
   }, [active, stop]);
 
   const audioShared = stream !== null && stream.getAudioTracks().length > 0;
-  return { supported, sharing: stream !== null, audioShared, stream, start, stop };
+  return { supported, sharing: stream !== null, audioShared, audioDropped, stream, start, stop };
 }

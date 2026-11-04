@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { CAMERA_CROP, PANE, previewVideoBox } from "@/lib/podcast/episodeGeometry.mjs";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { screenHasAudio } from "@/lib/webrtc/screenShare";
 
 interface VideoTileProps {
   stream: MediaStream | null;
@@ -35,6 +36,11 @@ interface VideoTileProps {
    *  audio stays muted with no Mute control (nothing to restore). The
    *  sharer's own preview passes isSelf and never plays it back. */
   screenShare?: boolean;
+  /** Screen tiles: the sharer's announce of whether this share carries sound
+   *  (RemotePeer.screenAudio). Outranks track presence — a silent re-share
+   *  leaves an earlier share's parked, carry-nothing audio track on the
+   *  stream. Undefined (older peer) falls back to track presence. */
+  screenAudio?: boolean;
   /** Rendered inside the figure ONLY while this tile owns the browser's
    *  fullscreen (screen tiles only) — fullscreen shows just this subtree, so
    *  anything that must stay visible (the room's faces) has to ride along
@@ -104,6 +110,7 @@ export default function VideoTile({
   micCut = false,
   episodeFrame = false,
   screenShare = false,
+  screenAudio,
   fullscreenOverlay,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -120,10 +127,11 @@ export default function VideoTile({
   const [audio, setAudio] = useState<"on" | "muted" | "blocked">("on");
   // Whether this tile should ever play sound. Never your own (self preview,
   // your own screen). A face always may. A screen only once its stream
-  // actually carries audio — screen audio can arrive mid-share (a later
+  // carries audio AND its sharer announced this share audible (screenAudio)
+  // — screen audio can arrive mid-share (a later
   // renegotiation adds the track), and the addtrack re-render below
   // re-evaluates this.
-  const audible = !isSelf && (!screenShare || (stream !== null && stream.getAudioTracks().length > 0));
+  const audible = !isSelf && (!screenShare || screenHasAudio(stream, screenAudio));
 
   // Remote streams gain/lose tracks via ontrack/removetrack without any React
   // render — re-render on stream mutations so `covered` stays truthful.

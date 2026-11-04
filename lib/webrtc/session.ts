@@ -182,7 +182,8 @@ export class CallSession {
           // unproven peer can never file a screen.
           const scr = parseScreenMsg(text);
           if (scr) {
-            this.mesh.setRemoteScreen(peerId, scr.t === "scr/share" ? scr.streamId : null);
+            if (scr.t === "scr/share") this.mesh.setRemoteScreen(peerId, scr.streamId, scr.audio);
+            else this.mesh.setRemoteScreen(peerId, null);
             return;
           }
           this.events.emit("message", peerId, text);
@@ -344,7 +345,10 @@ export class CallSession {
         // now that sendTo passes the proven gate. Covers newcomers AND a 4C
         // rebuild's re-proof (the fresh link re-learns the screen id).
         if (this.activeScreen) {
-          this.mesh.sendTo(peerId, buildScreenShareMsg(this.activeScreen.stream.id));
+          this.mesh.sendTo(
+            peerId,
+            buildScreenShareMsg(this.activeScreen.stream.id, this.activeScreen.tracks.audio !== null),
+          );
         }
         // Replay whatever is CURRENTLY open, read from MESH — the same flags
         // openChannels()/remove()/rebuildLink() act on — rather than from a
@@ -509,7 +513,10 @@ export class CallSession {
     // the far side files the stream straight into the screen slot. (Either
     // order is still correct — mesh reconciles both — this just avoids the
     // one-frame face-slot flash.)
-    this.mesh.sendAll(buildScreenShareMsg(this.screenCarrier.id));
+    // The audio flag is the far side's only truth about sound: a silent
+    // re-share parks (not removes) the audio sender, so the remote stream
+    // keeps a carry-nothing audio track that must not earn a Mute button.
+    this.mesh.sendAll(buildScreenShareMsg(this.screenCarrier.id, audio !== null));
     await this.mesh.screenShareAll(tracks, this.screenCarrier);
   }
 

@@ -4,7 +4,7 @@
 // floating "Stop sharing" bar ends the track WITHOUT any click in our UI —
 // the `ended` listener is what keeps the far side's tile and our announce
 // honest in that case.
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { useScreenShare } from "@/hooks/useScreenShare";
 
@@ -12,6 +12,10 @@ class FakeTrack extends EventTarget {
   kind = "video";
   readyState = "live";
   stop = vi.fn();
+  settings: Record<string, unknown> = {};
+  getSettings() {
+    return this.settings;
+  }
 }
 
 class FakeScreenStream {
@@ -29,11 +33,21 @@ class FakeScreenStream {
   getAudioTracks() {
     return this.audio ? [this.audio] : [];
   }
+  removeTrack(t: FakeTrack) {
+    if (t === this.audio) this.audio = null;
+  }
 }
 
-function audioTrack() {
+function audioTrack(settings: Record<string, unknown> = {}) {
   const t = new FakeTrack();
   t.kind = "audio";
+  t.settings = settings;
+  return t;
+}
+
+function surface(displaySurface?: string) {
+  const t = new FakeTrack();
+  if (displaySurface) t.settings = { displaySurface };
   return t;
 }
 
@@ -162,6 +176,70 @@ test("the browser's Stop-sharing bar ends the audio track as well", async () => 
 
   expect(fake.audio!.stop).toHaveBeenCalled();
   expect(screenPort.stop).toHaveBeenCalled();
+});
+
+// System-audio loopback guard: a whole-screen or window capture with
+// system audio hears EVERYTHING the machine plays — including this tab's
+// playback of every remote voice — unless the browser confirms it honored
+// restrictOwnAudio. Sending that would echo each agent back to themselves,
+// so the sound is dropped before it reaches the session; a tab capture
+// (only that tab's sound) is never at risk and keeps its audio.
+describe("system-audio loopback guard", () => {
+  test.each(["monitor", "window"])(
+    "a %s capture whose audio doesn't confirm restrictOwnAudio drops the audio before sharing",
+    async (kind) => {
+      const audio = audioTrack({}); // restrictOwnAudio not reported
+      const fake = new FakeScreenStream(surface(kind), audio);
+      getDisplayMedia.mockResolvedValue(fake as unknown as MediaStream);
+      const view = mount();
+
+      await act(async () => view.result.current.start());
+
+      expect(audio.stop).toHaveBeenCalled();
+      const shared = screenPort.share.mock.calls[0][0] as MediaStream;
+      expect(shared.getAudioTracks()).toEqual([]);
+      expect(view.result.current.sharing).toBe(true); // the picture still goes
+      expect(view.result.current.audioShared).toBe(false);
+      expect(view.result.current.audioDropped).toBe(true);
+    },
+  );
+
+  test("a whole-screen capture that confirms restrictOwnAudio keeps its audio", async () => {
+    const audio = audioTrack({ restrictOwnAudio: true });
+    getDisplayMedia.mockResolvedValue(new FakeScreenStream(surface("monitor"), audio) as unknown as MediaStream);
+    const view = mount();
+
+    await act(async () => view.result.current.start());
+
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(view.result.current.audioShared).toBe(true);
+    expect(view.result.current.audioDropped).toBe(false);
+  });
+
+  test.each([["browser"], [undefined]])(
+    "a tab capture (or one that reports no surface, e.g. a synthetic stream) keeps its audio: %s",
+    async (kind) => {
+      const audio = audioTrack({});
+      getDisplayMedia.mockResolvedValue(new FakeScreenStream(surface(kind), audio) as unknown as MediaStream);
+      const view = mount();
+
+      await act(async () => view.result.current.start());
+
+      expect(audio.stop).not.toHaveBeenCalled();
+      expect(view.result.current.audioShared).toBe(true);
+      expect(view.result.current.audioDropped).toBe(false);
+    },
+  );
+
+  test("audioDropped clears when the share stops", async () => {
+    getDisplayMedia.mockResolvedValue(new FakeScreenStream(surface("monitor"), audioTrack({})) as unknown as MediaStream);
+    const view = mount();
+    await act(async () => view.result.current.start());
+
+    act(() => view.result.current.stop());
+
+    expect(view.result.current.audioDropped).toBe(false);
+  });
 });
 
 test("supported mirrors getDisplayMedia's presence", () => {

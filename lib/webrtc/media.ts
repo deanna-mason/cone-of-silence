@@ -157,6 +157,29 @@ export const SCREEN_CAPTURE_OPTIONS: ScreenCaptureOptions = {
 };
 
 /**
+ * Whether a capture's audio could carry the call itself back out. A tab
+ * capture ("browser" surface) records only that tab — never this one,
+ * selfBrowserSurface keeps the Cone tab out of the picker. A whole-screen or
+ * window capture's audio is SYSTEM audio: everything the machine plays,
+ * including this tab's playback of every remote voice, unless the browser
+ * honored restrictOwnAudio — and the only proof of that is the track's own
+ * settings reporting it true (an unsupporting browser silently ignores the
+ * constraint). Sending such audio would echo each agent back to themselves.
+ *
+ * A capture whose video reports no displaySurface at all (a synthetic
+ * stream; every browser that can capture screen audio reports it) is not
+ * flagged — there is no system mix to loop.
+ */
+export function screenAudioLoopbackRisk(stream: MediaStream): boolean {
+  const audio = stream.getAudioTracks()[0];
+  if (!audio) return false;
+  const surface = (stream.getVideoTracks()[0]?.getSettings() as { displaySurface?: string } | undefined)
+    ?.displaySurface;
+  if (surface !== "monitor" && surface !== "window") return false;
+  return (audio.getSettings() as { restrictOwnAudio?: boolean }).restrictOwnAudio !== true;
+}
+
+/**
  * Acquire a screen capture, or null. Unlike getUserMedia, a NotAllowedError
  * here is the user closing the browser's picker — the normal way to change
  * your mind — so nothing on this path is an error card: a stream, or null.

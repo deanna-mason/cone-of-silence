@@ -21,6 +21,12 @@ export interface RemotePeer {
    *  RemotePeer literals (tests, fixtures) stay valid; the mesh itself
    *  always emits it. */
   screenStream?: MediaStream | null;
+  /** Whether the current share carries sound, as the SHARER announced it
+   *  (scr/share audio). Present only beside screenStream, and only when the
+   *  sharer sent the flag — absent from a peer that predates it. Tracks
+   *  can't tell: a silent re-share leaves the earlier share's parked audio
+   *  track on the stream. */
+  screenAudio?: boolean;
 }
 
 /** The slice of PeerLink the mesh drives — tests substitute fakes. */
@@ -129,6 +135,8 @@ interface Entry {
    *  fresh `track` event ever re-delivers the stream — re-filing what we
    *  kept is the only way the tile comes back (8/11 live-test regression). */
   screenIds: Set<string>;
+  /** The current share's announced audio flag (undefined: not sent / no share). */
+  screenAudio: boolean | undefined;
   /** Derived: streams[screenStreamId] when both halves have arrived. */
   screenStream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
@@ -208,7 +216,9 @@ export class Mesh {
         // Present only while a screen is actually on the table — absent
         // otherwise, so every predating exact-shape roster assertion (and
         // consumer) sees the identical object it always did (additivity).
-        ...(e.screenStream ? { screenStream: e.screenStream } : {}),
+        ...(e.screenStream
+          ? { screenStream: e.screenStream, ...(e.screenAudio !== undefined ? { screenAudio: e.screenAudio } : {}) }
+          : {}),
         connectionState: e.connectionState,
       }));
   }
@@ -367,7 +377,7 @@ export class Mesh {
    *  re-files whatever streams have already arrived, and a later `track`
    *  event re-derives against this id. No-op on an unknown peer (already
    *  torn down — its announce is a straggler). */
-  setRemoteScreen(peerId: string, streamId: string | null): void {
+  setRemoteScreen(peerId: string, streamId: string | null, audio?: boolean): void {
     const entry = this.entries.get(peerId);
     if (!entry) return;
     // The stream stays FILED on a stop (see screenIds' doc — a re-share
@@ -375,6 +385,7 @@ export class Mesh {
     // the face slot forever.
     if (streamId !== null) entry.screenIds.add(streamId);
     entry.screenStreamId = streamId;
+    entry.screenAudio = streamId !== null ? audio : undefined;
     this.deriveStreams(entry);
     this.emitRoster();
   }
@@ -464,6 +475,7 @@ export class Mesh {
       stream: null,
       streams: new Map(),
       screenStreamId: null,
+      screenAudio: undefined,
       screenIds: new Set(),
       screenStream: null,
       connectionState: "new",
