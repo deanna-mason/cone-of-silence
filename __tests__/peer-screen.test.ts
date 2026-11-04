@@ -326,6 +326,56 @@ describe("screen-share audio", () => {
     expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(null);
   });
 
+  // Race fix: stop used to await each replaceTrack(null) in turn, so a start
+  // landing between them re-armed video, then had its fresh audio parked by
+  // stop's second, late swap. Every swap now issues in one synchronous pass,
+  // and replaceTrack runs in call order on the pc — so the later start wins.
+  it("a start racing a stop is never half-parked: the stop's swaps all issue before the start's", async () => {
+    const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
+    const v1 = screenTrack();
+    const a1 = live("audio");
+    const carrier = streamOf([v1, a1]);
+    await share(link, v1, a1, carrier);
+    const videoSender = pc.senders.find((s) => s.track === v1)!;
+    const audioSender = pc.senders.find((s) => s.track === a1)!;
+    // Swaps that settle only when released, so the two calls overlap.
+    const order: [string, unknown][] = [];
+    const gates: (() => void)[] = [];
+    for (const [name, sender] of [
+      ["video", videoSender],
+      ["audio", audioSender],
+    ] as const) {
+      sender.replaceTrack.mockImplementation((track: Track | null) => {
+        order.push([name, track]);
+        return new Promise<void>((resolve) =>
+          gates.push(() => {
+            sender.track = track;
+            resolve();
+          }),
+        );
+      });
+    }
+
+    const stopping = link.stopScreenShare();
+    const v2 = screenTrack();
+    const a2 = live("audio");
+    const starting = share(link, v2, a2, carrier);
+    for (let i = 0; i < 20; i++) {
+      while (gates.length) gates.shift()!();
+      await Promise.resolve(); // let any late (serially-awaited) swap issue
+    }
+    await Promise.all([stopping, starting]);
+
+    expect(order).toEqual([
+      ["video", null],
+      ["audio", null],
+      ["video", v2],
+      ["audio", a2],
+    ]);
+    expect(audioSender.track).toBe(a2);
+    expect(videoSender.track).toBe(v2);
+  });
+
   it("a mic switch never lands on the screen audio sender, live or stopped", async () => {
     const { link, pc } = buildLink(streamOf([live("audio"), live("video")]));
     const micSender = pc.senders[0];

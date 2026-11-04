@@ -325,7 +325,13 @@ export class PeerLink {
    *  replaceStream's null-swap) and the senders stay parked for the next
    *  share. */
   async stopScreenShare(): Promise<void> {
-    for (const sender of this.screenSenders) await sender.replaceTrack(null);
+    // All swaps issue in ONE synchronous pass, never awaited one by one: a
+    // start arriving mid-stop would otherwise re-arm the video, then have
+    // its fresh audio parked by stop's second, late swap. replaceTrack runs
+    // in call order on the pc, so whichever of start/stop was called last
+    // wins on every sender — the same synchronous-issue rule startScreenShare
+    // follows.
+    await Promise.all([...this.screenSenders].map((sender) => sender.replaceTrack(null)));
   }
 
   /** Device switch: swap sender tracks in place, and ADD a sender for any
