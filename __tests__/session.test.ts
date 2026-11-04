@@ -675,7 +675,7 @@ describe("screen share on the real CallSession stack", () => {
   it("startScreenShare hands the track to live links and announces the stream id", async () => {
     const { pc, cos } = await provenPair();
     const screenTrack = { kind: "video" } as MediaStreamTrack;
-    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack] } as unknown as MediaStream;
+    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack], getAudioTracks: () => [] } as unknown as MediaStream;
 
     await session.startScreenShare(screen);
 
@@ -686,7 +686,7 @@ describe("screen share on the real CallSession stack", () => {
   it("stopScreenShare announces the stop", async () => {
     const { cos } = await provenPair();
     const screenTrack = { kind: "video" } as MediaStreamTrack;
-    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack] } as unknown as MediaStream;
+    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack], getAudioTracks: () => [] } as unknown as MediaStream;
     await session.startScreenShare(screen);
 
     await session.stopScreenShare();
@@ -702,13 +702,13 @@ describe("screen share on the real CallSession stack", () => {
   it("a re-share announces the SAME carrier id and reuses the negotiated sender", async () => {
     const { pc, cos } = await provenPair();
     const track1 = { kind: "video" } as MediaStreamTrack;
-    const first = { id: "scr-first", getVideoTracks: () => [track1] } as unknown as MediaStream;
+    const first = { id: "scr-first", getVideoTracks: () => [track1], getAudioTracks: () => [] } as unknown as MediaStream;
     await session.startScreenShare(first);
     await session.stopScreenShare();
     const addsAfterFirst = pc.addedTracks.length;
 
     const track2 = { kind: "video" } as MediaStreamTrack;
-    const second = { id: "scr-second", getVideoTracks: () => [track2] } as unknown as MediaStream;
+    const second = { id: "scr-second", getVideoTracks: () => [track2], getAudioTracks: () => [] } as unknown as MediaStream;
     await session.startScreenShare(second);
 
     expect(cos.sent).toContain(buildScreenShareMsg("scr-first"));
@@ -720,7 +720,7 @@ describe("screen share on the real CallSession stack", () => {
     const ws = startAndOpen();
     ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [] });
     const screenTrack = { kind: "video" } as MediaStreamTrack;
-    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack] } as unknown as MediaStream;
+    const screen = { id: "scr-me", getVideoTracks: () => [screenTrack], getAudioTracks: () => [] } as unknown as MediaStream;
     await session.startScreenShare(screen); // sharing into an empty room — nobody to reach yet
 
     ws.serverSays({ v: 1, t: "peer-joined", peerId: "p1" });
@@ -734,5 +734,74 @@ describe("screen share on the real CallSession stack", () => {
     await waitFor(() => rosters.at(-1)?.some((p) => p.peerId === "p1") ?? false);
 
     expect(cos.sent).toContain(buildScreenShareMsg("scr-me")); // announced the moment it proved
+  });
+
+  // Screen-share audio rides the SAME carrier stream as the screen video, so
+  // the far side's screen tile (filed by that one stream id) plays it.
+  it("a share with tab audio hands BOTH tracks to live links", async () => {
+    const { pc } = await provenPair();
+    const screenTrack = { kind: "video" } as MediaStreamTrack;
+    const tabAudio = { kind: "audio" } as MediaStreamTrack;
+    const screen = {
+      id: "scr-me",
+      getVideoTracks: () => [screenTrack],
+      getAudioTracks: () => [tabAudio],
+    } as unknown as MediaStream;
+
+    await session.startScreenShare(screen);
+
+    expect(pc.addedTracks).toContain(screenTrack);
+    expect(pc.addedTracks).toContain(tabAudio);
+  });
+
+  it("a newcomer mid-share inherits the screen audio at construction too", async () => {
+    const ws = startAndOpen();
+    ws.serverSays({ v: 1, t: "joined", selfId: "me", peers: [] });
+    const screenTrack = { kind: "video" } as MediaStreamTrack;
+    const tabAudio = { kind: "audio" } as MediaStreamTrack;
+    const screen = {
+      id: "scr-me",
+      getVideoTracks: () => [screenTrack],
+      getAudioTracks: () => [tabAudio],
+    } as unknown as MediaStream;
+    await session.startScreenShare(screen);
+
+    ws.serverSays({ v: 1, t: "peer-joined", peerId: "p1" });
+    vi.advanceTimersByTime(STAGGER_MS);
+
+    expect(FakePC.instances.at(-1)!.addedTracks).toEqual(expect.arrayContaining([screenTrack, tabAudio]));
+  });
+
+  it("an audible re-share after a silent one adds the audio track and still announces the carrier id", async () => {
+    const { pc, cos } = await provenPair();
+    const track1 = { kind: "video" } as MediaStreamTrack;
+    const first = { id: "scr-first", getVideoTracks: () => [track1], getAudioTracks: () => [] } as unknown as MediaStream;
+    await session.startScreenShare(first);
+    await session.stopScreenShare();
+
+    const track2 = { kind: "video" } as MediaStreamTrack;
+    const tabAudio = { kind: "audio" } as MediaStreamTrack;
+    const second = {
+      id: "scr-second",
+      getVideoTracks: () => [track2],
+      getAudioTracks: () => [tabAudio],
+    } as unknown as MediaStream;
+    await session.startScreenShare(second);
+
+    expect(pc.addedTracks).toContain(tabAudio);
+    expect(cos.sent).not.toContain(buildScreenShareMsg("scr-second"));
+  });
+
+  it("the face stream never picks up the screen's audio: a remote screen with audio still files as screenStream", async () => {
+    const { pc, cos } = await provenPair();
+    cos.onmessage!({ data: buildScreenShareMsg("scr-1") });
+    const screen = { id: "scr-1", getTracks: () => [] } as unknown as MediaStream;
+    const fire = pc.ontrack as (ev: unknown) => void;
+    fire({ receiver: fakeReceiver(), streams: [screen] }); // video
+    fire({ receiver: fakeReceiver(), streams: [screen] }); // audio, same msid
+
+    expect(rosters.at(-1)).toEqual([
+      { peerId: "p1", stream: null, screenStream: screen, connectionState: "new" },
+    ]);
   });
 });

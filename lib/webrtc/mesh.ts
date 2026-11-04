@@ -9,6 +9,7 @@
 // import peer.ts directly for these shared vocabulary types (Phase 5B).
 export type { ChannelName, ChannelLifecycle } from "./peer";
 import type { ChannelName, ChannelLifecycle } from "./peer";
+import type { ScreenTracks } from "./screenShare";
 
 export interface RemotePeer {
   peerId: string;
@@ -33,7 +34,7 @@ export interface MeshLink {
   xferBufferedAmount(): number;
   /** Screen-share fan-out (both optional so predating fakes stay valid —
    *  same additivity stance as RemotePeer.screenStream). */
-  startScreenShare?(track: MediaStreamTrack, stream: MediaStream): Promise<void>;
+  startScreenShare?(tracks: ScreenTracks, stream: MediaStream): Promise<void>;
   stopScreenShare?(): Promise<void>;
 }
 
@@ -350,9 +351,9 @@ export class Mesh {
   /** Screen share: hand the screen track to every BUILT link. Links still
    *  awaiting construction are skipped, same as replaceStreamAll — the
    *  session gives a late-built link the active screen at construction. */
-  async screenShareAll(track: MediaStreamTrack, stream: MediaStream): Promise<void> {
+  async screenShareAll(tracks: ScreenTracks, stream: MediaStream): Promise<void> {
     const links = [...this.entries.values()].map((e) => e.link).filter((l) => l !== null);
-    await Promise.all(links.map((l) => l.startScreenShare?.(track, stream)));
+    await Promise.all(links.map((l) => l.startScreenShare?.(tracks, stream)));
   }
 
   async stopScreenShareAll(): Promise<void> {

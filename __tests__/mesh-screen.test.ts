@@ -6,6 +6,7 @@
 // announce-then-track and track-then-announce are both legal orders).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Mesh, type LinkEvents, type MeshLink, type RemotePeer } from "@/lib/webrtc/mesh";
+import type { ScreenTracks } from "@/lib/webrtc/screenShare";
 
 class FakeLink implements MeshLink {
   handleSignal = vi.fn(async (_payload: string) => {});
@@ -15,7 +16,7 @@ class FakeLink implements MeshLink {
   send = vi.fn(() => true);
   sendXfer = vi.fn(() => true);
   xferBufferedAmount = vi.fn(() => 0);
-  startScreenShare = vi.fn(async (_track: MediaStreamTrack, _stream: MediaStream) => {});
+  startScreenShare = vi.fn(async (_tracks: ScreenTracks, _stream: MediaStream) => {});
   stopScreenShare = vi.fn(async () => {});
 }
 
@@ -48,6 +49,7 @@ function harness() {
 
 const streamWithId = (id: string): MediaStream => ({ id }) as unknown as MediaStream;
 const fakeTrack = {} as MediaStreamTrack;
+const fakeAudio = { kind: "audio" } as MediaStreamTrack;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -65,10 +67,10 @@ describe("screenShareAll / stopScreenShareAll", () => {
     mesh.addNewcomer("p3"); // timer NOT run — link is null
 
     const screen = streamWithId("scr-1");
-    await mesh.screenShareAll(fakeTrack, screen);
+    await mesh.screenShareAll({ video: fakeTrack, audio: fakeAudio }, screen);
 
     expect(made).toHaveLength(2);
-    for (const m of made) expect(m.link.startScreenShare).toHaveBeenCalledWith(fakeTrack, screen);
+    for (const m of made) expect(m.link.startScreenShare).toHaveBeenCalledWith({ video: fakeTrack, audio: fakeAudio }, screen);
   });
 
   it("stop forwards the same way", async () => {

@@ -15,6 +15,10 @@ export interface ScreenShareState {
   /** getDisplayMedia exists on this browser (it doesn't on phones). */
   supported: boolean;
   sharing: boolean;
+  /** Whether the live capture carries tab/system audio (the browser picker's
+   *  checkbox, where the platform offers one). False while not sharing. The
+   *  room page uses it to tell the sharer why nobody can hear the share. */
+  audioShared: boolean;
   /** The live capture, for the local preview tile. */
   stream: MediaStream | null;
   start(): Promise<void>;
@@ -36,6 +40,8 @@ export function useScreenShare(screen: ScreenPort, active: boolean): ScreenShare
     const s = streamRef.current;
     if (!s) return;
     streamRef.current = null;
+    // Every track — the picture AND any tab/system audio — so a stop never
+    // leaves the browser capturing sound nobody is sending.
     for (const track of s.getTracks()) track.stop(); // no-op on an already-ended track
     screen.stop();
     setStream(null);
@@ -59,5 +65,6 @@ export function useScreenShare(screen: ScreenPort, active: boolean): ScreenShare
     return stop;
   }, [active, stop]);
 
-  return { supported, sharing: stream !== null, stream, start, stop };
+  const audioShared = stream !== null && stream.getAudioTracks().length > 0;
+  return { supported, sharing: stream !== null, audioShared, stream, start, stop };
 }

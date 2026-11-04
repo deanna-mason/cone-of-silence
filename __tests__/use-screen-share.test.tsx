@@ -16,13 +16,25 @@ class FakeTrack extends EventTarget {
 
 class FakeScreenStream {
   id = "scr-fake";
-  constructor(public track = new FakeTrack()) {}
+  constructor(
+    public track = new FakeTrack(),
+    public audio: FakeTrack | null = null,
+  ) {}
   getTracks() {
-    return [this.track];
+    return this.audio ? [this.track, this.audio] : [this.track];
   }
   getVideoTracks() {
     return [this.track];
   }
+  getAudioTracks() {
+    return this.audio ? [this.audio] : [];
+  }
+}
+
+function audioTrack() {
+  const t = new FakeTrack();
+  t.kind = "audio";
+  return t;
 }
 
 const getDisplayMedia = vi.fn<() => Promise<MediaStream>>();
@@ -107,6 +119,49 @@ test("leaving the room (active → false) ends the capture", async () => {
   expect(fake.track.stop).toHaveBeenCalled();
   expect(screenPort.stop).toHaveBeenCalled();
   expect(view.result.current.sharing).toBe(false);
+});
+
+// The sharer's "no audio shared" note keys off this: the browser decides
+// (picker checkbox, platform support), so the only truth is the capture.
+test("audioShared reports whether the capture came back with an audio track", async () => {
+  const silent = new FakeScreenStream();
+  getDisplayMedia.mockResolvedValue(silent as unknown as MediaStream);
+  const view = mount();
+  expect(view.result.current.audioShared).toBe(false); // nothing live yet
+
+  await act(async () => view.result.current.start());
+  expect(view.result.current.audioShared).toBe(false);
+
+  act(() => view.result.current.stop());
+  getDisplayMedia.mockResolvedValue(new FakeScreenStream(new FakeTrack(), audioTrack()) as unknown as MediaStream);
+  await act(async () => view.result.current.start());
+  expect(view.result.current.audioShared).toBe(true);
+});
+
+test("stop ends the screen AUDIO track too, not just the picture", async () => {
+  const fake = new FakeScreenStream(new FakeTrack(), audioTrack());
+  getDisplayMedia.mockResolvedValue(fake as unknown as MediaStream);
+  const view = mount();
+  await act(async () => view.result.current.start());
+
+  act(() => view.result.current.stop());
+
+  expect(fake.audio!.stop).toHaveBeenCalled();
+  expect(view.result.current.audioShared).toBe(false);
+});
+
+test("the browser's Stop-sharing bar ends the audio track as well", async () => {
+  const fake = new FakeScreenStream(new FakeTrack(), audioTrack());
+  getDisplayMedia.mockResolvedValue(fake as unknown as MediaStream);
+  const view = mount();
+  await act(async () => view.result.current.start());
+
+  act(() => {
+    fake.track.dispatchEvent(new Event("ended"));
+  });
+
+  expect(fake.audio!.stop).toHaveBeenCalled();
+  expect(screenPort.stop).toHaveBeenCalled();
 });
 
 test("supported mirrors getDisplayMedia's presence", () => {

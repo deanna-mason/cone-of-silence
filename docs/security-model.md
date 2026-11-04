@@ -87,6 +87,15 @@ short input, bad/tampered tag, wrong key — and the worker transform **drops th
 frame** (black tile) rather than throwing or ever forwarding plaintext. There is
 no plaintext-fallback path in production.
 
+Every sender is created through one funnel (`PeerLink.addLocalTrack`), which
+attaches the encrypt transform before the track can send — camera, mic, and a
+shared screen alike. Screen sharing adds up to two senders per link: the
+screen's video and, when the sharer ticks the browser's "Share tab/system
+audio" box, its audio. Both go through that funnel and every receiver gets the
+decrypt transform in `ontrack`, so screen audio is encrypted exactly like the
+mic. Screen audio is live-only: it rides the screen's own stream, and the
+podcast tape records only the camera track plus its own separate mic capture.
+
 ### Mutual join-proof gates all trust (`lib/webrtc/joinProof.ts`)
 
 Before either side trusts a peer, **both** challenge each other with a random

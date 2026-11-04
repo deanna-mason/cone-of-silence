@@ -19,13 +19,30 @@ beforeEach(() => {
   });
 });
 
-test("requests video only — screen audio never enters the call's audio path", async () => {
+// Screen audio is opt-in through the BROWSER's own picker checkbox ("Share
+// tab audio" / "Share system audio"), so it is always requested and never a
+// Cone toggle. The audio constraints keep the shared sound as-is (voice DSP
+// mangles music/video) and keep the call itself out of it: our own tab is
+// excluded from the picker and from system-audio capture, or every remote
+// voice the sharer hears would be sent straight back to its owner.
+test("requests video plus browser-opt-in audio, with the call's own audio kept out", async () => {
   getDisplayMedia.mockResolvedValue(fakeStream);
 
   const stream = await getScreenStream();
 
   expect(stream).toBe(fakeStream);
-  expect(getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: false });
+  expect(getDisplayMedia).toHaveBeenCalledOnce();
+  const opts = getDisplayMedia.mock.calls[0][0] as Record<string, unknown>;
+  expect(opts.video).toBe(true);
+  expect(opts.systemAudio).toBe("include");
+  expect(opts.selfBrowserSurface).toBe("exclude");
+  expect(opts.audio).toEqual({
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    suppressLocalAudioPlayback: false,
+    restrictOwnAudio: true,
+  });
 });
 
 test("a cancelled picker (NotAllowedError) is null, not a throw", async () => {

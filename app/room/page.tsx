@@ -577,11 +577,13 @@ export default function RoomPage() {
   const screenTiles = [
     ...call.peers.flatMap((p, i) =>
       p.screenStream
-        ? [{ key: `${p.peerId}-screen`, stream: p.screenStream, label: `${agentLabel(i)}'s Screen` }]
+        ? [{ key: `${p.peerId}-screen`, stream: p.screenStream, label: `${agentLabel(i)}'s Screen`, isSelf: false }]
         : [],
     ),
+    // isSelf: the sharer already hears their own tab — the preview must never
+    // play the shared audio back (a doubled, delayed copy and an echo source).
     ...(screenShare.sharing
-      ? [{ key: "your-screen", stream: screenShare.stream, label: "Your Screen" }]
+      ? [{ key: "your-screen", stream: screenShare.stream, label: "Your Screen", isSelf: true }]
       : []),
   ];
 
@@ -673,6 +675,7 @@ export default function RoomPage() {
                   fill
                   stream={t.stream}
                   label={t.label}
+                  isSelf={t.isSelf}
                   screenShare
                   fullscreenOverlay={faceThumbs}
                 />
@@ -717,6 +720,15 @@ export default function RoomPage() {
         sharing={screenShare.sharing}
         onToggleShare={() => (screenShare.sharing ? screenShare.stop() : void screenShare.start())}
       />
+      {screenShare.sharing && !screenShare.audioShared && (
+        // Whether sound comes along is the browser's call (its picker's
+        // checkbox; Safari/Firefox and macOS whole-screen offer none), so
+        // the only honest move is to say so — quietly, body text not alarm.
+        <p role="status" className="font-body text-sm text-ink-soft">
+          ◇ No audio shared — the room sees your screen but can&apos;t hear it. In Chrome, share a tab and
+          tick &ldquo;Share tab audio&rdquo;.
+        </p>
+      )}
       {copyFailed && (
         <p role="alert" className="kicker text-vermilion">
           ✕ Clipboard blocked — copy the invite link manually.

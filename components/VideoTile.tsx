@@ -29,9 +29,11 @@ interface VideoTileProps {
    *  composites with, so the preview and the final cut cannot drift. */
   episodeFrame?: boolean;
   /** A shared screen, not a face: letterbox (object-contain — cover-cropping
-   *  a document amputates its edges), keep playback muted (the track carries
-   *  no audio, so there is nothing to restore), and offer no per-agent Mute
-   *  control. */
+   *  a document amputates its edges). Audio follows the stream: a share that
+   *  carries tab/system audio plays it on a remote tile exactly like a face's
+   *  voice (unmuted, per-tile Mute, Restore Audio fallback); a share without
+   *  audio stays muted with no Mute control (nothing to restore). The
+   *  sharer's own preview passes isSelf and never plays it back. */
   screenShare?: boolean;
   /** Rendered inside the figure ONLY while this tile owns the browser's
    *  fullscreen (screen tiles only) — fullscreen shows just this subtree, so
@@ -116,6 +118,12 @@ export default function VideoTile({
   // browsers require for unmuted playback. "blocked" is the rare fallback
   // when a browser still refuses — muted playback + a Restore Audio gesture.
   const [audio, setAudio] = useState<"on" | "muted" | "blocked">("on");
+  // Whether this tile should ever play sound. Never your own (self preview,
+  // your own screen). A face always may. A screen only once its stream
+  // actually carries audio — screen audio can arrive mid-share (a later
+  // renegotiation adds the track), and the addtrack re-render below
+  // re-evaluates this.
+  const audible = !isSelf && (!screenShare || (stream !== null && stream.getAudioTracks().length > 0));
 
   // Remote streams gain/lose tracks via ontrack/removetrack without any React
   // render — re-render on stream mutations so `covered` stays truthful.
@@ -149,7 +157,7 @@ export default function VideoTile({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.muted = isSelf || screenShare || audio !== "on";
+    video.muted = !audible || audio !== "on";
     if (stream && !video.muted) {
       video.play().catch((err: unknown) => {
         if ((err as DOMException)?.name !== "NotAllowedError") return;
@@ -161,7 +169,7 @@ export default function VideoTile({
         setAudio("blocked");
       });
     }
-  }, [stream, isSelf, screenShare, audio]);
+  }, [stream, audible, audio]);
 
   useEffect(() => {
     if (!screenShare) return;
@@ -227,7 +235,7 @@ export default function VideoTile({
               autoPlay
               playsInline
               style={episodeVideoStyle(episodeFrame && !screenShare)}
-              className={`h-full w-full ${screenShare ? "object-contain" : "object-cover"} ${mirrored ? "-scale-x-100" : ""} ${covered ? "invisible" : ""} ${audio === "muted" ? "brightness-[.85] saturate-[.6]" : ""}`}
+              className={`h-full w-full ${screenShare ? "object-contain" : "object-cover"} ${mirrored ? "-scale-x-100" : ""} ${covered ? "invisible" : ""} ${audio === "muted" && !screenShare ? "brightness-[.85] saturate-[.6]" : ""}`}
             />
           </div>
         </div>
@@ -259,33 +267,39 @@ export default function VideoTile({
           Your Mic Is Cut
         </p>
       )}
-      {screenShare && stream && (
-        <button
-          type="button"
-          onClick={toggleFullscreen}
-          aria-label={fullscreen ? "Exit full screen" : `View ${label} full screen`}
-          className="kicker absolute right-2 top-2 border border-brass bg-field/80 px-3 py-1.5 text-ink-soft transition hover:text-signal"
-        >
-          {fullscreen ? "✕ Exit Full Screen" : "⛶ Full Screen"}
-        </button>
+      {stream && (screenShare || (audible && audio !== "blocked")) && (
+        // One top-right control cluster: a face's Mute, or a screen's Mute
+        // (only when it carries audio) beside its Full Screen toggle.
+        <div className="absolute right-2 top-2 flex items-center gap-2">
+          {audible && audio !== "blocked" && (
+            <button
+              type="button"
+              onClick={() => setAudio(audio === "muted" ? "on" : "muted")}
+              // Every remote tile's Mute button read as the same control to a
+              // screen reader; the label names which agent (or screen) it silences.
+              aria-label={audio === "muted" ? `Unmute ${label}` : `Mute ${label}`}
+              className={`kicker border bg-field/80 px-3 py-1.5 transition hover:text-signal ${
+                audio === "muted"
+                  ? "border-vermilion/60 text-vermilion"
+                  : "border-brass text-ink-soft"
+              }`}
+            >
+              {audio === "muted" ? "◇ Muted — Unmute" : "Mute"}
+            </button>
+          )}
+          {screenShare && (
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              aria-label={fullscreen ? "Exit full screen" : `View ${label} full screen`}
+              className="kicker border border-brass bg-field/80 px-3 py-1.5 text-ink-soft transition hover:text-signal"
+            >
+              {fullscreen ? "✕ Exit Full Screen" : "⛶ Full Screen"}
+            </button>
+          )}
+        </div>
       )}
-      {!isSelf && !screenShare && stream && audio !== "blocked" && (
-        <button
-          type="button"
-          onClick={() => setAudio(audio === "muted" ? "on" : "muted")}
-          // Every remote tile's Mute button read as the same control to a
-          // screen reader; the label names which agent it silences.
-          aria-label={audio === "muted" ? `Unmute ${label}` : `Mute ${label}`}
-          className={`kicker absolute right-2 top-2 border bg-field/80 px-3 py-1.5 transition hover:text-signal ${
-            audio === "muted"
-              ? "border-vermilion/60 text-vermilion"
-              : "border-brass text-ink-soft"
-          }`}
-        >
-          {audio === "muted" ? "◇ Muted — Unmute" : "Mute"}
-        </button>
-      )}
-      {!isSelf && !screenShare && stream && audio === "blocked" && (
+      {audible && stream && audio === "blocked" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-reveal/30 p-3 text-center">
           <p className="kicker text-vermilion">◈ Audio Blocked by Browser</p>
           <button
